@@ -57,7 +57,9 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
+            // 禁用代码和资源压缩
             isMinifyEnabled = false
+            isShrinkResources = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
