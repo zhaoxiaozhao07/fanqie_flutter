@@ -1,3 +1,6 @@
+# Agent 工作流文档（不应提交）
+.agent/
+
 # Miscellaneous
 *.class
 *.log
