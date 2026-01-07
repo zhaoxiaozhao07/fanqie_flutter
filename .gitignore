@@ -1,0 +1,89 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# The .vscode folder contains launch configuration and tasks you configure in
+# VS Code which you may wish to be included in version control, so this line
+# is commented out by default.
+#.vscode/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# =========================
+# 签名和敏感信息 (Secrets)
+# =========================
+# 签名密钥文件
+*.jks
+*.keystore
+upload-keystore.jks
+
+# 签名配置文件
+android/key.properties
+key.properties
+
+# 本地环境配置
+android/local.properties
+local.properties
+
+# =========================
+# 构建产物 (Build Artifacts)
+# =========================
+*.apk
+*.aab
+*.ipa
+*.app
+
+# =========================
+# 环境变量文件
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# 其他
+# =========================
+# Gradle
+.gradle/
+**/android/.gradle
+
+# Flutter 生成文件
+.flutter-plugins-dependencies
+.packages
+.metadata
