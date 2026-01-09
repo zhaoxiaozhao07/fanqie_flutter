@@ -5,10 +5,20 @@ import '../models/chapter.dart';
 
 /// API 服务 - 负责与番茄小说 API 交互
 class ApiService {
-  static const String baseUrl = 'https://qkfqapi.vv9v.cn';
+  /// 上游域名池，按优先级排序
+  static const List<String> baseUrls = [
+    'https://bk.yydjtc.cn',
+    'https://qkfqapi.vv9v.cn',
+  ];
   static const Duration timeout = Duration(seconds: 30);
 
   final http.Client _client;
+
+  /// 当前有效的域名索引
+  int _currentUrlIndex = 0;
+
+  /// 获取当前使用的域名
+  String get _baseUrl => baseUrls[_currentUrlIndex];
 
   ApiService() : _client = http.Client();
 
@@ -19,7 +29,7 @@ class ApiService {
   Future<List<Book>> searchBooks(String keyword, {int offset = 0}) async {
     final encodedKeyword = Uri.encodeComponent(keyword);
     final url =
-        '$baseUrl/api/search?key=$encodedKeyword&tab_type=3&offset=$offset';
+        '$_baseUrl/api/search?key=$encodedKeyword&tab_type=3&offset=$offset';
 
     try {
       final response = await _client
@@ -51,7 +61,7 @@ class ApiService {
     final encodedTab = Uri.encodeComponent('小说');
     final encodedBdtype = Uri.encodeComponent(bdtype);
     final url =
-        '$baseUrl/api/discover?tab=$encodedTab&bdtype=$encodedBdtype&gender=$gender&is_ranking=1&page=$page';
+        '$_baseUrl/api/discover?tab=$encodedTab&bdtype=$encodedBdtype&gender=$gender&is_ranking=1&page=$page';
 
     try {
       final response = await _client
@@ -85,7 +95,7 @@ class ApiService {
   }) async {
     final encodedTab = Uri.encodeComponent('小说');
     final url =
-        '$baseUrl/api/discover?tab=$encodedTab&type=$type&gender=$gender&genre_type=0&page=$page';
+        '$_baseUrl/api/discover?tab=$encodedTab&type=$type&gender=$gender&genre_type=0&page=$page';
 
     try {
       final response = await _client
@@ -111,7 +121,7 @@ class ApiService {
   /// 获取书籍详情
   /// [bookId] 书籍 ID
   Future<Book?> getBookDetail(String bookId) async {
-    final url = '$baseUrl/api/detail?book_id=$bookId';
+    final url = '$_baseUrl/api/detail?book_id=$bookId';
 
     try {
       final response = await _requestWithRetry(url);
@@ -146,41 +156,76 @@ class ApiService {
     return _getBookChapters(bookId);
   }
 
-  /// 带重试机制的 HTTP 请求
-  /// [maxRetries] 最大尝试次数（2 表示 1 次初始请求 + 1 次重试）
+  /// 带重试和域名故障转移机制的 HTTP 请求
+  /// [path] API 路径（不含域名部分）
+  /// [maxRetries] 每个域名的最大尝试次数
   Future<http.Response?> _requestWithRetry(
     String url, {
     int maxRetries = 2,
   }) async {
-    for (int i = 0; i < maxRetries; i++) {
-      try {
-        final response = await _client
-            .get(Uri.parse(url), headers: _getHeaders())
-            .timeout(timeout);
+    // 从 URL 中提取路径部分（用于域名切换时重建 URL）
+    final originalUri = Uri.parse(url);
+    final pathWithQuery = originalUri.hasQuery
+        ? '${originalUri.path}?${originalUri.query}'
+        : originalUri.path;
 
-        if (response.statusCode == 200) {
-          return response;
+    // 尝试所有可用域名
+    for (
+      int urlIndex = _currentUrlIndex;
+      urlIndex < baseUrls.length;
+      urlIndex++
+    ) {
+      final currentUrl = '${baseUrls[urlIndex]}$pathWithQuery';
+
+      for (int retry = 0; retry < maxRetries; retry++) {
+        try {
+          final response = await _client
+              .get(Uri.parse(currentUrl), headers: _getHeaders())
+              .timeout(timeout);
+
+          if (response.statusCode == 200) {
+            // 请求成功，更新当前有效域名索引
+            if (urlIndex != _currentUrlIndex) {
+              print(
+                '域名切换成功: ${baseUrls[_currentUrlIndex]} -> ${baseUrls[urlIndex]}',
+              );
+              _currentUrlIndex = urlIndex;
+            }
+            return response;
+          }
+
+          // 如果是 5xx 错误，等待后重试
+          if (response.statusCode >= 500) {
+            print('服务器错误 ${response.statusCode}, 重试 ${retry + 1}/$maxRetries');
+            await Future.delayed(Duration(seconds: retry + 1));
+            continue;
+          }
+
+          return response; // 其他状态码直接返回
+        } catch (e) {
+          print(
+            '请求失败 [${baseUrls[urlIndex]}] (重试 ${retry + 1}/$maxRetries): $e',
+          );
+          if (retry < maxRetries - 1) {
+            await Future.delayed(Duration(seconds: retry + 1));
+          }
         }
+      }
 
-        // 如果是 5xx 错误，等待后重试
-        if (response.statusCode >= 500) {
-          await Future.delayed(Duration(seconds: i + 1));
-          continue;
-        }
-
-        return response; // 其他状态码直接返回
-      } catch (e) {
-        print('请求失败 (重试 ${i + 1}/$maxRetries): $e');
-        if (i == maxRetries - 1) rethrow;
-        await Future.delayed(Duration(seconds: i + 1));
+      // 当前域名所有重试都失败，尝试下一个域名
+      if (urlIndex < baseUrls.length - 1) {
+        print('域名 ${baseUrls[urlIndex]} 不可用，切换到 ${baseUrls[urlIndex + 1]}');
       }
     }
+
+    // 所有域名都失败，重置为第一个域名（下次请求重新开始尝试）
+    _currentUrlIndex = 0;
     return null;
   }
 
   /// 使用简化目录接口获取章节
   Future<List<Chapter>> _getDirectoryChapters(String bookId) async {
-    final url = '$baseUrl/api/directory?book_id=$bookId';
+    final url = '$_baseUrl/api/directory?book_id=$bookId';
 
     try {
       final response = await _requestWithRetry(url);
@@ -213,7 +258,7 @@ class ApiService {
 
   /// 使用完整目录接口获取章节
   Future<List<Chapter>> _getBookChapters(String bookId) async {
-    final url = '$baseUrl/api/book?book_id=$bookId';
+    final url = '$_baseUrl/api/book?book_id=$bookId';
 
     try {
       final response = await _requestWithRetry(url);
@@ -280,7 +325,7 @@ class ApiService {
 
   /// 使用 iOS 接口获取章节内容
   Future<String?> _getIosChapterContent(String itemId) async {
-    final url = '$baseUrl/api/ios/content?item_id=$itemId';
+    final url = '$_baseUrl/api/ios/content?item_id=$itemId';
 
     try {
       final response = await _client
@@ -304,7 +349,7 @@ class ApiService {
   /// 使用普通接口获取章节内容
   Future<String?> _getNormalChapterContent(String itemId) async {
     final encodedTab = Uri.encodeComponent('小说');
-    final url = '$baseUrl/api/content?tab=$encodedTab&item_id=$itemId';
+    final url = '$_baseUrl/api/content?tab=$encodedTab&item_id=$itemId';
 
     try {
       final response = await _client

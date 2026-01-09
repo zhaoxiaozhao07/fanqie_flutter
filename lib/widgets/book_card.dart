@@ -168,6 +168,10 @@ class BookCard extends StatelessWidget {
           runSpacing: 4,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
+            // 评分标签（优先显示）
+            if (book.score != null && book.score!.isNotEmpty)
+              _buildScoreTag(book.score!),
+
             // 连载状态标签
             _buildStatusTag(book.creationStatus, book.creationStatus == '完结'),
 
@@ -209,6 +213,29 @@ class BookCard extends StatelessWidget {
     return Text(
       text,
       style: const TextStyle(fontSize: 11, color: AppTheme.textHint),
+    );
+  }
+
+  /// 评分标签 - 金色星星
+  Widget _buildScoreTag(String score) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const Icon(
+          Icons.star_rounded,
+          size: 14,
+          color: Color(0xFFFF9500), // 橙色/金色
+        ),
+        const SizedBox(width: 2),
+        Text(
+          score,
+          style: const TextStyle(
+            fontSize: 12,
+            color: Color(0xFFFF9500),
+            fontWeight: FontWeight.w600,
+          ),
+        ),
+      ],
     );
   }
 }
