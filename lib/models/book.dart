@@ -73,8 +73,15 @@ class Book {
           int.tryParse(rawStatus) != null) {
         status = _parseCreationStatus(rawStatus);
       } else {
-        // 如果是文字，直接使用
-        status = (rawStatus == '完结' || rawStatus == '连载中') ? rawStatus : '连载中';
+        // 如果是文字，转换为内部格式
+        // API 可能返回 "已完结" 或 "完结"，统一转换为 "完结"
+        if (rawStatus == '已完结' || rawStatus == '完结') {
+          status = '完结';
+        } else if (rawStatus == '连载中') {
+          status = '连载中';
+        } else {
+          status = '连载中';
+        }
       }
     } else {
       status = '连载中';
