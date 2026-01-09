@@ -10,6 +10,7 @@ class Book {
   final int serialCount;
   final String creationStatus; // "完结" / "连载中"
   final List<String>? tags;
+  final String? score; // 评分，如 "9.9"
 
   Book({
     required this.bookId,
@@ -22,6 +23,7 @@ class Book {
     this.serialCount = 0,
     this.creationStatus = '连载中',
     this.tags,
+    this.score,
   });
 
   /// 从搜索结果 JSON 创建 Book 对象
@@ -37,6 +39,7 @@ class Book {
       serialCount: _parseInt(json['serial_count']),
       creationStatus: _parseCreationStatus(json['creation_status']),
       tags: _parseTags(json['tags']),
+      score: json['score']?.toString(),
     );
   }
 
@@ -54,6 +57,7 @@ class Book {
       serialCount: _parseInt(json['serial_count']),
       creationStatus: _parseCreationStatus(json['creation_status']),
       tags: _parseTags(json['tags']),
+      score: json['score']?.toString(),
     );
   }
 
@@ -98,6 +102,7 @@ class Book {
       serialCount: 0,
       creationStatus: status,
       tags: _parseTags(json['tags']),
+      score: json['score']?.toString(),
     );
   }
 
@@ -114,6 +119,7 @@ class Book {
       'serial_count': serialCount,
       'creation_status': creationStatus,
       'tags': tags,
+      'score': score,
     };
   }
 

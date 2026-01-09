@@ -371,6 +371,33 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
             spacing: 8,
             runSpacing: 8,
             children: [
+              // 评分标签（金色）
+              if (book.score != null && book.score!.isNotEmpty)
+                Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withOpacity(0.15),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.star, size: 14, color: Colors.amber),
+                      const SizedBox(width: 4),
+                      Text(
+                        book.score!,
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: Colors.amber,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               _buildTag(
                 book.creationStatus,
                 book.creationStatus == '完结'
