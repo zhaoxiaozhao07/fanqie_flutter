@@ -59,9 +59,24 @@ class Book {
 
   /// 从发现/推荐 JSON 创建 Book 对象（巅峰榜等）
   factory Book.fromDiscoverJson(Map<String, dynamic> json) {
-    // 发现接口的 status 字段直接是文字
-    String status = json['status']?.toString() ?? '连载中';
-    if (status != '完结' && status != '连载中') {
+    // 优先使用 creation_status 字段（数字格式），回退到 status 字段
+    // creation_status: 1 = 连载中, 其他 = 完结
+    // status: 可能是文字 "连载中"/"完结"，也可能是数字
+    String status;
+    if (json['creation_status'] != null) {
+      status = _parseCreationStatus(json['creation_status']);
+    } else if (json['status'] != null) {
+      final rawStatus = json['status'].toString();
+      // 如果是数字，使用 _parseCreationStatus 解析
+      if (rawStatus == '1' ||
+          rawStatus == '0' ||
+          int.tryParse(rawStatus) != null) {
+        status = _parseCreationStatus(rawStatus);
+      } else {
+        // 如果是文字，直接使用
+        status = (rawStatus == '完结' || rawStatus == '连载中') ? rawStatus : '连载中';
+      }
+    } else {
       status = '连载中';
     }
 
