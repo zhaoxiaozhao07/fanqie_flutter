@@ -56,9 +56,6 @@ jobs:
           storeFile=upload-keystore.jks
           EOF
 
-      - name: 构建 Release APK
-        run: flutter build apk --release
-
       - name: 获取版本号
         id: version
         run: |
@@ -71,6 +68,9 @@ jobs:
             fi
           fi
           echo "version=$VERSION" >> $GITHUB_OUTPUT
+
+      - name: 构建 Release APK
+        run: flutter build apk --release --build-name=${{ steps.version.outputs.version }} --build-number=${{ github.run_number }}
 
       - name: 重命名 APK
         run: |
