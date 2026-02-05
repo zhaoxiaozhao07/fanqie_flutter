@@ -2,25 +2,31 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/book.dart';
 import '../models/chapter.dart';
+import 'source_service.dart';
 
 /// API 服务 - 负责与番茄小说 API 交互
 class ApiService {
-  /// 上游域名池，按优先级排序
-  static const List<String> baseUrls = [
-    'https://bk.yydjtc.cn',
-    'https://qkfqapi.vv9v.cn',
-  ];
   static const Duration timeout = Duration(seconds: 30);
 
   final http.Client _client;
+  final SourceService _sourceService = SourceService();
 
-  /// 当前有效的域名索引
-  int _currentUrlIndex = 0;
+  /// 当前使用的域名在 activeSourceUrls 中的索引
+  int get _currentUrlIndex => _sourceService.currentUrlIndex;
+  set _currentUrlIndex(int val) => _sourceService.currentUrlIndex = val;
+
+  /// 获取当前可用的域名列表
+  List<String> get _baseUrls => _sourceService.activeSourceUrls;
 
   /// 获取当前使用的域名
-  String get _baseUrl => baseUrls[_currentUrlIndex];
+  String get _baseUrl {
+    return _sourceService.currentActiveUrl ?? 'https://bk.yydjtc.cn';
+  }
 
-  ApiService() : _client = http.Client();
+  ApiService() : _client = http.Client() {
+    // 确保 SourceService 已初始化（最好在 main.dart 中做，这里尝试补救）
+    _sourceService.initialize();
+  }
 
   /// 搜索书籍
   /// [keyword] 搜索关键词
@@ -170,12 +176,11 @@ class ApiService {
         : originalUri.path;
 
     // 尝试所有可用域名
-    for (
-      int urlIndex = _currentUrlIndex;
-      urlIndex < baseUrls.length;
-      urlIndex++
-    ) {
-      final currentUrl = '${baseUrls[urlIndex]}$pathWithQuery';
+    final urls = _baseUrls;
+    if (urls.isEmpty) return null;
+
+    for (int urlIndex = _currentUrlIndex; urlIndex < urls.length; urlIndex++) {
+      final currentUrl = '${urls[urlIndex]}$pathWithQuery';
 
       for (int retry = 0; retry < maxRetries; retry++) {
         try {
@@ -186,9 +191,7 @@ class ApiService {
           if (response.statusCode == 200) {
             // 请求成功，更新当前有效域名索引
             if (urlIndex != _currentUrlIndex) {
-              print(
-                '域名切换成功: ${baseUrls[_currentUrlIndex]} -> ${baseUrls[urlIndex]}',
-              );
+              print('域名切换成功: ${urls[_currentUrlIndex]} -> ${urls[urlIndex]}');
               _currentUrlIndex = urlIndex;
             }
             return response;
@@ -203,9 +206,7 @@ class ApiService {
 
           return response; // 其他状态码直接返回
         } catch (e) {
-          print(
-            '请求失败 [${baseUrls[urlIndex]}] (重试 ${retry + 1}/$maxRetries): $e',
-          );
+          print('请求失败 [${urls[urlIndex]}] (重试 ${retry + 1}/$maxRetries): $e');
           if (retry < maxRetries - 1) {
             await Future.delayed(Duration(seconds: retry + 1));
           }
@@ -213,8 +214,8 @@ class ApiService {
       }
 
       // 当前域名所有重试都失败，尝试下一个域名
-      if (urlIndex < baseUrls.length - 1) {
-        print('域名 ${baseUrls[urlIndex]} 不可用，切换到 ${baseUrls[urlIndex + 1]}');
+      if (urlIndex < urls.length - 1) {
+        print('域名 ${urls[urlIndex]} 不可用，切换到 ${urls[urlIndex + 1]}');
       }
     }
 

@@ -6,6 +6,7 @@ import '../widgets/book_card.dart';
 import '../widgets/loading_widget.dart';
 import 'search_results_screen.dart';
 import 'book_detail_screen.dart';
+import 'source_management_screen.dart';
 
 /// 搜索页面
 class SearchScreen extends StatefulWidget {
@@ -223,14 +224,38 @@ class _SearchScreenState extends State<SearchScreen> {
                 // Custom Title Area
                 Container(
                   height: 44,
-                  alignment: Alignment.center,
-                  child: const Text(
-                    '番茄小说',
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.w600,
-                      color: AppTheme.textPrimary,
-                    ),
+                  width: double.infinity,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: [
+                      const Text(
+                        '番茄小说',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                          color: AppTheme.textPrimary,
+                        ),
+                      ),
+                      Positioned(
+                        right: 4,
+                        child: IconButton(
+                          icon: const Icon(
+                            Icons.settings_outlined,
+                            size: 24,
+                            color: AppTheme.textPrimary,
+                          ),
+                          onPressed: () {
+                            Navigator.push(
+                              context,
+                              MaterialPageRoute(
+                                builder: (context) =>
+                                    const SourceManagementScreen(),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
                   ),
                 ),
                 _buildSearchArea(),

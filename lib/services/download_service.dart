@@ -28,13 +28,41 @@ class DownloadService {
 
   DownloadService(this._apiService, this._historyService);
 
-  /// 并发分批下载章节内容
-  /// 返回按原始顺序排列的章节内容列表
-  Future<List<String?>> _downloadChaptersConcurrently(
+  /// 获取书籍缓存目录
+  Future<Directory> _getCacheDirectory(String bookId) async {
+    final tempDir = await getTemporaryDirectory();
+    final cacheDir = Directory('${tempDir.path}/downloads/$bookId');
+    if (!await cacheDir.exists()) {
+      await cacheDir.create(recursive: true);
+    }
+    return cacheDir;
+  }
+
+  /// 获取章节缓存文件
+  File _getChapterCacheFile(Directory cacheDir, int index) {
+    return File('${cacheDir.path}/$index.txt');
+  }
+
+  /// 清理缓存
+  Future<void> _clearCache(String bookId) async {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final cacheDir = Directory('${tempDir.path}/downloads/$bookId');
+      if (await cacheDir.exists()) {
+        await cacheDir.delete(recursive: true);
+      }
+    } catch (e) {
+      print('清理缓存失败: $e');
+    }
+  }
+
+  /// 并发分批下载章节内容（支持断点续传）
+  Future<void> _downloadChaptersConcurrently(
+    String bookId,
     List<Chapter> chapters, {
     ProgressCallback? onProgress,
   }) async {
-    final results = List<String?>.filled(chapters.length, null);
+    final cacheDir = await _getCacheDirectory(bookId);
     final totalChapters = chapters.length;
     int completedCount = 0;
 
@@ -54,31 +82,54 @@ class DownloadService {
       final batchFutures = batchChapters.asMap().entries.map((entry) async {
         final globalIndex = batchStart + entry.key;
         final chapter = entry.value;
+        final cacheFile = _getChapterCacheFile(cacheDir, globalIndex);
+
+        // 检查缓存
+        if (await cacheFile.exists()) {
+          if (await cacheFile.length() > 0) {
+            return; // 已下载
+          }
+        }
 
         // 带重试的单章下载
         String? content;
         for (int retry = 0; retry < _maxRetryCount; retry++) {
-          content = await _apiService.getChapterContent(chapter.itemId);
-          if (content != null && content.isNotEmpty) break;
+          try {
+            content = await _apiService.getChapterContent(chapter.itemId);
+            if (content != null && content.isNotEmpty) break;
+          } catch (_) {}
+
           if (retry < _maxRetryCount - 1) {
             await Future.delayed(Duration(milliseconds: 100 * (retry + 1)));
           }
         }
 
-        return MapEntry(globalIndex, content);
+        // 写入缓存
+        if (content != null && content.isNotEmpty) {
+          await cacheFile.writeAsString(content);
+        }
       });
 
-      final batchResults = await Future.wait(batchFutures);
+      await Future.wait(batchFutures);
 
-      // 写入结果（保证顺序）
-      for (final result in batchResults) {
-        results[result.key] = result.value;
+      // 更新进度
+      for (int i = batchStart; i < batchEnd; i++) {
+        final cacheFile = _getChapterCacheFile(cacheDir, i);
+        // 简单认为即使失败也算处理完，避免死循环。或者这里只统计成功的？
+        // 为了进度条能走完，我们统计处理过的。
+        // 但为了准确性，我们可以在 status row 显示失败。
+        // 这里只更新 count.
         completedCount++;
-        onProgress?.call(
-          completedCount,
-          totalChapters,
-          '正在下载: ${chapters[result.key].title}',
-        );
+        // 获取标题
+        final title = chapters[i].title;
+
+        // 如果缓存存在，说明是秒传或下载成功
+        bool exists = await cacheFile.exists() && await cacheFile.length() > 0;
+        String msg = exists
+            ? '正在下载: $title'
+            : '下载失败: $title'; // 实际上如果是 cached, 显示正在下载可能很快闪过
+
+        onProgress?.call(completedCount, totalChapters, msg);
       }
 
       // 批次间延迟
@@ -86,8 +137,6 @@ class DownloadService {
         await Future.delayed(_batchDelay);
       }
     }
-
-    return results;
   }
 
   /// 下载小说并保存为 TXT 格式
@@ -104,41 +153,76 @@ class DownloadService {
       }
 
       final totalChapters = chapters.length;
-      final contentParts = <String>[];
 
       // 添加书籍标题
-      contentParts.add('《${book.bookName}》\n作者: ${book.author}\n\n');
+      // contentParts removed, using stream
 
-      // 并发分批下载
+      // 并发分批下载（写入缓存）
       onProgress?.call(0, totalChapters, '开始并发下载...');
-      final contents = await _downloadChaptersConcurrently(
+      await _downloadChaptersConcurrently(
+        book.bookId,
         chapters,
         onProgress: onProgress,
       );
 
-      // 组装内容（顺序已保证）
+      // 组装文件
+      onProgress?.call(totalChapters, totalChapters, '正在合并文件...');
+
+      final tempDir = await getTemporaryDirectory();
+      final safeFileName =
+          book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '') + '.txt';
+      final tempFile = File('${tempDir.path}/$safeFileName');
+      final sink = tempFile.openWrite();
+
+      final cacheDir = await _getCacheDirectory(book.bookId);
+
+      sink.writeln('《${book.bookName}》\n作者: ${book.author}\n\n');
+
+      // 顺序读取缓存并写入
       for (int i = 0; i < chapters.length; i++) {
-        final content = contents[i];
-        if (content != null && content.isNotEmpty) {
-          contentParts.add(
-            '\n\n${'=' * 40}\n${chapters[i].title}\n${'=' * 40}\n\n$content',
-          );
+        final cacheFile = _getChapterCacheFile(cacheDir, i);
+        if (await cacheFile.exists() && await cacheFile.length() > 0) {
+          // 流式读取以节省内存
+          await sink.addStream(cacheFile.openRead());
         } else {
-          contentParts.add(
-            '\n\n${'=' * 40}\n${chapters[i].title}\n${'=' * 40}\n\n[章节内容下载失败]',
+          sink.writeln('[章节内容下载失败]');
+        }
+        // 分隔符
+        if (i < chapters.length - 1) {
+          sink.writeln(
+            '\n\n${'=' * 40}\n${chapters[i + 1].title}\n${'=' * 40}\n\n',
           );
         }
       }
 
+      await sink.close();
+
       // 保存文件
       onProgress?.call(totalChapters, totalChapters, '正在保存文件...');
 
-      final filePath = await _saveTxtFile(book.bookName, contentParts.join());
+      final bool success = await platform.invokeMethod('saveToDownloads', {
+        'filePath': tempFile.path,
+        'fileName': safeFileName,
+        'mimeType': 'text/plain',
+      });
 
-      if (filePath != null) {
+      // 删除合并后的临时文件
+      if (await tempFile.exists()) {
+        await tempFile.delete();
+      }
+
+      if (success) {
+        // 清理分章缓存
+        await _clearCache(book.bookId);
+
+        final filePath = '/storage/emulated/0/Download/fanqie/$safeFileName';
+
         // 记录下载历史
         final file = File(filePath);
-        final fileSize = await file.length();
+        int fileSize = 0;
+        if (await file.exists()) {
+          fileSize = await file.length();
+        }
 
         await _historyService.addHistory(
           DownloadHistory(
@@ -183,19 +267,27 @@ class DownloadService {
       final totalChapters = chapters.length;
       final chapterContents = <Map<String, String>>[];
 
-      // 并发分批下载
+      // 并发分批下载（写入缓存）
       onProgress?.call(0, totalChapters, '开始并发下载...');
-      final contents = await _downloadChaptersConcurrently(
+      await _downloadChaptersConcurrently(
+        book.bookId,
         chapters,
         onProgress: onProgress,
       );
 
-      // 组装内容（顺序已保证）
+      // 从缓存读取内容
+      onProgress?.call(totalChapters, totalChapters, '正在读取缓存...');
+      final cacheDir = await _getCacheDirectory(book.bookId);
+
       for (int i = 0; i < chapters.length; i++) {
-        chapterContents.add({
-          'title': chapters[i].title,
-          'content': contents[i] ?? '[章节内容下载失败]',
-        });
+        final cacheFile = _getChapterCacheFile(cacheDir, i);
+        String content = '[章节内容下载失败]';
+
+        if (await cacheFile.exists() && await cacheFile.length() > 0) {
+          content = await cacheFile.readAsString();
+        }
+
+        chapterContents.add({'title': chapters[i].title, 'content': content});
       }
 
       // 下载封面图片
@@ -222,6 +314,9 @@ class DownloadService {
       );
 
       if (filePath != null) {
+        // 清理缓存
+        await _clearCache(book.bookId);
+
         // 记录下载历史
         final file = File(filePath);
         final fileSize = await file.length();
@@ -274,40 +369,6 @@ class DownloadService {
     }
 
     return false;
-  }
-
-  /// 保存 TXT 文件 (通过原生 Channel)
-  Future<String?> _saveTxtFile(String bookName, String content) async {
-    try {
-      // 1. 保存到临时文件
-      final tempDir = await getTemporaryDirectory();
-      // 清理文件名
-      final safeFileName =
-          bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '') + '.txt';
-      final tempFile = File('${tempDir.path}/$safeFileName');
-      await tempFile.writeAsString(content, encoding: utf8);
-
-      // 2. 调用原生方法保存到 Downloads
-      final bool success = await platform.invokeMethod('saveToDownloads', {
-        'filePath': tempFile.path,
-        'fileName': safeFileName,
-        'mimeType': 'text/plain',
-      });
-
-      // 3. 删除临时文件
-      if (await tempFile.exists()) {
-        await tempFile.delete();
-      }
-
-      if (success) {
-        // 返回预期的公共路径 (用于显示/历史记录)
-        return '/storage/emulated/0/Download/fanqie/$safeFileName';
-      }
-      return null;
-    } catch (e) {
-      print('保存TXT失败: $e');
-      return null;
-    }
   }
 
   /// 保存 EPUB 文件 (真正的 EPUB 格式)

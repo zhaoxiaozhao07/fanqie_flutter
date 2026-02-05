@@ -2,6 +2,11 @@
 
 一款基于 Flutter 开发的番茄小说第三方客户端，支持小说搜索、浏览、下载等功能。
 
+## 来源
+
+[Fanqie-novel-Downloader](https://github.com/POf-L/Fanqie-novel-Downloader)
+这个项目很好用，但是我不是实时都有电脑可以使用其下载，而且主要在手机阅读，就弄成一个app版本的，直接下载手机阅读；希望支持原作者。
+
 ## 功能特性
 
 - **榜单浏览** - 支持巅峰榜、出版榜、热搜榜、黑马榜、爆更榜、推荐榜、完结榜
@@ -42,11 +47,3 @@ flutter build apk --release
 ## 下载
 
 前往 [Releases](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases) 页面下载最新版本 APK。
-
-## 免责声明
-
-本项目仅供学习交流使用，请勿用于商业用途。所有小说内容版权归原作者及番茄小说平台所有。
-
-## 许可证
-
-MIT License
