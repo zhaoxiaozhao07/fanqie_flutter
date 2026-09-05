@@ -16,7 +16,6 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
   List<ApiSource> _sources = [];
   bool _isChecking = false;
 
-  // Track which sources are currently being tested
   final Map<String, bool> _testingMap = {};
 
   @override
@@ -41,16 +40,10 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
     setState(() => _isChecking = true);
 
     final sourcesToCheck = List.from(_sources);
-
-    // Mark all as testing first? Or sequential?
-    // Let's do parallel but update UI individually?
-    // Actually, simple iteration is clearer for "animation" per item if we want to see it progressing.
-    // Check concurrently but track status.
-
     final List<Future> futures = [];
 
     for (var source in sourcesToCheck) {
-      if (!source.isEnabled) continue; // Skip disabled
+      if (!source.isEnabled) continue;
 
       setState(() {
         _testingMap[source.baseUrl] = true;
@@ -61,9 +54,7 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
         if (mounted) {
           setState(() {
             _testingMap.remove(source.baseUrl);
-            _sources = List.from(
-              _sourceService.sources,
-            ); // Refresh list to show results
+            _sources = List.from(_sourceService.sources);
           });
         }
       }());
@@ -73,9 +64,24 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
 
     if (mounted) {
       setState(() => _isChecking = false);
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('连通性检测完成')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('连通性检测完成')),
+      );
+    }
+  }
+
+  Future<void> _checkSingleSource(ApiSource source) async {
+    setState(() {
+      _testingMap[source.baseUrl] = true;
+    });
+
+    await _sourceService.checkSource(source);
+
+    if (mounted) {
+      setState(() {
+        _testingMap.remove(source.baseUrl);
+        _sources = List.from(_sourceService.sources);
+      });
     }
   }
 
@@ -129,13 +135,25 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
   void _setAsCurrent(String url) {
     if (_sourceService.setCurrentSource(url)) {
       _refreshSources();
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('已切换当前源为: $url')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('已切换当前源为: $url')),
+      );
+    }
+  }
+
+  Future<void> _resetToDefault() async {
+    await _sourceService.addSource(SourceService.defaultBackendUrl);
+    _sourceService.setCurrentSource(SourceService.defaultBackendUrl);
+    _refreshSources();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('已恢复默认后端: ${SourceService.defaultBackendUrl}')),
+      );
     }
   }
 
   void _showAddSourceDialog() {
+    _urlController.text = 'http://192.168.10.158:8000';
     showDialog(
       context: context,
       builder: (context) => AlertDialog(
@@ -144,7 +162,7 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
           controller: _urlController,
           decoration: const InputDecoration(
             labelText: 'API 地址',
-            hintText: 'https://example.com',
+            hintText: 'http://192.168.10.158:8000',
             border: OutlineInputBorder(),
           ),
           autofocus: true,
@@ -169,7 +187,7 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('API 源管理'),
+        title: const Text('API 后端管理'),
         actions: [
           IconButton(
             icon: _isChecking
@@ -186,6 +204,11 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
             onPressed: _isChecking ? null : _checkAllConnectivity,
           ),
           IconButton(
+            icon: const Icon(Icons.restore),
+            tooltip: '恢复默认后端',
+            onPressed: _resetToDefault,
+          ),
+          IconButton(
             icon: const Icon(Icons.add),
             tooltip: '添加源',
             onPressed: _showAddSourceDialog,
@@ -200,7 +223,7 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
           final isCurrent = source.baseUrl == currentActiveUrl;
 
           return Card(
-            elevation: isCurrent ? 4 : 2,
+            elevation: isCurrent ? 3 : 1,
             shape: isCurrent
                 ? RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(12),
@@ -209,12 +232,12 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
                       width: 2,
                     ),
                   )
-                : null,
+                : RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
             margin: const EdgeInsets.symmetric(vertical: 4),
             child: ListTile(
-              onTap: (source.isEnabled && !isCurrent)
-                  ? () => _setAsCurrent(source.baseUrl)
-                  : null,
+              onTap: () => _checkSingleSource(source),
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: 16,
                 vertical: 4,
@@ -248,7 +271,7 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
                         vertical: 2,
                       ),
                       decoration: BoxDecoration(
-                        color: AppTheme.primaryColor.withOpacity(0.1),
+                        color: AppTheme.primaryColor.withValues(alpha: 0.1),
                         borderRadius: BorderRadius.circular(4),
                         border: Border.all(color: AppTheme.primaryColor),
                       ),
@@ -264,10 +287,20 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
                 ],
               ),
               subtitle: _buildStatusRow(source),
-              trailing: IconButton(
-                icon: const Icon(Icons.delete_outline),
-                color: Colors.grey,
-                onPressed: () => _removeSource(source.baseUrl),
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (!isCurrent && source.isEnabled)
+                    TextButton(
+                      onPressed: () => _setAsCurrent(source.baseUrl),
+                      child: const Text('设为当前'),
+                    ),
+                  IconButton(
+                    icon: const Icon(Icons.delete_outline),
+                    color: Colors.grey,
+                    onPressed: () => _removeSource(source.baseUrl),
+                  ),
+                ],
               ),
             ),
           );
@@ -278,8 +311,8 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
 
   Widget _buildStatusRow(ApiSource source) {
     if (_testingMap.containsKey(source.baseUrl)) {
-      return Row(
-        children: const [
+      return const Row(
+        children: [
           SizedBox(
             width: 12,
             height: 12,
@@ -292,7 +325,7 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
     }
 
     if (source.latency == null && !source.isWorking && source.error == null) {
-      return const Text('未检测', style: TextStyle(fontSize: 12));
+      return const Text('未检测 (点击卡片检测)', style: TextStyle(fontSize: 12, color: Colors.grey));
     }
 
     final List<Widget> children = [];
@@ -304,7 +337,7 @@ class _SourceManagementScreenState extends State<SourceManagementScreen> {
       children.add(const SizedBox(width: 4));
       children.add(
         Text(
-          '${source.latency}ms',
+          '${source.latency}ms 正常',
           style: const TextStyle(
             color: Colors.green,
             fontSize: 12,

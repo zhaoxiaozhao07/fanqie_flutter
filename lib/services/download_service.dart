@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 import 'package:archive/archive.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
@@ -52,7 +53,9 @@ class DownloadService {
         await cacheDir.delete(recursive: true);
       }
     } catch (e) {
-      print('清理缓存失败: $e');
+      if (kDebugMode) {
+        debugPrint('清理缓存失败: $e');
+      }
     }
   }
 
@@ -170,7 +173,7 @@ class DownloadService {
 
       final tempDir = await getTemporaryDirectory();
       final safeFileName =
-          book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '') + '.txt';
+          '${book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '')}.txt';
       final tempFile = File('${tempDir.path}/$safeFileName');
       final sink = tempFile.openWrite();
 
@@ -300,7 +303,9 @@ class DownloadService {
             coverImageBytes = response.bodyBytes;
           }
         } catch (e) {
-          print('下载封面失败: $e');
+          if (kDebugMode) {
+            debugPrint('下载封面失败: $e');
+          }
         }
       }
 
@@ -380,7 +385,7 @@ class DownloadService {
     try {
       // 清理文件名
       final safeFileName =
-          book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '') + '.epub';
+          '${book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '')}.epub';
 
       // 创建 EPUB 结构
       final archive = Archive();
@@ -626,7 +631,9 @@ $navPoints  </navMap>
       }
       return null;
     } catch (e) {
-      print('保存EPUB失败: $e');
+      if (kDebugMode) {
+        debugPrint('保存EPUB失败: $e');
+      }
       return null;
     }
   }
@@ -668,65 +675,5 @@ $bodyContent
         .replaceAll('>', '&gt;')
         .replaceAll('"', '&quot;')
         .replaceAll("'", '&apos;');
-  }
-
-  /// 获取下载目录 - 使用系统 Downloads/fanqie 目录
-  Future<Directory?> _getDownloadDirectory() async {
-    try {
-      if (Platform.isAndroid) {
-        // 方法1: 尝试使用 getDownloadsDirectory (需要 path_provider 2.1.0+)
-        try {
-          final downloadsDir = await getDownloadsDirectory();
-          if (downloadsDir != null) {
-            final fanqieDir = Directory('${downloadsDir.path}/fanqie');
-            if (!await fanqieDir.exists()) {
-              await fanqieDir.create(recursive: true);
-            }
-            return fanqieDir;
-          }
-        } catch (e) {
-          // getDownloadsDirectory 可能不支持
-        }
-
-        // 方法2: 使用 getExternalStorageDirectory
-        try {
-          final externalDir = await getExternalStorageDirectory();
-          if (externalDir != null) {
-            // 从 /storage/emulated/0/Android/data/xxx 回退到 /storage/emulated/0/Download
-            final rootPath = externalDir.path.split('/Android/data')[0];
-            final downloadPath = '$rootPath/Download/fanqie';
-            final downloadDir = Directory(downloadPath);
-            if (!await downloadDir.exists()) {
-              await downloadDir.create(recursive: true);
-            }
-            return downloadDir;
-          }
-        } catch (e) {
-          // 外部存储不可用
-        }
-
-        // 方法3: 直接使用硬编码路径
-        try {
-          const downloadPath = '/storage/emulated/0/Download/fanqie';
-          final downloadDir = Directory(downloadPath);
-          if (!await downloadDir.exists()) {
-            await downloadDir.create(recursive: true);
-          }
-          return downloadDir;
-        } catch (e) {
-          // 没有权限
-        }
-      }
-
-      // 回退到应用私有目录
-      final appDir = await getApplicationDocumentsDirectory();
-      final downloadDir = Directory('${appDir.path}/fanqie');
-      if (!await downloadDir.exists()) {
-        await downloadDir.create(recursive: true);
-      }
-      return downloadDir;
-    } catch (e) {
-      return null;
-    }
   }
 }

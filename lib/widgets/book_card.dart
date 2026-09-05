@@ -1,33 +1,39 @@
 import 'package:flutter/material.dart';
 import 'package:cached_network_image/cached_network_image.dart';
-import '../models/book.dart';
 import '../app_theme.dart';
-import '../main.dart'; // 访问 BookCoverCacheManager
+import '../main.dart';
+import '../models/book.dart';
+import '../services/bookshelf_service.dart';
 
-/// 书籍卡片组件
-/// 现代化扁平设计
+/// 现代化书籍卡片组件
 class BookCard extends StatelessWidget {
   final Book book;
   final VoidCallback? onTap;
-  final bool showWordCount;
   final bool showAbstract;
+  final bool showWordCount;
 
   const BookCard({
     super.key,
     required this.book,
     this.onTap,
-    this.showWordCount = false,
     this.showAbstract = true,
+    this.showWordCount = true,
   });
 
   @override
   Widget build(BuildContext context) {
     return Container(
-      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
       decoration: BoxDecoration(
         color: AppTheme.surfaceColor,
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: const Color(0xFFF0F0F0), width: 1),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.03),
+            blurRadius: 10,
+            offset: const Offset(0, 4),
+          ),
+        ],
       ),
       child: Material(
         color: Colors.transparent,
@@ -39,10 +45,8 @@ class BookCard extends StatelessWidget {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                // 封面图片
                 _buildCover(),
                 const SizedBox(width: 16),
-                // 书籍信息
                 Expanded(child: _buildInfo(context)),
               ],
             ),
@@ -61,7 +65,7 @@ class BookCard extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withOpacity(0.05),
+            color: Colors.black.withValues(alpha: 0.05),
             blurRadius: 8,
             offset: const Offset(0, 4),
           ),
@@ -73,12 +77,9 @@ class BookCard extends StatelessWidget {
             ? CachedNetworkImage(
                 imageUrl: book.thumbUrl!,
                 fit: BoxFit.cover,
-                // 使用自定义缓存管理器（30 天有效期）
                 cacheManager: BookCoverCacheManager.instance,
-                // 限制内存缓存尺寸，显著减少内存占用和解码时间
-                memCacheWidth: 172, // 2x 显示宽度
-                memCacheHeight: 236, // 2x 显示高度
-                // 更快的淡入动画
+                memCacheWidth: 172,
+                memCacheHeight: 236,
                 fadeInDuration: const Duration(milliseconds: 150),
                 fadeOutDuration: const Duration(milliseconds: 100),
                 placeholder: (context, url) => Container(
@@ -102,7 +103,7 @@ class BookCard extends StatelessWidget {
         child: Icon(
           Icons.book,
           size: 32,
-          color: AppTheme.primaryColor.withOpacity(0.5),
+          color: AppTheme.primaryColor.withValues(alpha: 0.5),
         ),
       ),
     );
@@ -113,22 +114,57 @@ class BookCard extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        // 书名
-        Text(
-          book.bookName,
-          style: Theme.of(context).textTheme.titleMedium?.copyWith(
-            fontWeight: FontWeight.bold,
-            fontSize: 17,
-          ),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
+        // 书名与加入书架快捷按钮
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Expanded(
+              child: Text(
+                book.bookName,
+                style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 16,
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            ValueListenableBuilder<int>(
+              valueListenable: BookshelfService().changeNotifier,
+              builder: (context, value, child) {
+                final isInBookshelf = BookshelfService().isInBookshelf(book.bookId);
+                return InkWell(
+                  onTap: () async {
+                    final added = await BookshelfService().toggleBookshelf(book);
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        SnackBar(
+                          content: Text(added ? '已加入书架：《${book.bookName}》' : '已移出书架：《${book.bookName}》'),
+                          duration: const Duration(seconds: 2),
+                        ),
+                      );
+                    }
+                  },
+                  borderRadius: BorderRadius.circular(16),
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                    child: Icon(
+                      isInBookshelf ? Icons.bookmark_rounded : Icons.bookmark_add_outlined,
+                      size: 20,
+                      color: isInBookshelf ? AppTheme.primaryColor : AppTheme.textHint,
+                    ),
+                  ),
+                );
+              },
+            ),
+          ],
         ),
         const SizedBox(height: 6),
 
         // 作者
         Row(
           children: [
-            Icon(
+            const Icon(
               Icons.person_outline_rounded,
               size: 14,
               color: AppTheme.textSecondary,
@@ -147,13 +183,13 @@ class BookCard extends StatelessWidget {
           ],
         ),
 
-        // 简介 (根据参数显示/隐藏)
+        // 简介
         if (showAbstract) ...[
           const SizedBox(height: 8),
           Text(
             book.abstractPreview,
             style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: AppTheme.textSecondary.withOpacity(0.8),
+              color: AppTheme.textSecondary.withValues(alpha: 0.8),
               height: 1.4,
             ),
             maxLines: 2,
@@ -168,18 +204,11 @@ class BookCard extends StatelessWidget {
           runSpacing: 4,
           crossAxisAlignment: WrapCrossAlignment.center,
           children: [
-            // 评分标签（优先显示）
             if (book.score != null && book.score!.isNotEmpty)
               _buildScoreTag(book.score!),
-
-            // 连载状态标签
             _buildStatusTag(book.creationStatus, book.creationStatus == '完结'),
-
-            // 分类标签
             if (book.category != null && book.category!.isNotEmpty)
               _buildSimpleTag(book.category!),
-
-            // 字数标签
             if (showWordCount && book.wordNumber > 0)
               _buildSimpleTag(book.formattedWordCount),
           ],
@@ -188,13 +217,13 @@ class BookCard extends StatelessWidget {
     );
   }
 
-  /// 状态标签 - 实心
+  /// 状态标签
   Widget _buildStatusTag(String text, bool isCompleted) {
     final color = isCompleted ? AppTheme.tagCompleted : AppTheme.tagSerializing;
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.1),
+        color: color.withValues(alpha: 0.1),
         borderRadius: BorderRadius.circular(6),
       ),
       child: Text(
@@ -208,7 +237,6 @@ class BookCard extends StatelessWidget {
     );
   }
 
-  /// 简单标签 - 灰色文字
   Widget _buildSimpleTag(String text) {
     return Text(
       text,
@@ -216,26 +244,28 @@ class BookCard extends StatelessWidget {
     );
   }
 
-  /// 评分标签 - 金色星星
   Widget _buildScoreTag(String score) {
-    return Row(
-      mainAxisSize: MainAxisSize.min,
-      children: [
-        const Icon(
-          Icons.star_rounded,
-          size: 14,
-          color: Color(0xFFFF9500), // 橙色/金色
-        ),
-        const SizedBox(width: 2),
-        Text(
-          score,
-          style: const TextStyle(
-            fontSize: 12,
-            color: Color(0xFFFF9500),
-            fontWeight: FontWeight.w600,
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+      decoration: BoxDecoration(
+        color: Colors.amber.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          const Icon(Icons.star_rounded, size: 12, color: Colors.amber),
+          const SizedBox(width: 2),
+          Text(
+            score,
+            style: const TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.bold,
+              color: Colors.amber,
+            ),
           ),
-        ),
-      ],
+        ],
+      ),
     );
   }
 }

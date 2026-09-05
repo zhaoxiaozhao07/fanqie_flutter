@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'search_screen.dart';
+import 'bookshelf_screen.dart';
 import 'history_screen.dart';
 
-/// 主页面 - 底部导航
+/// 主页面 - 底部三导航：主页、书架、历史
 class MainScreen extends StatefulWidget {
   const MainScreen({super.key});
 
@@ -13,7 +14,8 @@ class MainScreen extends StatefulWidget {
 class _MainScreenState extends State<MainScreen> {
   int _currentIndex = 0;
 
-  // 使用 GlobalKey 来访问 HistoryScreen 的状态
+  final GlobalKey<BookshelfScreenState> _bookshelfKey =
+      GlobalKey<BookshelfScreenState>();
   final GlobalKey<HistoryScreenState> _historyKey =
       GlobalKey<HistoryScreenState>();
 
@@ -24,6 +26,12 @@ class _MainScreenState extends State<MainScreen> {
         index: _currentIndex,
         children: [
           const SearchScreen(),
+          BookshelfScreen(
+            key: _bookshelfKey,
+            onGoToDiscover: () {
+              setState(() => _currentIndex = 0);
+            },
+          ),
           HistoryScreen(key: _historyKey),
         ],
       ),
@@ -31,8 +39,9 @@ class _MainScreenState extends State<MainScreen> {
         selectedIndex: _currentIndex,
         onDestinationSelected: (index) {
           setState(() => _currentIndex = index);
-          // 切换到历史页面时刷新数据
           if (index == 1) {
+            _bookshelfKey.currentState?.refresh();
+          } else if (index == 2) {
             _historyKey.currentState?.refreshHistory();
           }
         },
@@ -41,6 +50,11 @@ class _MainScreenState extends State<MainScreen> {
             icon: Icon(Icons.home_outlined),
             selectedIcon: Icon(Icons.home_rounded),
             label: '主页',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.collections_bookmark_outlined),
+            selectedIcon: Icon(Icons.collections_bookmark_rounded),
+            label: '书架',
           ),
           NavigationDestination(
             icon: Icon(Icons.history_outlined),

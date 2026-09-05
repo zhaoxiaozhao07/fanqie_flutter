@@ -1,240 +1,270 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/book.dart';
 import '../models/chapter.dart';
 import 'source_service.dart';
 
-/// API 服务 - 负责与番茄小说 API 交互
+/// API 服务 - 负责与番茄小说 FastAPI 后端服务交互
+/// 覆盖后端全部接口：
+/// - GET /health
+/// - GET /api/search
+/// - GET /api/discover (支持多维筛选与分页)
+/// - GET /api/detail
+/// - GET /api/directory (优先章节目录)
+/// - GET /api/book (完整书籍与目录备用)
+/// - GET /api/ios/content (优先正文通道)
+/// - GET /api/content (备用正文通道)
 class ApiService {
-  static const Duration timeout = Duration(seconds: 30);
+  static const Duration timeout = Duration(seconds: 25);
 
   final http.Client _client;
   final SourceService _sourceService = SourceService();
 
-  /// 当前使用的域名在 activeSourceUrls 中的索引
   int get _currentUrlIndex => _sourceService.currentUrlIndex;
   set _currentUrlIndex(int val) => _sourceService.currentUrlIndex = val;
 
-  /// 获取当前可用的域名列表
   List<String> get _baseUrls => _sourceService.activeSourceUrls;
 
-  /// 获取当前使用的域名
   String get _baseUrl {
-    return _sourceService.currentActiveUrl ?? 'https://bk.yydjtc.cn';
+    return _sourceService.currentActiveUrl ?? SourceService.defaultBackendUrl;
   }
 
-  ApiService() : _client = http.Client() {
-    // 确保 SourceService 已初始化（最好在 main.dart 中做，这里尝试补救）
+  ApiService({http.Client? client}) : _client = client ?? http.Client() {
     _sourceService.initialize();
   }
 
-  /// 搜索书籍
-  /// [keyword] 搜索关键词
-  /// [offset] 分页偏移量，默认为 0
-  /// 返回书籍列表
-  Future<List<Book>> searchBooks(String keyword, {int offset = 0}) async {
-    final encodedKeyword = Uri.encodeComponent(keyword);
-    final url =
-        '$_baseUrl/api/search?key=$encodedKeyword&tab_type=3&offset=$offset';
-
-    try {
-      final response = await _client
-          .get(Uri.parse(url), headers: _getHeaders())
-          .timeout(timeout);
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-
-        if (data['code'] == 200) {
-          return _parseSearchResults(data);
-        }
-      }
-      return [];
-    } catch (e) {
-      return [];
-    }
-  }
-
-  /// 获取发现/推荐书籍（榜单）
-  /// [bdtype] 榜单类型：巅峰榜、出版榜、热搜榜、黑马榜、爆更榜、推荐榜、完结榜
-  /// [gender] 性别：1=男频，2=女频
-  /// [page] 页码，从1开始
-  Future<List<Book>> discoverBooks({
-    String bdtype = '巅峰榜',
-    int gender = 1,
-    int page = 1,
-  }) async {
-    final encodedTab = Uri.encodeComponent('小说');
-    final encodedBdtype = Uri.encodeComponent(bdtype);
-    final url =
-        '$_baseUrl/api/discover?tab=$encodedTab&bdtype=$encodedBdtype&gender=$gender&is_ranking=1&page=$page';
-
-    try {
-      final response = await _client
-          .get(Uri.parse(url), headers: _getHeaders())
-          .timeout(timeout);
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-
-        if (data['code'] == 200) {
-          final bookList = data['data'] as List?;
-          if (bookList != null) {
-            return bookList.map((item) => Book.fromDiscoverJson(item)).toList();
-          }
-        }
-      }
-      return [];
-    } catch (e) {
-      return [];
-    }
-  }
-
-  /// 获取发现/推荐书籍（按分类标签）
-  /// [type] 分类类型 ID
-  /// [gender] 性别：1=男频，2=女频
-  /// [page] 页码，从1开始
-  Future<List<Book>> discoverByType({
-    required int type,
-    int gender = 1,
-    int page = 1,
-  }) async {
-    final encodedTab = Uri.encodeComponent('小说');
-    final url =
-        '$_baseUrl/api/discover?tab=$encodedTab&type=$type&gender=$gender&genre_type=0&page=$page';
-
-    try {
-      final response = await _client
-          .get(Uri.parse(url), headers: _getHeaders())
-          .timeout(timeout);
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-
-        if (data['code'] == 200) {
-          final bookList = data['data'] as List?;
-          if (bookList != null) {
-            return bookList.map((item) => Book.fromDiscoverJson(item)).toList();
-          }
-        }
-      }
-      return [];
-    } catch (e) {
-      return [];
-    }
-  }
-
-  /// 获取书籍详情
-  /// [bookId] 书籍 ID
-  Future<Book?> getBookDetail(String bookId) async {
-    final url = '$_baseUrl/api/detail?book_id=$bookId';
-
-    try {
-      final response = await _requestWithRetry(url);
-
-      if (response != null && response.statusCode == 200) {
-        final data = json.decode(response.body);
-
-        if (data['code'] == 200) {
-          final bookData = data['data']?['data'];
-          if (bookData != null) {
-            return Book.fromDetailJson(bookData);
-          }
-        }
-      }
-      return null;
-    } catch (e) {
-      print('获取书籍详情失败: $e');
-      return null;
-    }
-  }
-
-  /// 获取书籍章节目录
-  /// [bookId] 书籍 ID
-  Future<List<Chapter>> getBookChapters(String bookId) async {
-    // 优先使用简化目录接口
-    final chapters = await _getDirectoryChapters(bookId);
-    if (chapters.isNotEmpty) {
-      return chapters;
-    }
-
-    // 回退到完整目录接口
-    return _getBookChapters(bookId);
-  }
-
-  /// 带重试和域名故障转移机制的 HTTP 请求
-  /// [path] API 路径（不含域名部分）
-  /// [maxRetries] 每个域名的最大尝试次数
-  Future<http.Response?> _requestWithRetry(
-    String url, {
+  /// 通用 GET 请求，支持自动多源故障转移和重试
+  Future<http.Response?> _get(
+    String path, {
+    Map<String, dynamic>? queryParameters,
     int maxRetries = 2,
   }) async {
-    // 从 URL 中提取路径部分（用于域名切换时重建 URL）
-    final originalUri = Uri.parse(url);
-    final pathWithQuery = originalUri.hasQuery
-        ? '${originalUri.path}?${originalUri.query}'
-        : originalUri.path;
-
-    // 尝试所有可用域名
     final urls = _baseUrls;
     if (urls.isEmpty) return null;
 
+    final nonNullParams = <String, String>{};
+    if (queryParameters != null) {
+      for (final entry in queryParameters.entries) {
+        if (entry.value != null) {
+          nonNullParams[entry.key] = entry.value.toString();
+        }
+      }
+    }
+
     for (int urlIndex = _currentUrlIndex; urlIndex < urls.length; urlIndex++) {
-      final currentUrl = '${urls[urlIndex]}$pathWithQuery';
+      final baseStr = urls[urlIndex].replaceAll(RegExp(r'/+$'), '');
+      final baseUri = Uri.parse(baseStr);
+      final uri = Uri(
+        scheme: baseUri.scheme,
+        host: baseUri.host,
+        port: baseUri.hasPort ? baseUri.port : null,
+        path: '${baseUri.path}$path'.replaceAll('//', '/'),
+        queryParameters: nonNullParams.isNotEmpty ? nonNullParams : null,
+      );
 
       for (int retry = 0; retry < maxRetries; retry++) {
         try {
           final response = await _client
-              .get(Uri.parse(currentUrl), headers: _getHeaders())
+              .get(uri, headers: _getHeaders())
               .timeout(timeout);
 
           if (response.statusCode == 200) {
-            // 请求成功，更新当前有效域名索引
             if (urlIndex != _currentUrlIndex) {
-              print('域名切换成功: ${urls[_currentUrlIndex]} -> ${urls[urlIndex]}');
               _currentUrlIndex = urlIndex;
             }
             return response;
           }
 
-          // 如果是 5xx 错误，等待后重试
-          if (response.statusCode >= 500) {
-            print('服务器错误 ${response.statusCode}, 重试 ${retry + 1}/$maxRetries');
-            await Future.delayed(Duration(seconds: retry + 1));
+          if (response.statusCode >= 500 && retry < maxRetries - 1) {
+            await Future.delayed(Duration(milliseconds: 500 * (retry + 1)));
             continue;
           }
 
-          return response; // 其他状态码直接返回
+          return response;
         } catch (e) {
-          print('请求失败 [${urls[urlIndex]}] (重试 ${retry + 1}/$maxRetries): $e');
+          if (kDebugMode) {
+            debugPrint('请求异常 [$uri] (重试 ${retry + 1}/$maxRetries): $e');
+          }
           if (retry < maxRetries - 1) {
-            await Future.delayed(Duration(seconds: retry + 1));
+            await Future.delayed(Duration(milliseconds: 500 * (retry + 1)));
           }
         }
       }
-
-      // 当前域名所有重试都失败，尝试下一个域名
-      if (urlIndex < urls.length - 1) {
-        print('域名 ${urls[urlIndex]} 不可用，切换到 ${urls[urlIndex + 1]}');
-      }
     }
 
-    // 所有域名都失败，重置为第一个域名（下次请求重新开始尝试）
     _currentUrlIndex = 0;
     return null;
   }
 
-  /// 使用简化目录接口获取章节
-  Future<List<Chapter>> _getDirectoryChapters(String bookId) async {
-    final url = '$_baseUrl/api/directory?book_id=$bookId';
-
+  /// 1. 健康检查接口 GET /health
+  Future<bool> checkHealth([String? targetUrl]) async {
     try {
-      final response = await _requestWithRetry(url);
+      final base = targetUrl ?? _baseUrl;
+      final uri = Uri.parse('${base.replaceAll(RegExp(r'/+$'), '')}/health');
+      final response = await _client.get(uri).timeout(const Duration(seconds: 4));
+      return response.statusCode == 200;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 2. 搜索书籍接口 GET /api/search
+  /// [keyword] 搜索关键词
+  /// [offset] 分页偏移量，默认为 0
+  /// [tabType] Tab类型，默认为 3（书籍）
+  Future<List<Book>> searchBooks(
+    String keyword, {
+    int offset = 0,
+    int tabType = 3,
+  }) async {
+    try {
+      final response = await _get('/api/search', queryParameters: {
+        'key': keyword,
+        'tab_type': tabType,
+        'offset': offset,
+      });
 
       if (response != null && response.statusCode == 200) {
-        final data = json.decode(response.body);
+        final data = json.decode(utf8.decode(response.bodyBytes));
+        if (data is Map && (data['code'] == 200 || data['code'] == 0)) {
+          return _parseSearchResults(data as Map<String, dynamic>);
+        }
+      }
+      return [];
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('searchBooks error: $e');
+      }
+      return [];
+    }
+  }
 
-        if (data['code'] == 200) {
+  /// 3. 发现/榜单/分类多维筛选接口 GET /api/discover
+  /// [tab] 固定 "小说"
+  /// [bdtype] 榜单类型：巅峰榜、出版榜、热搜榜、黑马榜、爆更榜、推荐榜、完结榜
+  /// [type] 分类ID（玄幻=7、都市=1等）
+  /// [gender] 读者性别：1=男频，2=女频，0=全部
+  /// [isRanking] 是否榜单模式
+  /// [genreType] 分类模式，默认 0
+  /// [creationStatus] 状态：-1=全部，0=已完结，1=连载中
+  /// [wordCount] 字数：-1=全部，1:30万以下，2:30-50万，3:50-100万，4:100-200万，5:200万以上
+  /// [sort] 排序：0最热，1最新，2字数
+  /// [page] 页码，从1开始
+  Future<List<Book>> discoverBooks({
+    String? bdtype,
+    int? type,
+    int gender = 1,
+    bool isRanking = false,
+    int genreType = 0,
+    int? creationStatus,
+    int? wordCount,
+    int sort = 0,
+    int page = 1,
+  }) async {
+    final query = <String, dynamic>{
+      'tab': '小说',
+      'gender': gender,
+      'sort': sort,
+      'page': page,
+    };
+
+    if (isRanking && bdtype != null && bdtype.isNotEmpty) {
+      query['bdtype'] = bdtype;
+      query['is_ranking'] = 1;
+    } else if (type != null) {
+      query['type'] = type;
+      query['genre_type'] = genreType;
+    }
+
+    if (creationStatus != null && creationStatus != -1) {
+      query['creation_status'] = creationStatus;
+    }
+
+    if (wordCount != null && wordCount != -1) {
+      query['word_count'] = wordCount;
+    }
+
+    try {
+      final response = await _get('/api/discover', queryParameters: query);
+      if (response != null && response.statusCode == 200) {
+        final data = json.decode(utf8.decode(response.bodyBytes));
+        if (data is Map && (data['code'] == 200 || data['code'] == 0)) {
+          final bookList = data['data'] as List?;
+          if (bookList != null) {
+            return bookList
+                .whereType<Map>()
+                .map((item) => Book.fromDiscoverJson(Map<String, dynamic>.from(item)))
+                .toList();
+          }
+        }
+      }
+      return [];
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('discoverBooks error: $e');
+      }
+      return [];
+    }
+  }
+
+  /// 发现/分类快捷接口（向后兼容）
+  Future<List<Book>> discoverByType({
+    required int type,
+    int gender = 1,
+    int page = 1,
+    int? creationStatus,
+    int? wordCount,
+    int sort = 0,
+  }) {
+    return discoverBooks(
+      type: type,
+      gender: gender,
+      page: page,
+      creationStatus: creationStatus,
+      wordCount: wordCount,
+      sort: sort,
+      isRanking: false,
+    );
+  }
+
+  /// 4. 书籍详情接口 GET /api/detail
+  /// [bookId] 书籍 ID
+  Future<Book?> getBookDetail(String bookId) async {
+    try {
+      final response = await _get('/api/detail', queryParameters: {
+        'book_id': bookId,
+      });
+
+      if (response != null && response.statusCode == 200) {
+        final data = json.decode(utf8.decode(response.bodyBytes));
+        if (data is Map && (data['code'] == 200 || data['code'] == 0)) {
+          final bookData = data['data']?['data'];
+          if (bookData is Map) {
+            return Book.fromDetailJson(Map<String, dynamic>.from(bookData));
+          }
+        }
+      }
+      return null;
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('获取书籍详情失败: $e');
+      }
+      return null;
+    }
+  }
+
+  /// 5. 简化章节目录接口 GET /api/directory
+  /// [bookId] 书籍 ID
+  Future<List<Chapter>> getBookDirectory(String bookId) async {
+    try {
+      final response = await _get('/api/directory', queryParameters: {
+        'book_id': bookId,
+      });
+
+      if (response != null && response.statusCode == 200) {
+        final data = json.decode(utf8.decode(response.bodyBytes));
+        if (data is Map && (data['code'] == 200 || data['code'] == 0)) {
           final lists = data['data']?['lists'];
           if (lists is List && lists.isNotEmpty) {
             final chapters = <Chapter>[];
@@ -252,123 +282,156 @@ class ApiService {
       }
       return [];
     } catch (e) {
-      print('获取简化目录失败: $e');
+      if (kDebugMode) {
+        debugPrint('获取简化目录失败: $e');
+      }
       return [];
     }
   }
 
-  /// 使用完整目录接口获取章节
-  Future<List<Chapter>> _getBookChapters(String bookId) async {
-    final url = '$_baseUrl/api/book?book_id=$bookId';
-
+  /// 6. 完整书籍信息接口 GET /api/book
+  /// [bookId] 书籍 ID
+  Future<Map<String, dynamic>?> getBookFull(String bookId) async {
     try {
-      final response = await _requestWithRetry(url);
+      final response = await _get('/api/book', queryParameters: {
+        'book_id': bookId,
+      });
 
       if (response != null && response.statusCode == 200) {
-        final data = json.decode(response.body);
-
-        if (data['code'] == 200) {
-          final innerData = data['data']?['data'];
-          if (innerData != null) {
-            // 从 chapterListWithVolume 获取
-            final volumeList = innerData['chapterListWithVolume'] as List?;
-            if (volumeList != null && volumeList.isNotEmpty) {
-              final chapters = <Chapter>[];
-              for (var volume in volumeList) {
-                if (volume is List) {
-                  for (var chapter in volume) {
-                    if (chapter is Map) {
-                      chapters.add(
-                        Chapter.fromBookJson(
-                          Map<String, dynamic>.from(chapter),
-                        ),
-                      );
-                    }
-                  }
-                }
-              }
-              if (chapters.isNotEmpty) return chapters;
-            }
-
-            // 从 allItemIds 获取
-            final allIds = innerData['allItemIds'] as List?;
-            if (allIds != null && allIds.isNotEmpty) {
-              return allIds.asMap().entries.map((entry) {
-                return Chapter(
-                  itemId: entry.value.toString(),
-                  title: '第${entry.key + 1}章',
-                  order: entry.key + 1,
-                );
-              }).toList();
-            }
+        final data = json.decode(utf8.decode(response.bodyBytes));
+        if (data is Map && (data['code'] == 200 || data['code'] == 0)) {
+          final inner = data['data']?['data'];
+          if (inner is Map) {
+            return Map<String, dynamic>.from(inner);
           }
         }
       }
-      return [];
+      return null;
     } catch (e) {
-      print('获取完整目录失败: $e');
-      return [];
+      if (kDebugMode) {
+        debugPrint('获取完整书籍信息失败: $e');
+      }
+      return null;
     }
   }
 
-  /// 获取单个章节内容
+  /// 获取书籍章节目录（优先 /api/directory，失败回退到 /api/book）
+  Future<List<Chapter>> getBookChapters(String bookId) async {
+    final chapters = await getBookDirectory(bookId);
+    if (chapters.isNotEmpty) {
+      return chapters;
+    }
+
+    return _getBookChaptersFromFull(bookId);
+  }
+
+  /// 从 /api/book 提取章节目录
+  Future<List<Chapter>> _getBookChaptersFromFull(String bookId) async {
+    final full = await getBookFull(bookId);
+    if (full == null) return [];
+
+    try {
+      final volumeList = full['chapterListWithVolume'] as List?;
+      if (volumeList != null && volumeList.isNotEmpty) {
+        final chapters = <Chapter>[];
+        for (var volume in volumeList) {
+          if (volume is List) {
+            for (var chapter in volume) {
+              if (chapter is Map) {
+                chapters.add(
+                  Chapter.fromBookJson(Map<String, dynamic>.from(chapter)),
+                );
+              }
+            }
+          }
+        }
+        if (chapters.isNotEmpty) return chapters;
+      }
+
+      final allIds = full['allItemIds'] as List?;
+      if (allIds != null && allIds.isNotEmpty) {
+        return allIds.asMap().entries.map((entry) {
+          return Chapter(
+            itemId: entry.value.toString(),
+            title: '第${entry.key + 1}章',
+            order: entry.key + 1,
+          );
+        }).toList();
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('从完整书籍解析目录失败: $e');
+      }
+    }
+
+    return [];
+  }
+
+  /// 7. 章节正文接口（iOS 通道）GET /api/ios/content
+  /// [itemId] 章节 ID
+  Future<String?> getIosChapterContent(String itemId) async {
+    try {
+      final response = await _get('/api/ios/content', queryParameters: {
+        'item_id': itemId,
+      });
+
+      if (response != null && response.statusCode == 200) {
+        final data = json.decode(utf8.decode(response.bodyBytes));
+        if (data is Map && (data['code'] == 200 || data['code'] == 0)) {
+          final content = data['data']?['content']?.toString();
+          if (content != null && content.isNotEmpty) {
+            return content;
+          }
+        }
+      }
+      return null;
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('iOS 接口获取章节失败: $e');
+      }
+      return null;
+    }
+  }
+
+  /// 8. 章节正文接口（普通通道）GET /api/content
+  /// [itemId] 章节 ID
+  /// [tab] 固定 "小说"
+  Future<String?> getNormalChapterContent(
+    String itemId, {
+    String tab = '小说',
+  }) async {
+    try {
+      final response = await _get('/api/content', queryParameters: {
+        'tab': tab,
+        'item_id': itemId,
+      });
+
+      if (response != null && response.statusCode == 200) {
+        final data = json.decode(utf8.decode(response.bodyBytes));
+        if (data is Map && (data['code'] == 200 || data['code'] == 0)) {
+          final content = data['data']?['content']?.toString();
+          if (content != null && content.isNotEmpty) {
+            return content;
+          }
+        }
+      }
+      return null;
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('普通接口获取章节失败: $e');
+      }
+      return null;
+    }
+  }
+
+  /// 获取单个章节内容（优先 iOS 通道，回退普通通道）
   /// [itemId] 章节 ID
   Future<String?> getChapterContent(String itemId) async {
-    // 优先使用 iOS 接口
-    var content = await _getIosChapterContent(itemId);
+    final content = await getIosChapterContent(itemId);
     if (content != null && content.isNotEmpty) {
       return content;
     }
-
-    // 回退到普通接口
-    return _getNormalChapterContent(itemId);
-  }
-
-  /// 使用 iOS 接口获取章节内容
-  Future<String?> _getIosChapterContent(String itemId) async {
-    final url = '$_baseUrl/api/ios/content?item_id=$itemId';
-
-    try {
-      final response = await _client
-          .get(Uri.parse(url), headers: _getHeaders())
-          .timeout(timeout);
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-
-        if (data['code'] == 200) {
-          return data['data']?['content']?.toString();
-        }
-      }
-      return null;
-    } catch (e) {
-      print('iOS 接口获取章节失败: $e');
-      return null;
-    }
-  }
-
-  /// 使用普通接口获取章节内容
-  Future<String?> _getNormalChapterContent(String itemId) async {
-    final encodedTab = Uri.encodeComponent('小说');
-    final url = '$_baseUrl/api/content?tab=$encodedTab&item_id=$itemId';
-
-    try {
-      final response = await _client
-          .get(Uri.parse(url), headers: _getHeaders())
-          .timeout(timeout);
-
-      if (response.statusCode == 200) {
-        final data = json.decode(response.body);
-
-        if (data['code'] == 200) {
-          return data['data']?['content']?.toString();
-        }
-      }
-      return null;
-    } catch (e) {
-      print('普通接口获取章节失败: $e');
-      return null;
-    }
+    return getNormalChapterContent(itemId);
   }
 
   /// 获取书籍封面图片数据
@@ -389,7 +452,9 @@ class ApiService {
       }
       return null;
     } catch (e) {
-      print('获取封面失败: $e');
+      if (kDebugMode) {
+        debugPrint('获取封面失败: $e');
+      }
       return null;
     }
   }
@@ -397,7 +462,6 @@ class ApiService {
   /// 解析搜索结果
   List<Book> _parseSearchResults(Map<String, dynamic> data) {
     final books = <Book>[];
-
     try {
       final searchTabs = data['data']?['search_tabs'] as List?;
       if (searchTabs != null) {
@@ -409,7 +473,9 @@ class ApiService {
                 final bookDataList = item['book_data'] as List?;
                 if (bookDataList != null) {
                   for (var bookData in bookDataList) {
-                    books.add(Book.fromSearchJson(bookData));
+                    if (bookData is Map) {
+                      books.add(Book.fromSearchJson(Map<String, dynamic>.from(bookData)));
+                    }
                   }
                 }
               }
@@ -418,25 +484,24 @@ class ApiService {
         }
       }
     } catch (e) {
-      print('解析搜索结果失败: $e');
+      if (kDebugMode) {
+        debugPrint('解析搜索结果失败: $e');
+      }
     }
-
     return books;
   }
 
-  /// 获取请求头
+  /// 请求头
   Map<String, String> _getHeaders() {
     return {
       'User-Agent':
           'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
       'Accept': 'application/json, text/plain, */*',
       'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-      'Accept-Encoding': 'gzip, deflate', // 禁用 br 压缩，提高稳定性
       'Connection': 'keep-alive',
     };
   }
 
-  /// 关闭客户端
   void dispose() {
     _client.close();
   }

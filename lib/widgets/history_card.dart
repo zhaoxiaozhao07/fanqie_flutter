@@ -97,7 +97,7 @@ class HistoryCard extends StatelessWidget {
         child: Icon(
           Icons.book,
           size: 32,
-          color: AppTheme.primaryColor.withOpacity(0.5),
+          color: AppTheme.primaryColor.withValues(alpha: 0.5),
         ),
       ),
     );
@@ -188,7 +188,7 @@ class HistoryCard extends StatelessWidget {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
       decoration: BoxDecoration(
-        color: color.withOpacity(0.15),
+        color: color.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(12),
       ),
       child: Text(

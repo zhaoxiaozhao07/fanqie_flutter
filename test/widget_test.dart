@@ -7,6 +7,6 @@ void main() {
     await tester.pumpWidget(const FanqieApp());
 
     // Verify that the app loads with the search screen.
-    expect(find.text('番茄小说'), findsOneWidget);
+    expect(find.text('番茄Reader'), findsOneWidget);
   });
 }

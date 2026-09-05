@@ -39,7 +39,6 @@ class AppTheme {
       seedColor: primaryColor,
       primary: primaryColor,
       surface: surfaceColor,
-      background: backgroundColor,
       brightness: Brightness.light,
     );
 
@@ -125,8 +124,8 @@ class AppTheme {
         elevation: 0,
         indicatorColor: primaryLight,
         labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-        iconTheme: MaterialStateProperty.resolveWith((states) {
-          if (states.contains(MaterialState.selected)) {
+        iconTheme: WidgetStateProperty.resolveWith((states) {
+          if (states.contains(WidgetState.selected)) {
             return const IconThemeData(color: primaryColor);
           }
           return const IconThemeData(color: textSecondary);

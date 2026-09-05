@@ -8,7 +8,7 @@ import 'search_results_screen.dart';
 import 'book_detail_screen.dart';
 import 'source_management_screen.dart';
 
-/// 搜索页面
+/// 搜索与发现主页面
 class SearchScreen extends StatefulWidget {
   const SearchScreen({super.key});
 
@@ -47,19 +47,52 @@ class _SearchScreenState extends State<SearchScreen> {
     '单女主': 389,
     '多女主': 91,
     '都市': 1,
+    '科幻': 9,
+    '游戏': 6,
+    '历史': 4,
+    '悬疑': 8,
+  };
+
+  // 排序选项
+  static const Map<int, String> _sortOptions = {
+    0: '最热',
+    1: '最新',
+    2: '字数',
+  };
+
+  // 连载状态选项
+  static const Map<int, String> _statusOptions = {
+    -1: '全部状态',
+    1: '连载中',
+    0: '已完结',
+  };
+
+  // 字数选项
+  static const Map<int, String> _wordCountOptions = {
+    -1: '全部字数',
+    1: '30万以下',
+    2: '30-50万',
+    3: '50-100万',
+    4: '100-200万',
+    5: '200万以上',
   };
 
   bool _isLoading = true;
   bool _isLoadingMore = false;
   bool _hasMore = true;
   List<Book> _discoverBooks = [];
-  int _currentGender = 1;
-  int _currentPage = 1;
 
+  int _currentPage = 1;
   bool _isRankingMode = true;
   String _currentRankingType = '巅峰榜';
   String _currentCategoryName = '玄幻';
   int _currentCategoryType = 7;
+
+  // 多维筛选状态
+  int _currentGender = 1; // 1=男频, 2=女频, 0=全部
+  int _currentSort = 0; // 0=最热, 1=最新, 2=字数
+  int _currentStatus = -1; // -1=全部, 1=连载, 0=完结
+  int _currentWordCount = -1; // -1=全部
 
   @override
   void initState() {
@@ -77,8 +110,9 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   void _onScroll() {
-    if (_scrollController.position.pixels >=
-        _scrollController.position.maxScrollExtent - 200) {
+    if (_scrollController.hasClients &&
+        _scrollController.position.pixels >=
+            _scrollController.position.maxScrollExtent - 200) {
       _loadMoreBooks();
     }
   }
@@ -91,30 +125,31 @@ class _SearchScreenState extends State<SearchScreen> {
     });
 
     try {
-      List<Book> books;
-      if (_isRankingMode) {
-        books = await _apiService.discoverBooks(
-          bdtype: _currentRankingType,
-          gender: _currentGender,
-          page: _currentPage,
-        );
-      } else {
-        books = await _apiService.discoverByType(
-          type: _currentCategoryType,
-          gender: _currentGender,
-          page: _currentPage,
-        );
+      final books = await _apiService.discoverBooks(
+        bdtype: _isRankingMode ? _currentRankingType : null,
+        type: !_isRankingMode ? _currentCategoryType : null,
+        gender: _currentGender,
+        isRanking: _isRankingMode,
+        creationStatus: _currentStatus,
+        wordCount: _currentWordCount,
+        sort: _currentSort,
+        page: 1,
+      );
+
+      if (mounted) {
+        setState(() {
+          _discoverBooks = books;
+          _isLoading = false;
+          _hasMore = books.isNotEmpty;
+        });
       }
-      setState(() {
-        _discoverBooks = books;
-        _isLoading = false;
-        _hasMore = books.isNotEmpty;
-      });
     } catch (e) {
-      setState(() {
-        _discoverBooks = [];
-        _isLoading = false;
-      });
+      if (mounted) {
+        setState(() {
+          _discoverBooks = [];
+          _isLoading = false;
+        });
+      }
     }
   }
 
@@ -125,28 +160,29 @@ class _SearchScreenState extends State<SearchScreen> {
 
     try {
       final nextPage = _currentPage + 1;
-      List<Book> books;
-      if (_isRankingMode) {
-        books = await _apiService.discoverBooks(
-          bdtype: _currentRankingType,
-          gender: _currentGender,
-          page: nextPage,
-        );
-      } else {
-        books = await _apiService.discoverByType(
-          type: _currentCategoryType,
-          gender: _currentGender,
-          page: nextPage,
-        );
+      final books = await _apiService.discoverBooks(
+        bdtype: _isRankingMode ? _currentRankingType : null,
+        type: !_isRankingMode ? _currentCategoryType : null,
+        gender: _currentGender,
+        isRanking: _isRankingMode,
+        creationStatus: _currentStatus,
+        wordCount: _currentWordCount,
+        sort: _currentSort,
+        page: nextPage,
+      );
+
+      if (mounted) {
+        setState(() {
+          _discoverBooks.addAll(books);
+          _currentPage = nextPage;
+          _isLoadingMore = false;
+          _hasMore = books.isNotEmpty;
+        });
       }
-      setState(() {
-        _discoverBooks.addAll(books);
-        _currentPage = nextPage;
-        _isLoadingMore = false;
-        _hasMore = books.isNotEmpty;
-      });
     } catch (e) {
-      setState(() => _isLoadingMore = false);
+      if (mounted) {
+        setState(() => _isLoadingMore = false);
+      }
     }
   }
 
@@ -174,12 +210,12 @@ class _SearchScreenState extends State<SearchScreen> {
     }
   }
 
-  Future<void> _performSearch() async {
+  void _performSearch() {
     final keyword = _searchController.text.trim();
     if (keyword.isEmpty) {
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(const SnackBar(content: Text('请输入搜索关键词')));
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('请输入搜索关键词')),
+      );
       return;
     }
 
@@ -198,12 +234,165 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
+  /// 打开多维高级筛选底部弹窗
+  void _showFilterBottomSheet() {
+    var tempSort = _currentSort;
+    var tempStatus = _currentStatus;
+    var tempWordCount = _currentWordCount;
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            return SafeArea(
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  maxHeight: MediaQuery.of(context).size.height * 0.85,
+                ),
+                child: SingleChildScrollView(
+                  physics: const BouncingScrollPhysics(),
+                  padding: EdgeInsets.fromLTRB(
+                    20,
+                    16,
+                    20,
+                    MediaQuery.of(context).viewInsets.bottom + 24,
+                  ),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      const Text(
+                        '筛选条件',
+                        style: TextStyle(
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                          color: AppTheme.textPrimary,
+                        ),
+                      ),
+                      TextButton(
+                        onPressed: () {
+                          setModalState(() {
+                            tempSort = 0;
+                            tempStatus = -1;
+                            tempWordCount = -1;
+                          });
+                        },
+                        child: const Text('重置'),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+
+                  // 排序方式
+                  const Text('排序方式', style: TextStyle(fontSize: 13, color: AppTheme.textSecondary, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    children: _sortOptions.entries.map((entry) {
+                      final isSelected = tempSort == entry.key;
+                      return ChoiceChip(
+                        label: Text(entry.value),
+                        selected: isSelected,
+                        onSelected: (selected) {
+                          if (selected) {
+                            setModalState(() => tempSort = entry.key);
+                          }
+                        },
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 14),
+
+                  // 完结状态
+                  const Text('书籍状态', style: TextStyle(fontSize: 13, color: AppTheme.textSecondary, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    children: _statusOptions.entries.map((entry) {
+                      final isSelected = tempStatus == entry.key;
+                      return ChoiceChip(
+                        label: Text(entry.value),
+                        selected: isSelected,
+                        onSelected: (selected) {
+                          if (selected) {
+                            setModalState(() => tempStatus = entry.key);
+                          }
+                        },
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 14),
+
+                  // 字数区间
+                  const Text('字数区间', style: TextStyle(fontSize: 13, color: AppTheme.textSecondary, fontWeight: FontWeight.bold)),
+                  const SizedBox(height: 8),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: _wordCountOptions.entries.map((entry) {
+                      final isSelected = tempWordCount == entry.key;
+                      return ChoiceChip(
+                        label: Text(entry.value),
+                        selected: isSelected,
+                        onSelected: (selected) {
+                          if (selected) {
+                            setModalState(() => tempWordCount = entry.key);
+                          }
+                        },
+                      );
+                    }).toList(),
+                  ),
+                  const SizedBox(height: 20),
+
+                  // 确定按钮
+                  SizedBox(
+                    width: double.infinity,
+                    child: ElevatedButton(
+                      onPressed: () {
+                        Navigator.pop(ctx);
+                        setState(() {
+                          _currentSort = tempSort;
+                          _currentStatus = tempStatus;
+                          _currentWordCount = tempWordCount;
+                        });
+                        _loadDiscoverBooks();
+                      },
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppTheme.primaryColor,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(20),
+                        ),
+                      ),
+                      child: const Text('确定筛选', style: TextStyle(fontSize: 15, fontWeight: FontWeight.bold)),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  },
+);
+}
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: Column(
         children: [
-          // Gradient Header
+          // 顶部渐变导航与搜索栏
           Container(
             padding: EdgeInsets.only(top: MediaQuery.of(context).padding.top),
             decoration: const BoxDecoration(
@@ -211,9 +400,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 begin: Alignment.topCenter,
                 end: Alignment.bottomCenter,
                 colors: [
-                  Color(
-                    0xFFFFE0E0,
-                  ), // Slightly stronger pale red for visibility
+                  Color(0xFFFFE8E8),
                   Colors.white,
                 ],
                 stops: [0.0, 1.0],
@@ -221,15 +408,14 @@ class _SearchScreenState extends State<SearchScreen> {
             ),
             child: Column(
               children: [
-                // Custom Title Area
-                Container(
+                SizedBox(
                   height: 44,
                   width: double.infinity,
                   child: Stack(
                     alignment: Alignment.center,
                     children: [
                       const Text(
-                        '番茄小说',
+                        '番茄Reader',
                         style: TextStyle(
                           fontSize: 18,
                           fontWeight: FontWeight.w600,
@@ -244,14 +430,14 @@ class _SearchScreenState extends State<SearchScreen> {
                             size: 24,
                             color: AppTheme.textPrimary,
                           ),
+                          tooltip: 'API 源设置',
                           onPressed: () {
                             Navigator.push(
                               context,
                               MaterialPageRoute(
-                                builder: (context) =>
-                                    const SourceManagementScreen(),
+                                builder: (context) => const SourceManagementScreen(),
                               ),
-                            );
+                            ).then((_) => _loadDiscoverBooks());
                           },
                         ),
                       ),
@@ -270,16 +456,15 @@ class _SearchScreenState extends State<SearchScreen> {
 
   Widget _buildSearchArea() {
     return Container(
-      // Background is handled by parent gradient container
-      padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       child: Row(
         children: [
           Expanded(
             child: Container(
-              height: 36, // Fixed smaller height
+              height: 38,
               decoration: BoxDecoration(
-                color: const Color(0xFFF5F5F5),
-                borderRadius: BorderRadius.circular(18),
+                color: const Color(0xFFF2F4F7),
+                borderRadius: BorderRadius.circular(19),
               ),
               child: TextField(
                 controller: _searchController,
@@ -307,8 +492,6 @@ class _SearchScreenState extends State<SearchScreen> {
                       : null,
                   filled: false,
                   border: InputBorder.none,
-                  enabledBorder: InputBorder.none,
-                  focusedBorder: InputBorder.none,
                   contentPadding: const EdgeInsets.symmetric(horizontal: 16),
                   isDense: true,
                 ),
@@ -320,18 +503,18 @@ class _SearchScreenState extends State<SearchScreen> {
               ),
             ),
           ),
-          const SizedBox(width: 12),
+          const SizedBox(width: 10),
           ElevatedButton(
             onPressed: _performSearch,
             style: ElevatedButton.styleFrom(
               backgroundColor: AppTheme.primaryColor,
               foregroundColor: Colors.white,
               elevation: 0,
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              minimumSize: const Size(0, 36),
-              fixedSize: const Size.fromHeight(36),
+              padding: const EdgeInsets.symmetric(horizontal: 18),
+              minimumSize: const Size(0, 38),
+              fixedSize: const Size.fromHeight(38),
               shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(18),
+                borderRadius: BorderRadius.circular(19),
               ),
             ),
             child: const Text(
@@ -348,25 +531,24 @@ class _SearchScreenState extends State<SearchScreen> {
     return Column(
       children: [
         _buildFilterBar(),
+        _buildSubFilterBar(),
         Expanded(child: _buildBookList()),
       ],
     );
   }
 
   Widget _buildFilterBar() {
-    return Container(
-      padding: const EdgeInsets.symmetric(
-        horizontal: 16,
-        vertical: 4,
-      ), // Reduced vertical padding
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: Row(
         children: [
           _buildRankingPopupMenu(),
           const SizedBox(width: 8),
           _buildCategoryPopupMenu(),
-          const Spacer(), // 这里添加 Spacer 将性别切换推到右侧
+          const Spacer(),
           SegmentedButton<int>(
             segments: const [
+              ButtonSegment(value: 0, label: Text('全部')),
               ButtonSegment(value: 1, label: Text('男频')),
               ButtonSegment(value: 2, label: Text('女频')),
             ],
@@ -377,8 +559,116 @@ class _SearchScreenState extends State<SearchScreen> {
             },
             style: const ButtonStyle(
               visualDensity: VisualDensity.compact,
-              padding: MaterialStatePropertyAll(
-                EdgeInsets.symmetric(horizontal: 8),
+              padding: WidgetStatePropertyAll(
+                EdgeInsets.symmetric(horizontal: 6),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 次级筛选条：排序、状态与更多筛选
+  Widget _buildSubFilterBar() {
+    final hasActiveFilter = _currentStatus != -1 || _currentWordCount != -1 || _currentSort != 0;
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 4, 16, 6),
+      child: Row(
+        children: [
+          // 快捷排序选择
+          GestureDetector(
+            onTap: () {
+              setState(() {
+                _currentSort = (_currentSort + 1) % 3;
+              });
+              _loadDiscoverBooks();
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF3F4F6),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.sort, size: 14, color: AppTheme.textSecondary),
+                  const SizedBox(width: 4),
+                  Text(
+                    '排序: ${_sortOptions[_currentSort]}',
+                    style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          const SizedBox(width: 8),
+
+          // 快捷状态切换
+          GestureDetector(
+            onTap: () {
+              setState(() {
+                if (_currentStatus == -1) {
+                  _currentStatus = 1;
+                } else if (_currentStatus == 1) {
+                  _currentStatus = 0;
+                } else {
+                  _currentStatus = -1;
+                }
+              });
+              _loadDiscoverBooks();
+            },
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: const Color(0xFFF3F4F6),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                _currentStatus == -1
+                    ? '状态: 全部'
+                    : (_currentStatus == 1 ? '状态: 连载' : '状态: 完结'),
+                style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+              ),
+            ),
+          ),
+          const Spacer(),
+
+          // 更多筛选按钮
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _showFilterBottomSheet,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: hasActiveFilter
+                    ? AppTheme.primaryColor.withValues(alpha: 0.1)
+                    : const Color(0xFFF3F4F6),
+                borderRadius: BorderRadius.circular(12),
+                border: hasActiveFilter
+                    ? Border.all(color: AppTheme.primaryColor.withValues(alpha: 0.4))
+                    : null,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.filter_list_rounded,
+                    size: 14,
+                    color: hasActiveFilter ? AppTheme.primaryColor : AppTheme.textSecondary,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    hasActiveFilter ? '已筛选' : '更多筛选',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: hasActiveFilter ? FontWeight.bold : FontWeight.normal,
+                      color: hasActiveFilter ? AppTheme.primaryColor : AppTheme.textSecondary,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -409,9 +699,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 child: Text(
                   type,
                   style: TextStyle(
-                    fontWeight: isSelected
-                        ? FontWeight.bold
-                        : FontWeight.normal,
+                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
                     color: isSelected ? AppTheme.primaryColor : null,
                   ),
                 ),
@@ -434,7 +722,6 @@ class _SearchScreenState extends State<SearchScreen> {
   Widget _buildCategoryPopupMenu() {
     final items = <PopupMenuEntry<MapEntry<String, int>>>[];
 
-    // 添加标题
     items.add(
       PopupMenuItem<MapEntry<String, int>>(
         enabled: false,
@@ -462,7 +749,6 @@ class _SearchScreenState extends State<SearchScreen> {
     );
     items.add(const PopupMenuDivider(height: 1));
 
-    // 添加分类选项
     for (final entry in _categoryTypes.entries) {
       final isSelected = !_isRankingMode && entry.key == _currentCategoryName;
       items.add(
@@ -481,9 +767,7 @@ class _SearchScreenState extends State<SearchScreen> {
                 child: Text(
                   entry.key,
                   style: TextStyle(
-                    fontWeight: isSelected
-                        ? FontWeight.bold
-                        : FontWeight.normal,
+                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
                     color: isSelected ? AppTheme.accentColor : null,
                   ),
                 ),
@@ -522,7 +806,7 @@ class _SearchScreenState extends State<SearchScreen> {
       decoration: BoxDecoration(
         gradient: isActive
             ? LinearGradient(
-                colors: [activeColor, activeColor.withOpacity(0.7)],
+                colors: [activeColor, activeColor.withValues(alpha: 0.7)],
                 begin: Alignment.topLeft,
                 end: Alignment.bottomRight,
               )
@@ -533,7 +817,7 @@ class _SearchScreenState extends State<SearchScreen> {
         boxShadow: isActive
             ? [
                 BoxShadow(
-                  color: activeColor.withOpacity(0.3),
+                  color: activeColor.withValues(alpha: 0.3),
                   blurRadius: 6,
                   offset: const Offset(0, 2),
                 ),
@@ -569,9 +853,7 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   Widget _buildBookList() {
-    final currentLabel = _isRankingMode
-        ? _currentRankingType
-        : _currentCategoryName;
+    final currentLabel = _isRankingMode ? _currentRankingType : _currentCategoryName;
 
     if (_isLoading) {
       return LoadingWidget(message: '加载$currentLabel...');
@@ -580,8 +862,8 @@ class _SearchScreenState extends State<SearchScreen> {
     if (_discoverBooks.isEmpty) {
       return const EmptyStateWidget(
         icon: Icons.book_outlined,
-        title: '暂无推荐内容',
-        subtitle: '请稍后再试',
+        title: '暂无符合条件的内容',
+        subtitle: '尝试更改筛选或分类条件',
       );
     }
 
@@ -589,10 +871,7 @@ class _SearchScreenState extends State<SearchScreen> {
       onRefresh: _loadDiscoverBooks,
       child: ListView.builder(
         controller: _scrollController,
-        padding: const EdgeInsets.only(
-          top: 0,
-          bottom: 16,
-        ), // Explicitly remove top padding
+        padding: const EdgeInsets.only(top: 0, bottom: 16),
         itemCount: _discoverBooks.length + (_hasMore ? 1 : 0),
         itemBuilder: (context, index) {
           if (index == _discoverBooks.length) {
@@ -605,7 +884,7 @@ class _SearchScreenState extends State<SearchScreen> {
           final book = _discoverBooks[index];
           return BookCard(
             book: book,
-            showAbstract: false, // Hide abstract on home screen
+            showAbstract: false,
             onTap: () => _navigateToDetail(book),
           );
         },
