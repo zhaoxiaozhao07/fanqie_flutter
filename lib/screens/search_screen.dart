@@ -537,30 +537,74 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
+  /// 顶部筛选行：左侧性别胶囊切换（全部/男频/女频），右侧【高级筛选】
   Widget _buildFilterBar() {
+    final hasActiveFilter =
+        _currentStatus != -1 || _currentWordCount != -1 || _currentSort != 0;
+
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
       child: Row(
         children: [
-          _buildRankingPopupMenu(),
-          const SizedBox(width: 8),
-          _buildCategoryPopupMenu(),
+          // 性别胶囊切换器：紧凑且永不越界
+          Container(
+            height: 32,
+            padding: const EdgeInsets.all(2),
+            decoration: BoxDecoration(
+              color: const Color(0xFFF2F4F7),
+              borderRadius: BorderRadius.circular(16),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                _buildGenderPill(0, '全部'),
+                _buildGenderPill(1, '男频'),
+                _buildGenderPill(2, '女频'),
+              ],
+            ),
+          ),
           const Spacer(),
-          SegmentedButton<int>(
-            segments: const [
-              ButtonSegment(value: 0, label: Text('全部')),
-              ButtonSegment(value: 1, label: Text('男频')),
-              ButtonSegment(value: 2, label: Text('女频')),
-            ],
-            selected: {_currentGender},
-            showSelectedIcon: false,
-            onSelectionChanged: (selection) {
-              _switchGender(selection.first);
-            },
-            style: const ButtonStyle(
-              visualDensity: VisualDensity.compact,
-              padding: WidgetStatePropertyAll(
-                EdgeInsets.symmetric(horizontal: 6),
+          // 高级筛选按钮
+          GestureDetector(
+            behavior: HitTestBehavior.opaque,
+            onTap: _showFilterBottomSheet,
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: hasActiveFilter
+                    ? AppTheme.primaryColor.withValues(alpha: 0.1)
+                    : const Color(0xFFF2F4F7),
+                borderRadius: BorderRadius.circular(16),
+                border: hasActiveFilter
+                    ? Border.all(
+                        color: AppTheme.primaryColor.withValues(alpha: 0.4),
+                      )
+                    : null,
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.tune_rounded,
+                    size: 14,
+                    color: hasActiveFilter
+                        ? AppTheme.primaryColor
+                        : AppTheme.textSecondary,
+                  ),
+                  const SizedBox(width: 4),
+                  Text(
+                    hasActiveFilter ? '已筛选' : '高级筛选',
+                    style: TextStyle(
+                      fontSize: 12,
+                      fontWeight: hasActiveFilter
+                          ? FontWeight.bold
+                          : FontWeight.normal,
+                      color: hasActiveFilter
+                          ? AppTheme.primaryColor
+                          : AppTheme.textSecondary,
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
@@ -569,110 +613,136 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  /// 次级筛选条：排序、状态与更多筛选
+  Widget _buildGenderPill(int value, String label) {
+    final isSelected = _currentGender == value;
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: () => _switchGender(value),
+      child: Container(
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+        decoration: BoxDecoration(
+          color: isSelected ? AppTheme.primaryColor : Colors.transparent,
+          borderRadius: BorderRadius.circular(14),
+          boxShadow: isSelected
+              ? [
+                  BoxShadow(
+                    color: AppTheme.primaryColor.withValues(alpha: 0.3),
+                    blurRadius: 4,
+                    offset: const Offset(0, 1),
+                  ),
+                ]
+              : null,
+        ),
+        child: Text(
+          label,
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+            color: isSelected ? Colors.white : AppTheme.textSecondary,
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 次级筛选条：横向滑动单行芯片栏，包含榜单、分类、排序、状态
   Widget _buildSubFilterBar() {
-    final hasActiveFilter = _currentStatus != -1 || _currentWordCount != -1 || _currentSort != 0;
-
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(16, 4, 16, 6),
-      child: Row(
-        children: [
-          // 快捷排序选择
-          GestureDetector(
-            onTap: () {
-              setState(() {
-                _currentSort = (_currentSort + 1) % 3;
-              });
-              _loadDiscoverBooks();
-            },
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: const Color(0xFFF3F4F6),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.sort, size: 14, color: AppTheme.textSecondary),
-                  const SizedBox(width: 4),
-                  Text(
-                    '排序: ${_sortOptions[_currentSort]}',
-                    style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(width: 8),
-
-          // 快捷状态切换
-          GestureDetector(
-            onTap: () {
-              setState(() {
-                if (_currentStatus == -1) {
-                  _currentStatus = 1;
-                } else if (_currentStatus == 1) {
-                  _currentStatus = 0;
-                } else {
-                  _currentStatus = -1;
-                }
-              });
-              _loadDiscoverBooks();
-            },
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: const Color(0xFFF3F4F6),
-                borderRadius: BorderRadius.circular(12),
-              ),
-              child: Text(
-                _currentStatus == -1
-                    ? '状态: 全部'
-                    : (_currentStatus == 1 ? '状态: 连载' : '状态: 完结'),
-                style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
-              ),
-            ),
-          ),
-          const Spacer(),
-
-          // 更多筛选按钮
-          GestureDetector(
-            behavior: HitTestBehavior.opaque,
-            onTap: _showFilterBottomSheet,
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: hasActiveFilter
-                    ? AppTheme.primaryColor.withValues(alpha: 0.1)
-                    : const Color(0xFFF3F4F6),
-                borderRadius: BorderRadius.circular(12),
-                border: hasActiveFilter
-                    ? Border.all(color: AppTheme.primaryColor.withValues(alpha: 0.4))
-                    : null,
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.filter_list_rounded,
-                    size: 14,
-                    color: hasActiveFilter ? AppTheme.primaryColor : AppTheme.textSecondary,
-                  ),
-                  const SizedBox(width: 4),
-                  Text(
-                    hasActiveFilter ? '已筛选' : '更多筛选',
-                    style: TextStyle(
-                      fontSize: 12,
-                      fontWeight: hasActiveFilter ? FontWeight.bold : FontWeight.normal,
-                      color: hasActiveFilter ? AppTheme.primaryColor : AppTheme.textSecondary,
+    return Container(
+      height: 38,
+      margin: const EdgeInsets.only(top: 2, bottom: 6),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        physics: const BouncingScrollPhysics(),
+        padding: const EdgeInsets.symmetric(horizontal: 16),
+        child: Row(
+          children: [
+            _buildRankingPopupMenu(),
+            const SizedBox(width: 8),
+            _buildCategoryPopupMenu(),
+            const SizedBox(width: 8),
+            // 快捷排序选择
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                setState(() {
+                  _currentSort = (_currentSort + 1) % 3;
+                });
+                _loadDiscoverBooks();
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _currentSort != 0
+                      ? AppTheme.primaryColor.withValues(alpha: 0.08)
+                      : const Color(0xFFF3F4F6),
+                  borderRadius: BorderRadius.circular(16),
+                  border: _currentSort != 0
+                      ? Border.all(color: AppTheme.primaryColor.withValues(alpha: 0.3))
+                      : null,
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.sort_rounded,
+                      size: 14,
+                      color: _currentSort != 0 ? AppTheme.primaryColor : AppTheme.textSecondary,
                     ),
-                  ),
-                ],
+                    const SizedBox(width: 4),
+                    Text(
+                      '排序: ${_sortOptions[_currentSort]}',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: _currentSort != 0 ? FontWeight.bold : FontWeight.normal,
+                        color: _currentSort != 0 ? AppTheme.primaryColor : AppTheme.textSecondary,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             ),
-          ),
-        ],
+            const SizedBox(width: 8),
+
+            // 快捷状态切换
+            GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                setState(() {
+                  if (_currentStatus == -1) {
+                    _currentStatus = 1;
+                  } else if (_currentStatus == 1) {
+                    _currentStatus = 0;
+                  } else {
+                    _currentStatus = -1;
+                  }
+                });
+                _loadDiscoverBooks();
+              },
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                decoration: BoxDecoration(
+                  color: _currentStatus != -1
+                      ? AppTheme.primaryColor.withValues(alpha: 0.08)
+                      : const Color(0xFFF3F4F6),
+                  borderRadius: BorderRadius.circular(16),
+                  border: _currentStatus != -1
+                      ? Border.all(color: AppTheme.primaryColor.withValues(alpha: 0.3))
+                      : null,
+                ),
+                child: Text(
+                  _currentStatus == -1
+                      ? '状态: 全部'
+                      : (_currentStatus == 1 ? '状态: 连载' : '状态: 完结'),
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: _currentStatus != -1 ? FontWeight.bold : FontWeight.normal,
+                    color: _currentStatus != -1 ? AppTheme.primaryColor : AppTheme.textSecondary,
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -802,7 +872,7 @@ class _SearchScreenState extends State<SearchScreen> {
     required Color activeColor,
   }) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       decoration: BoxDecoration(
         gradient: isActive
             ? LinearGradient(
@@ -811,15 +881,15 @@ class _SearchScreenState extends State<SearchScreen> {
                 end: Alignment.bottomRight,
               )
             : null,
-        color: isActive ? null : Colors.grey[100],
-        borderRadius: BorderRadius.circular(20),
-        border: isActive ? null : Border.all(color: Colors.grey[300]!),
+        color: isActive ? null : const Color(0xFFF3F4F6),
+        borderRadius: BorderRadius.circular(16),
+        border: isActive ? null : Border.all(color: Colors.transparent),
         boxShadow: isActive
             ? [
                 BoxShadow(
                   color: activeColor.withValues(alpha: 0.3),
-                  blurRadius: 6,
-                  offset: const Offset(0, 2),
+                  blurRadius: 4,
+                  offset: const Offset(0, 1),
                 ),
               ]
             : null,
@@ -829,23 +899,23 @@ class _SearchScreenState extends State<SearchScreen> {
         children: [
           Icon(
             icon,
-            size: 16,
-            color: isActive ? Colors.white : Colors.grey[600],
+            size: 15,
+            color: isActive ? Colors.white : AppTheme.textSecondary,
           ),
-          const SizedBox(width: 6),
+          const SizedBox(width: 4),
           Text(
             label,
             style: TextStyle(
-              color: isActive ? Colors.white : Colors.grey[600],
+              color: isActive ? Colors.white : AppTheme.textSecondary,
               fontWeight: isActive ? FontWeight.bold : FontWeight.normal,
-              fontSize: 13,
+              fontSize: 12,
             ),
           ),
           const SizedBox(width: 2),
           Icon(
             Icons.arrow_drop_down,
-            size: 18,
-            color: isActive ? Colors.white : Colors.grey[600],
+            size: 16,
+            color: isActive ? Colors.white : AppTheme.textSecondary,
           ),
         ],
       ),
