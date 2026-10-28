@@ -1,5 +1,8 @@
 package com.fanqie.fanqie_flutter
 
+import android.media.MediaPlayer
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.view.KeyEvent
 import android.content.Context
 import android.content.ContentValues
@@ -14,11 +17,15 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.io.FileInputStream
+import java.util.Locale
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.fanqie.fanqie_flutter/download"
     private var volumeKeyScrollEnabled = false
     private var channelInstance: MethodChannel? = null
+    private var nativeTts: TextToSpeech? = null
+    private var nativeTtsReady = false
+    private var mediaPlayer: MediaPlayer? = null
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
@@ -59,10 +66,112 @@ class MainActivity: FlutterActivity() {
                 } catch (e: Exception) {
                     result.success(-1)
                 }
+            } else if (call.method == "initNativeTts") {
+                if (nativeTts == null) {
+                    nativeTts = TextToSpeech(applicationContext) { status ->
+                        if (status == TextToSpeech.SUCCESS) {
+                            nativeTts?.language = Locale.CHINESE
+                            nativeTtsReady = true
+                            nativeTts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                                override fun onStart(utteranceId: String?) {}
+                                override fun onDone(utteranceId: String?) {
+                                    runOnUiThread {
+                                        channelInstance?.invokeMethod("onTtsComplete", utteranceId)
+                                    }
+                                }
+                                override fun onError(utteranceId: String?) {
+                                    runOnUiThread {
+                                        channelInstance?.invokeMethod("onTtsError", utteranceId)
+                                    }
+                                }
+                            })
+                        }
+                    }
+                }
+                result.success(true)
+            } else if (call.method == "speakNativeTts") {
+                val text = call.argument<String>("text") ?: ""
+                val rate = call.argument<Double>("rate") ?: 1.0
+                val id = call.argument<String>("id") ?: "tts"
+                if (nativeTtsReady && nativeTts != null) {
+                    nativeTts?.setSpeechRate(rate.toFloat())
+                    nativeTts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
+                    result.success(true)
+                } else {
+                    result.success(false)
+                }
+            } else if (call.method == "stopNativeTts") {
+                nativeTts?.stop()
+                result.success(true)
+            } else if (call.method == "playAudioFile") {
+                val filePath = call.argument<String>("filePath")
+                if (filePath != null && File(filePath).exists()) {
+                    try {
+                        mediaPlayer?.release()
+                        mediaPlayer = MediaPlayer().apply {
+                            setDataSource(filePath)
+                            setOnCompletionListener {
+                                runOnUiThread {
+                                    channelInstance?.invokeMethod("onAudioComplete", null)
+                                }
+                            }
+                            setOnErrorListener { _, _, _ ->
+                                runOnUiThread {
+                                    channelInstance?.invokeMethod("onAudioError", null)
+                                }
+                                true
+                            }
+                            prepare()
+                            start()
+                        }
+                        result.success(true)
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                        result.success(false)
+                    }
+                } else {
+                    result.success(false)
+                }
+            } else if (call.method == "pauseAudio") {
+                try {
+                    if (mediaPlayer?.isPlaying == true) {
+                        mediaPlayer?.pause()
+                    }
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.success(false)
+                }
+            } else if (call.method == "resumeAudio") {
+                try {
+                    mediaPlayer?.start()
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.success(false)
+                }
+            } else if (call.method == "stopAudio") {
+                try {
+                    mediaPlayer?.stop()
+                    mediaPlayer?.release()
+                    mediaPlayer = null
+                    result.success(true)
+                } catch (e: Exception) {
+                    result.success(false)
+                }
             } else {
                 result.notImplemented()
             }
         }
+    }
+
+    override fun onDestroy() {
+        try {
+            nativeTts?.stop()
+            nativeTts?.shutdown()
+            nativeTts = null
+            mediaPlayer?.release()
+            mediaPlayer = null
+        } catch (e: Exception) {}
+        super.onDestroy()
     }
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {

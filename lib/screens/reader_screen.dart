@@ -9,6 +9,8 @@ import '../services/bookshelf_service.dart';
 import '../services/download_service.dart';
 import '../services/reading_history_service.dart';
 import '../services/reader_system_service.dart';
+import '../services/tts_service.dart';
+import '../widgets/tts_player_panel.dart';
 
 /// 阅读器主题配置
 class ReaderTheme {
@@ -136,6 +138,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   @override
   void dispose() {
+    TtsService().stop();
     _statusTimer?.cancel();
     ReaderSystemService.setKeepScreenOn(false);
     ReaderSystemService.setVolumeKeyScrollEnabled(false);
@@ -925,6 +928,18 @@ class _ReaderScreenState extends State<ReaderScreen> {
               right: 0,
               child: _buildBottomBar(theme),
             ),
+
+          // 听书浮动控制面板 (听书开启时常驻底部)
+          Positioned(
+            bottom: 0,
+            left: 0,
+            right: 0,
+            child: TtsPlayerPanel(
+              onClose: () {
+                setState(() {});
+              },
+            ),
+          ),
         ],
       ),
     );
@@ -1224,6 +1239,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 onPressed: _showDirectoryDrawer,
               ),
               IconButton(
+                icon: Icon(Icons.headphones_rounded, size: 22, color: theme.textColor),
+                tooltip: '听书',
+                onPressed: _startTtsReading,
+              ),
+              IconButton(
                 icon: Icon(Icons.download_for_offline_outlined, size: 22, color: theme.textColor),
                 tooltip: '批量离线',
                 onPressed: _showQuickCacheModal,
@@ -1233,6 +1253,38 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ),
       ),
     );
+  }
+
+  Future<void> _startTtsReading() async {
+    final tts = TtsService();
+    if (tts.isActive) {
+      if (tts.isPlaying) {
+        tts.pause();
+      } else {
+        tts.resume();
+      }
+      return;
+    }
+
+    final chapter = widget.chapters[_currentActiveIndex];
+    String? content = _chapterCache[_currentActiveIndex];
+    if (content == null || content.isEmpty) {
+      await _fetchChapterContent(_currentActiveIndex);
+      content = _chapterCache[_currentActiveIndex];
+    }
+
+    if (content != null && content.isNotEmpty) {
+      setState(() {
+        _showControls = false;
+      });
+      tts.onChapterComplete = (lastChunkIdx) {
+        if (_currentActiveIndex < widget.chapters.length - 1) {
+          _startFromChapter(_currentActiveIndex + 1);
+          _startTtsReading();
+        }
+      };
+      await tts.startChapter(chapter.title, content);
+    }
   }
 
   void _showQuickCacheModal() {
@@ -1407,6 +1459,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     onPressed: _showDirectoryDrawer,
                     icon: Icon(Icons.menu_book_outlined, color: theme.textColor, size: 20),
                     label: Text('目录', style: TextStyle(color: theme.textColor)),
+                  ),
+                  TextButton.icon(
+                    onPressed: _startTtsReading,
+                    icon: Icon(Icons.headphones_outlined, color: theme.textColor, size: 20),
+                    label: Text('听书', style: TextStyle(color: theme.textColor)),
                   ),
                   TextButton.icon(
                     onPressed: _showSettingsModal,
