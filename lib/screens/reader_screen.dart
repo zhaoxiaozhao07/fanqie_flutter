@@ -430,7 +430,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
 
     if (content != null && content.isNotEmpty) {
-      _chapterCache[index] = _formatContent(content);
+      _chapterCache[index] = _formatContent(content, chapterTitle: chapter.title);
       _chapterIsOffline[index] = true;
     }
   }
@@ -453,13 +453,35 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
   }
 
-  /// 文本段落格式化
-  String _formatContent(String raw) {
+  /// 文本段落格式化与首行重复章节名智能去重
+  String _formatContent(String raw, {String? chapterTitle}) {
     final lines = raw.split(RegExp(r'\r?\n'));
     final formatted = <String>[];
+    bool isFirstLine = true;
+
+    final normalizedTitle = chapterTitle
+        ?.replaceAll(RegExp(r'[\s\p{P}]', unicode: true), '')
+        .toLowerCase();
+
     for (var line in lines) {
       final trimmed = line.trim();
       if (trimmed.isEmpty) continue;
+
+      if (isFirstLine) {
+        isFirstLine = false;
+        // 智能去重：若正文第一行与识别出的章节名重复，剔除该行
+        final normalizedLine = trimmed.replaceAll(RegExp(r'[\s\p{P}]', unicode: true), '').toLowerCase();
+        if (normalizedTitle != null && normalizedTitle.isNotEmpty) {
+          if (normalizedLine == normalizedTitle ||
+              (normalizedLine.length < 35 && (normalizedTitle.contains(normalizedLine) || normalizedLine.contains(normalizedTitle)))) {
+            continue;
+          }
+        }
+        if (trimmed.length < 30 && RegExp(r'^第[0-9一二三四五六七八九十百千万]+[章卷回节集]').hasMatch(trimmed)) {
+          continue;
+        }
+      }
+
       formatted.add('\u3000\u3000$trimmed');
     }
     return formatted.join('\n\n');

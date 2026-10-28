@@ -198,8 +198,8 @@ class TtsPlayerPanel extends StatelessWidget {
     final urlCtrl = TextEditingController(text: tts.openAiBaseUrl);
     final keyCtrl = TextEditingController(text: tts.openAiApiKey);
     final modelCtrl = TextEditingController(text: tts.openAiModel);
+    final voiceCtrl = TextEditingController(text: tts.openAiVoice);
     var selectedEngine = tts.engineType;
-    var selectedVoice = tts.openAiVoice;
     var speechRate = tts.speechRate;
 
     showModalBottomSheet(
@@ -305,31 +305,51 @@ class TtsPlayerPanel extends StatelessWidget {
                           ),
                           const SizedBox(width: 12),
                           Expanded(
-                            child: DropdownButtonFormField<String>(
-                              initialValue: selectedVoice,
+                            child: TextField(
+                              controller: voiceCtrl,
                               decoration: const InputDecoration(
-                                labelText: '音色 (Voice)',
+                                labelText: '音色 (可自定义输入)',
+                                hintText: '如 alloy, nova',
                                 isDense: true,
                                 border: OutlineInputBorder(),
                               ),
-                              items: const [
-                                DropdownMenuItem(value: 'alloy', child: Text('Alloy (稳重)')),
-                                DropdownMenuItem(value: 'echo', child: Text('Echo (清澈)')),
-                                DropdownMenuItem(value: 'fable', child: Text('Fable (叙述)')),
-                                DropdownMenuItem(value: 'onyx', child: Text('Onyx (沉稳)')),
-                                DropdownMenuItem(value: 'nova', child: Text('Nova (灵动)')),
-                                DropdownMenuItem(value: 'shimmer', child: Text('Shimmer (柔和)')),
-                              ],
-                              onChanged: (val) {
-                                if (val != null) setModalState(() => selectedVoice = val);
-                              },
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          const Text('常用预设音色：', style: TextStyle(fontSize: 11, color: AppTheme.textHint)),
+                          Expanded(
+                            child: SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(
+                                children: [
+                                  for (final v in ['alloy', 'echo', 'fable', 'onyx', 'nova', 'shimmer']) ...[
+                                    Padding(
+                                      padding: const EdgeInsets.only(right: 6),
+                                      child: ActionChip(
+                                        label: Text(v, style: const TextStyle(fontSize: 11)),
+                                        padding: const EdgeInsets.symmetric(horizontal: 4),
+                                        visualDensity: VisualDensity.compact,
+                                        onPressed: () {
+                                          setModalState(() {
+                                            voiceCtrl.text = v;
+                                          });
+                                        },
+                                      ),
+                                    ),
+                                  ],
+                                ],
+                              ),
                             ),
                           ),
                         ],
                       ),
                       const SizedBox(height: 6),
                       const Text(
-                        '注：系统已内置智能短句流式预加载管道，后台自动提前拉取后续语音，杜绝切句等待卡顿与大段超长超时。',
+                        '注：支持自由输入任意模型音色名称（如 alloy、nova、zh-CN-XiaoxiaoNeural 等）。系统已内置双缓冲预加载管道，后台自动提前拉取后续切片，杜绝切句等待。',
                         style: TextStyle(fontSize: 11, color: AppTheme.textHint),
                       ),
                     ],
@@ -343,7 +363,7 @@ class TtsPlayerPanel extends StatelessWidget {
                             openAiBaseUrl: urlCtrl.text,
                             openAiApiKey: keyCtrl.text,
                             openAiModel: modelCtrl.text,
-                            openAiVoice: selectedVoice,
+                            openAiVoice: voiceCtrl.text,
                             speechRate: speechRate,
                           );
                           Navigator.pop(ctx);

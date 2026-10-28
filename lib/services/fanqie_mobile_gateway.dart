@@ -326,15 +326,27 @@ class FanqieMobileGateway {
     final pRegex = RegExp(r'<p[^>]*>([\s\S]*?)</p>', caseSensitive: false);
     final matches = pRegex.allMatches(cleaned);
     final paragraphs = <String>[];
-    if (title != null && title.isNotEmpty) {
-      paragraphs.add(title);
-    }
     for (final m in matches) {
       final pText = _stripHtml(m.group(1) ?? '').trim();
       if (pText.isNotEmpty) {
         paragraphs.add(pText);
       }
     }
+
+    // 智能去重：若正文第一段为重复的章节标题，自动剔除
+    if (paragraphs.isNotEmpty) {
+      final first = paragraphs.first;
+      if (title != null && title.isNotEmpty) {
+        final cleanFirst = first.replaceAll(RegExp(r'\s+'), '');
+        final cleanTitle = title.replaceAll(RegExp(r'\s+'), '');
+        if (cleanFirst == cleanTitle || (cleanFirst.length < 35 && cleanFirst.contains(cleanTitle))) {
+          paragraphs.removeAt(0);
+        }
+      } else if (first.length < 30 && RegExp(r'^第[0-9一二三四五六七八九十百千万]+[章卷回节集]').hasMatch(first)) {
+        paragraphs.removeAt(0);
+      }
+    }
+
     if (paragraphs.isNotEmpty) {
       return paragraphs.join('\n\n');
     }

@@ -68,9 +68,15 @@ class MainActivity: FlutterActivity() {
                 }
             } else if (call.method == "initNativeTts") {
                 if (nativeTts == null) {
-                    nativeTts = TextToSpeech(applicationContext) { status ->
+                    nativeTts = TextToSpeech(this) { status ->
                         if (status == TextToSpeech.SUCCESS) {
-                            nativeTts?.language = Locale.CHINESE
+                            var langRes = nativeTts?.setLanguage(Locale.CHINA)
+                            if (langRes == TextToSpeech.LANG_MISSING_DATA || langRes == TextToSpeech.LANG_NOT_SUPPORTED) {
+                                langRes = nativeTts?.setLanguage(Locale.CHINESE)
+                            }
+                            if (langRes == TextToSpeech.LANG_MISSING_DATA || langRes == TextToSpeech.LANG_NOT_SUPPORTED) {
+                                nativeTts?.setLanguage(Locale.SIMPLIFIED_CHINESE)
+                            }
                             nativeTtsReady = true
                             nativeTts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
                                 override fun onStart(utteranceId: String?) {}
@@ -93,13 +99,40 @@ class MainActivity: FlutterActivity() {
                 val text = call.argument<String>("text") ?: ""
                 val rate = call.argument<Double>("rate") ?: 1.0
                 val id = call.argument<String>("id") ?: "tts"
+                
+                // 若尚未初始化，立即初始化
+                if (nativeTts == null) {
+                    nativeTts = TextToSpeech(this) { status ->
+                        if (status == TextToSpeech.SUCCESS) {
+                            nativeTts?.setLanguage(Locale.CHINA)
+                            nativeTtsReady = true
+                        }
+                    }
+                }
+
+                // 如果尚未 ready，在异步线程中短暂等待就绪
+                Thread {
+                    var waitCount = 0
+                    while (!nativeTtsReady && waitCount < 15) {
+                        try { Thread.sleep(100) } catch (e: Exception) {}
+                        waitCount++
+                    }
+                    runOnUiThread {
                 if (nativeTtsReady && nativeTts != null) {
                     nativeTts?.setSpeechRate(rate.toFloat())
-                    nativeTts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
-                    result.success(true)
+                            val speakRes = nativeTts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
+                            if (speakRes == TextToSpeech.SUCCESS) {
+                                result.success(true)
+                            } else {
+                                channelInstance?.invokeMethod("onTtsError", id)
+                                result.success(false)
+                            }
                 } else {
+                            channelInstance?.invokeMethod("onTtsError", id)
                     result.success(false)
                 }
+                    }
+                }.start()
             } else if (call.method == "stopNativeTts") {
                 nativeTts?.stop()
                 result.success(true)
