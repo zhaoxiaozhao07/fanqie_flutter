@@ -22,7 +22,6 @@ class TtsPlayerPanel extends StatelessWidget {
         final currentText = ttsService.currentText;
         final isPlaying = ttsService.isPlaying;
         final isBuffering = ttsService.state == TtsPlayState.buffering;
-        final totalChunks = ttsService.chunks.length;
         final curIdx = ttsService.currentIndex;
 
         return Container(
@@ -37,7 +36,7 @@ class TtsPlayerPanel extends StatelessWidget {
               ),
             ],
           ),
-          padding: const EdgeInsets.fromLTRB(16, 10, 16, 12),
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
           child: SafeArea(
             top: false,
             child: Column(
@@ -67,10 +66,7 @@ class TtsPlayerPanel extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    Text(
-                      totalChunks > 0 ? '${curIdx + 1}/$totalChunks' : '',
-                      style: const TextStyle(fontSize: 11, color: AppTheme.textHint),
-                    ),
+                    const SizedBox(width: 4),
                     IconButton(
                       icon: const Icon(Icons.close, size: 18, color: AppTheme.textSecondary),
                       padding: EdgeInsets.zero,
@@ -82,18 +78,7 @@ class TtsPlayerPanel extends StatelessWidget {
                     ),
                   ],
                 ),
-                const SizedBox(height: 8),
-                // 进度条
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(2),
-                  child: LinearProgressIndicator(
-                    value: ttsService.progress > 0 ? ttsService.progress : null,
-                    backgroundColor: Colors.grey.shade200,
-                    color: AppTheme.primaryColor,
-                    minHeight: 3,
-                  ),
-                ),
-                const SizedBox(height: 10),
+                const SizedBox(height: 6),
                 // 控制按键
                 Row(
                   mainAxisAlignment: MainAxisAlignment.spaceEvenly,
@@ -137,7 +122,7 @@ class TtsPlayerPanel extends StatelessWidget {
                     IconButton(
                       icon: const Icon(Icons.skip_next_rounded, size: 28, color: AppTheme.textPrimary),
                       tooltip: '下一句',
-                      onPressed: curIdx < totalChunks - 1 ? () => ttsService.nextChunk() : null,
+                      onPressed: curIdx < ttsService.chunks.length - 1 ? () => ttsService.nextChunk() : null,
                     ),
                     // 发音设置
                     IconButton(

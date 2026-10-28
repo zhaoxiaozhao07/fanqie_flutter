@@ -2,7 +2,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
-import '../app_theme.dart';
 import '../models/book.dart';
 import '../models/chapter.dart';
 import '../services/api_service.dart';
@@ -1328,14 +1327,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
-    // 提取当前朗读块中的核心语句（去标点后大于 2 个字符的子串）
+    // 提取当前朗读块中的核心语句
     final cleanTts = currentTtsText.replaceAll(RegExp(r'[\s\r\n]'), '');
     final cleanParagraph = trimmed.replaceAll(RegExp(r'[\s\r\n]'), '');
 
-    // 判断本段是否完全或部分被当前 TTS 朗读覆盖
     final isFullMatch = cleanTts.contains(cleanParagraph) || cleanParagraph.contains(cleanTts);
 
-    // 按自然句切分进行富文本全覆盖高亮（彻底解决“只亮了一句，朗读了好几句”的问题）
+    // 按自然句切分进行富文本高亮（Word 荧光笔标记风格，无外围多余边框）
     final sentencePattern = RegExp(r'[^。！？；!?;]+[。！？；!?;]?');
     final matches = sentencePattern.allMatches(paragraph);
 
@@ -1352,9 +1350,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
 
     final spans = <TextSpan>[];
-    final highlightBg = isDark
-        ? const Color(0xFF3A3A3C)
-        : AppTheme.primaryColor.withValues(alpha: 0.22);
+    // Word 经典荧光笔底色：浅色模式下为柔和淡杏黄/金黄，深色模式下为柔和暗金琥珀色
+    final highlightMarkerBg = isDark
+        ? const Color(0xFF5D481C).withValues(alpha: 0.85)
+        : const Color(0xFFFFF176).withValues(alpha: 0.58);
+    final highlightedTextColor = isDark ? const Color(0xFFFFD54F) : const Color(0xFF1A1A1A);
 
     bool hasAnyHighlight = false;
 
@@ -1375,9 +1375,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
           style: TextStyle(
             fontSize: _fontSize,
             height: _lineHeight,
-            color: isSentHighlighted ? (isDark ? Colors.white : AppTheme.primaryColor) : theme.textColor,
-            backgroundColor: isSentHighlighted ? highlightBg : null,
-            fontWeight: isSentHighlighted ? FontWeight.w600 : FontWeight.normal,
+            color: isSentHighlighted ? highlightedTextColor : theme.textColor,
+            backgroundColor: isSentHighlighted ? highlightMarkerBg : null,
+            fontWeight: isSentHighlighted ? FontWeight.w500 : FontWeight.normal,
             letterSpacing: 0.5,
           ),
         ),
@@ -1396,31 +1396,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
-    return Container(
-      margin: const EdgeInsets.symmetric(vertical: 2),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
-      decoration: BoxDecoration(
-        color: isDark ? const Color(0xFF242426) : AppTheme.primaryLight.withValues(alpha: 0.6),
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(
-          color: AppTheme.primaryColor.withValues(alpha: 0.35),
-          width: 1.2,
-        ),
-      ),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Padding(
-            padding: const EdgeInsets.only(top: 4, right: 6),
-            child: Icon(Icons.volume_up_rounded, size: 16, color: AppTheme.primaryColor),
-          ),
-          Expanded(
-            child: Text.rich(
-              TextSpan(children: spans),
-            ),
-          ),
-        ],
-      ),
+    // 采用与 Word / 荧光笔标记笔完全一致的内联底色高亮，保持自然段落缩进与行气流转，毫无多余边框打扰
+    return Text.rich(
+      TextSpan(children: spans),
     );
   }
 
@@ -1512,13 +1490,33 @@ class _ReaderScreenState extends State<ReaderScreen> {
       setState(() {
         _showControls = false;
       });
+
+      // 精准计算当前屏幕视口正在展示的第一句完整的话
+      int startChunk = 0;
+      final key = _chapterKeys[_currentActiveIndex];
+      final box = key?.currentContext?.findRenderObject() as RenderBox?;
+      if (box != null && box.attached) {
+        final chapterPos = box.localToGlobal(Offset.zero);
+        final chapterHeight = box.size.height;
+        // 如果当前章节顶部已滚入视口上方（即已看了一部分）
+        if (chapterPos.dy < 0 && chapterHeight > 0) {
+          // 读者视线开始处（屏幕顶部约 40px 处）
+          final visibleOffsetInChapter = -chapterPos.dy + 40.0;
+          final fraction = (visibleOffsetInChapter / chapterHeight).clamp(0.0, 1.0);
+          final chunks = tts.splitIntoChunks(content);
+          if (chunks.isNotEmpty) {
+            startChunk = (fraction * chunks.length).floor().clamp(0, chunks.length - 1);
+          }
+        }
+      }
+
       tts.onChapterComplete = (lastChunkIdx) {
         if (_currentActiveIndex < widget.chapters.length - 1) {
           _startFromChapter(_currentActiveIndex + 1);
           _startTtsReading();
         }
       };
-      await tts.startChapter(chapter.title, content);
+      await tts.startChapter(chapter.title, content, startChunk: startChunk);
     }
   }
 
