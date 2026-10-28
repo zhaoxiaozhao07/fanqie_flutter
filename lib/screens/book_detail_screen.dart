@@ -8,7 +8,6 @@ import '../services/api_service.dart';
 import '../services/bookshelf_service.dart';
 import '../services/reading_history_service.dart';
 import '../services/download_service.dart';
-import '../services/history_service.dart';
 import '../widgets/download_dialog.dart';
 import '../widgets/loading_widget.dart';
 import 'reader_screen.dart';
@@ -25,18 +24,13 @@ class BookDetailScreen extends StatefulWidget {
 
 class _BookDetailScreenState extends State<BookDetailScreen> {
   final ApiService _apiService = ApiService();
-  final HistoryService _historyService = HistoryService();
   final BookshelfService _bookshelfService = BookshelfService();
   final ReadingHistoryService _readingHistoryService = ReadingHistoryService();
-  late DownloadService _downloadService;
+  final DownloadService _downloadService = DownloadService();
 
   Book? _bookDetail;
   List<Chapter>? _chapters;
   bool _isLoading = true;
-  bool _isDownloading = false;
-  int _downloadProgress = 0;
-  int _downloadTotal = 0;
-  String _downloadMessage = '';
   bool _abstractExpanded = false;
   bool _isInBookshelf = false;
 
@@ -46,7 +40,6 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   @override
   void initState() {
     super.initState();
-    _downloadService = DownloadService(_apiService, _historyService);
     _loadBookDetail();
   }
 
@@ -304,8 +297,8 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     );
   }
 
-  /// 开始下载
-  Future<void> _startDownload(String format) async {
+  /// 启动后台下载
+  void _startDownload(String format) {
     if (_chapters == null || _chapters!.isEmpty) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -315,60 +308,88 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       return;
     }
 
-    setState(() {
-      _isDownloading = true;
-      _downloadProgress = 0;
-      _downloadTotal = _chapters!.length;
-      _downloadMessage = '准备下载...';
-    });
-
-    String? filePath;
-
-    if (format == 'TXT') {
-      filePath = await _downloadService.downloadAsTxt(
-        _bookDetail ?? widget.book,
-        _chapters!,
-        onProgress: (current, total, message) {
-          if (mounted) {
-            setState(() {
-              _downloadProgress = current;
-              _downloadTotal = total;
-              _downloadMessage = message;
-            });
-          }
-        },
-      );
-    } else {
-      filePath = await _downloadService.downloadAsEpub(
-        _bookDetail ?? widget.book,
-        _chapters!,
-        onProgress: (current, total, message) {
-          if (mounted) {
-            setState(() {
-              _downloadProgress = current;
-              _downloadTotal = total;
-              _downloadMessage = message;
-            });
-          }
-        },
-      );
+    final book = _bookDetail ?? widget.book;
+    if (_downloadService.isDownloading(book.bookId)) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('该书籍正在后台下载中')),
+        );
+      }
+      return;
     }
 
-    if (!mounted) return;
-    setState(() => _isDownloading = false);
+    _downloadService.startBackgroundDownload(
+      book: book,
+      chapters: _chapters!,
+      format: format,
+    );
 
-    if (filePath != null) {
+    if (mounted) {
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('下载完成: $filePath'),
-          duration: const Duration(seconds: 5),
+          content: Text('已添加《${book.bookName}》至后台下载任务'),
+          duration: const Duration(seconds: 3),
         ),
       );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('下载失败')),
-      );
     }
+  }
+
+  void _showDownloadDialog() async {
+    final book = _bookDetail ?? widget.book;
+    final activeTask = _downloadService.getActiveTask(book.bookId);
+
+    if (activeTask != null) {
+      _showDownloadStatusDialog(activeTask);
+      return;
+    }
+
+    final format = await DownloadDialog.show(
+      context,
+      book.bookName,
+    );
+
+    if (format != null && mounted) {
+      _startDownload(format);
+    }
+  }
+
+  void _showDownloadStatusDialog(DownloadTask task) {
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('下载状态：《${task.book.bookName}》'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('格式：${task.format}'),
+            const SizedBox(height: 6),
+            Text('进度：${task.current} / ${task.total} (${(task.progress * 100).toStringAsFixed(1)}%)'),
+            const SizedBox(height: 10),
+            LinearProgressIndicator(
+              value: task.progress > 0 ? task.progress : null,
+              color: AppTheme.primaryColor,
+              backgroundColor: AppTheme.primaryLight,
+            ),
+            const SizedBox(height: 10),
+            Text(task.message, style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('后台继续'),
+          ),
+          TextButton(
+            onPressed: () {
+              _downloadService.cancelDownload(task.book.bookId);
+              Navigator.pop(ctx);
+            },
+            child: const Text('取消下载', style: TextStyle(color: Colors.red)),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
@@ -377,79 +398,104 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       body: _isLoading
           ? const LoadingWidget(message: '加载中...')
           : _buildContent(),
-      bottomNavigationBar: _isLoading || _isDownloading ? null : _buildBottomBar(),
+      bottomNavigationBar: _isLoading ? null : _buildBottomBar(),
     );
   }
 
   Widget _buildBottomBar() {
+    final book = _bookDetail ?? widget.book;
     final hasReadHistory = _lastReadIndex != null && _lastReadIndex! >= 0;
     final readText = hasReadHistory
         ? '继续阅读 (第${_lastReadIndex! + 1}章)'
         : '开始阅读';
 
-    return Container(
-      padding: EdgeInsets.fromLTRB(
-        16,
-        8,
-        16,
-        MediaQuery.of(context).padding.bottom + 8,
-      ),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.08),
-            blurRadius: 6,
-            offset: const Offset(0, -2),
+    return AnimatedBuilder(
+      animation: _downloadService,
+      builder: (context, _) {
+        final activeTask = _downloadService.getActiveTask(book.bookId);
+        final isDownloading = activeTask != null;
+
+        return Container(
+          padding: EdgeInsets.fromLTRB(
+            16,
+            8,
+            16,
+            MediaQuery.of(context).padding.bottom + 8,
           ),
-        ],
-      ),
-      child: Row(
-        children: [
-          // 下载按钮
-          OutlinedButton.icon(
-            onPressed: _showDownloadDialog,
-            icon: const Icon(Icons.download_rounded, size: 20),
-            label: const Text('下载'),
-            style: OutlinedButton.styleFrom(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-              side: const BorderSide(color: AppTheme.primaryColor),
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(24),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.08),
+                blurRadius: 6,
+                offset: const Offset(0, -2),
               ),
-            ),
+            ],
           ),
-          const SizedBox(width: 12),
-          // 阅读按钮
-          Expanded(
-            child: ElevatedButton.icon(
-              onPressed: () => _openReader(_lastReadIndex ?? 0),
-              icon: const Icon(Icons.menu_book_rounded, size: 20),
-              label: Text(
-                readText,
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-              ),
-              style: ElevatedButton.styleFrom(
-                backgroundColor: AppTheme.primaryColor,
-                foregroundColor: Colors.white,
-                padding: const EdgeInsets.symmetric(vertical: 12),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(24),
+          child: Row(
+            children: [
+              // 下载按钮（活动状态动态反映后台进度）
+              OutlinedButton.icon(
+                onPressed: _showDownloadDialog,
+                icon: isDownloading
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          color: AppTheme.primaryColor,
+                        ),
+                      )
+                    : const Icon(Icons.download_rounded, size: 20),
+                label: Text(
+                  isDownloading
+                      ? '下载中 ${(activeTask.progress * 100).toInt()}%'
+                      : '下载',
+                ),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  side: const BorderSide(color: AppTheme.primaryColor),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(24),
+                  ),
                 ),
               ),
-            ),
+              const SizedBox(width: 12),
+              // 阅读按钮
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: () => _openReader(_lastReadIndex ?? 0),
+                  icon: const Icon(Icons.menu_book_rounded, size: 20),
+                  label: Text(
+                    readText,
+                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                  ),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppTheme.primaryColor,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                  ),
+                ),
+              ),
+            ],
           ),
-        ],
-      ),
+        );
+      },
     );
   }
 
   Widget _buildContent() {
     final book = _bookDetail ?? widget.book;
 
-    return Stack(
-      children: [
-        CustomScrollView(
+    return AnimatedBuilder(
+      animation: _downloadService,
+      builder: (context, _) {
+        final activeTask = _downloadService.getActiveTask(book.bookId);
+
+        return CustomScrollView(
           slivers: [
             SliverAppBar(
               expandedHeight: 280,
@@ -469,6 +515,73 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               ),
             ),
             SliverToBoxAdapter(child: _buildBookInfo(book)),
+
+            // 如果当前书籍正在后台下载，在此处展示清晰的非阻塞进度卡片
+            if (activeTask != null)
+              SliverToBoxAdapter(
+                child: Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: AppTheme.primaryLight,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(color: AppTheme.primaryColor.withValues(alpha: 0.3)),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: AppTheme.primaryColor,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            '后台下载中 (${activeTask.format})：${activeTask.current} / ${activeTask.total} (${(activeTask.progress * 100).toInt()}%)',
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 13,
+                              color: AppTheme.primaryColor,
+                            ),
+                          ),
+                          const Spacer(),
+                          TextButton(
+                            onPressed: () => _downloadService.cancelDownload(book.bookId),
+                            style: TextButton.styleFrom(
+                              visualDensity: VisualDensity.compact,
+                              padding: EdgeInsets.zero,
+                            ),
+                            child: const Text('取消下载', style: TextStyle(color: Colors.red, fontSize: 12)),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(3),
+                        child: LinearProgressIndicator(
+                          value: activeTask.progress > 0 ? activeTask.progress : null,
+                          backgroundColor: Colors.white,
+                          color: AppTheme.primaryColor,
+                          minHeight: 4,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        activeTask.message,
+                        style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
             // 目录标题与全部目录入口
             if (_chapters != null && _chapters!.isNotEmpty)
               SliverToBoxAdapter(
@@ -550,45 +663,8 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               ),
             const SliverToBoxAdapter(child: SizedBox(height: 20)),
           ],
-        ),
-        // 下载进度遮罩
-        if (_isDownloading)
-          Container(
-            color: Colors.black54,
-            child: Center(
-              child: Card(
-                margin: const EdgeInsets.all(32),
-                child: Padding(
-                  padding: const EdgeInsets.all(24),
-                  child: Column(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      const CircularProgressIndicator(),
-                      const SizedBox(height: 16),
-                      Text(
-                        '$_downloadProgress / $_downloadTotal',
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        _downloadMessage,
-                        style: Theme.of(context).textTheme.bodySmall,
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      const SizedBox(height: 16),
-                      LinearProgressIndicator(
-                        value: _downloadTotal > 0
-                            ? _downloadProgress / _downloadTotal
-                            : null,
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ),
-      ],
+        );
+      },
     );
   }
 
@@ -794,16 +870,5 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
         ),
       ),
     );
-  }
-
-  void _showDownloadDialog() async {
-    final format = await DownloadDialog.show(
-      context,
-      (_bookDetail ?? widget.book).bookName,
-    );
-
-    if (format != null && mounted) {
-      _startDownload(format);
-    }
   }
 }

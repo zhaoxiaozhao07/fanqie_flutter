@@ -7,6 +7,7 @@ import '../models/reading_history.dart';
 import '../models/chapter.dart';
 import '../services/api_service.dart';
 import '../services/history_service.dart';
+import '../services/download_service.dart';
 import '../services/reading_history_service.dart';
 import '../widgets/history_card.dart';
 import '../widgets/loading_widget.dart';
@@ -25,6 +26,7 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
   final HistoryService _downloadHistoryService = HistoryService();
   final ReadingHistoryService _readingHistoryService = ReadingHistoryService();
   final ApiService _apiService = ApiService();
+  final DownloadService _downloadService = DownloadService();
 
   late TabController _tabController;
 
@@ -49,11 +51,13 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
     });
     _loadAllHistory();
     _readingHistoryService.changeNotifier.addListener(_onReadingHistoryChanged);
+    _downloadService.addListener(_onDownloadServiceChanged);
   }
 
   @override
   void dispose() {
     _readingHistoryService.changeNotifier.removeListener(_onReadingHistoryChanged);
+    _downloadService.removeListener(_onDownloadServiceChanged);
     _tabController.dispose();
     _apiService.dispose();
     super.dispose();
@@ -61,6 +65,12 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
 
   void _onReadingHistoryChanged() {
     _loadReadingHistory(silent: true);
+  }
+
+  void _onDownloadServiceChanged() {
+    if (mounted) {
+      _loadDownloadHistory();
+    }
   }
 
   /// 公开的刷新方法
@@ -524,62 +534,204 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
   }
 
   Widget _buildDownloadHistoryList() {
-    if (_isLoadingDownload) {
-      return const LoadingWidget(message: '加载下载历史...');
-    }
+    return AnimatedBuilder(
+      animation: _downloadService,
+      builder: (context, _) {
+        final activeTasks = _downloadService.activeTasks;
 
-    if (_downloadList.isEmpty) {
-      return const EmptyStateWidget(
-        icon: Icons.download_done_rounded,
-        title: '暂无下载记录',
-        subtitle: '下载完结的小说会展示在这里',
-      );
-    }
+        if (_isLoadingDownload && activeTasks.isEmpty) {
+          return const LoadingWidget(message: '加载下载历史...');
+        }
 
-    return RefreshIndicator(
-      onRefresh: _loadDownloadHistory,
-      child: ListView.builder(
-        padding: const EdgeInsets.symmetric(vertical: 8),
-        itemCount: _downloadList.length,
-        itemBuilder: (context, index) {
-          final history = _downloadList[index];
-          final isSelected = _selectedDownloadIds.contains(history.bookId);
-
-          return HistoryCard(
-            history: history,
-            isSelectionMode: _isDownloadSelectionMode,
-            isSelected: isSelected,
-            onTap: () {
-              if (_isDownloadSelectionMode) {
-                setState(() {
-                  if (isSelected) {
-                    _selectedDownloadIds.remove(history.bookId);
-                    if (_selectedDownloadIds.isEmpty) {
-                      _isDownloadSelectionMode = false;
-                    }
-                  } else {
-                    _selectedDownloadIds.add(history.bookId);
-                  }
-                });
-              } else {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (context) => BookDetailScreen(book: history.toBook()),
-                  ),
-                );
-              }
-            },
-            onLongPress: () {
-              if (!_isDownloadSelectionMode) {
-                setState(() {
-                  _isDownloadSelectionMode = true;
-                  _selectedDownloadIds.add(history.bookId);
-                });
-              }
-            },
+        if (_downloadList.isEmpty && activeTasks.isEmpty) {
+          return const EmptyStateWidget(
+            icon: Icons.download_done_rounded,
+            title: '暂无下载记录',
+            subtitle: '下载完结的小说会展示在这里',
           );
-        },
+        }
+
+        return RefreshIndicator(
+          onRefresh: _loadDownloadHistory,
+          child: ListView.builder(
+            padding: const EdgeInsets.symmetric(vertical: 8),
+            itemCount: activeTasks.length + _downloadList.length,
+            itemBuilder: (context, index) {
+              if (index < activeTasks.length) {
+                final task = activeTasks[index];
+                return _buildActiveTaskCard(task);
+              }
+
+              final historyIndex = index - activeTasks.length;
+              final history = _downloadList[historyIndex];
+              final isSelected = _selectedDownloadIds.contains(history.bookId);
+
+              return HistoryCard(
+                history: history,
+                isSelectionMode: _isDownloadSelectionMode,
+                isSelected: isSelected,
+                onTap: () {
+                  if (_isDownloadSelectionMode) {
+                    setState(() {
+                      if (isSelected) {
+                        _selectedDownloadIds.remove(history.bookId);
+                        if (_selectedDownloadIds.isEmpty) {
+                          _isDownloadSelectionMode = false;
+                        }
+                      } else {
+                        _selectedDownloadIds.add(history.bookId);
+                      }
+                    });
+                  } else {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (context) => BookDetailScreen(book: history.toBook()),
+                      ),
+                    );
+                  }
+                },
+                onLongPress: () {
+                  if (!_isDownloadSelectionMode) {
+                    setState(() {
+                      _isDownloadSelectionMode = true;
+                      _selectedDownloadIds.add(history.bookId);
+                    });
+                  }
+                },
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildActiveTaskCard(DownloadTask task) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: AppTheme.primaryColor.withValues(alpha: 0.3)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 6,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(6),
+                child: SizedBox(
+                  width: 44,
+                  height: 60,
+                  child: task.book.thumbUrl != null && task.book.thumbUrl!.isNotEmpty
+                      ? CachedNetworkImage(
+                          imageUrl: task.book.thumbUrl!,
+                          fit: BoxFit.cover,
+                          placeholder: (context, url) => Container(color: AppTheme.primaryLight),
+                          errorWidget: (context, url, error) => Container(
+                            color: AppTheme.primaryLight,
+                            child: const Icon(Icons.book, size: 20, color: AppTheme.primaryColor),
+                          ),
+                        )
+                      : Container(
+                          color: AppTheme.primaryLight,
+                          child: const Icon(Icons.book, size: 20, color: AppTheme.primaryColor),
+                        ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            task.book.bookName,
+                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          decoration: BoxDecoration(
+                            color: AppTheme.primaryColor.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            task.format,
+                            style: const TextStyle(
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                              color: AppTheme.primaryColor,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '作者: ${task.book.author}',
+                      style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      task.message,
+                      style: const TextStyle(fontSize: 11, color: AppTheme.primaryColor),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ],
+                ),
+              ),
+              IconButton(
+                icon: const Icon(Icons.cancel_outlined, color: Colors.red),
+                tooltip: '取消下载',
+                onPressed: () => _downloadService.cancelDownload(task.book.bookId),
+              ),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: LinearProgressIndicator(
+              value: task.progress > 0 ? task.progress : null,
+              backgroundColor: AppTheme.primaryLight,
+              color: AppTheme.primaryColor,
+              minHeight: 5,
+            ),
+          ),
+          const SizedBox(height: 4),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                '下载中: ${task.current} / ${task.total} 章',
+                style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+              ),
+              Text(
+                '${(task.progress * 100).toStringAsFixed(1)}%',
+                style: const TextStyle(
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  color: AppTheme.primaryColor,
+                ),
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }

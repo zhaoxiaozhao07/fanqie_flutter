@@ -6,7 +6,6 @@ import '../widgets/book_card.dart';
 import '../widgets/loading_widget.dart';
 import 'search_results_screen.dart';
 import 'book_detail_screen.dart';
-import 'source_management_screen.dart';
 
 /// 搜索与发现主页面
 class SearchScreen extends StatefulWidget {
@@ -408,40 +407,18 @@ class _SearchScreenState extends State<SearchScreen> {
             ),
             child: Column(
               children: [
-                SizedBox(
+                const SizedBox(
                   height: 44,
                   width: double.infinity,
-                  child: Stack(
-                    alignment: Alignment.center,
-                    children: [
-                      const Text(
-                        '番茄Reader',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w600,
-                          color: AppTheme.textPrimary,
-                        ),
+                  child: Center(
+                    child: Text(
+                      '番茄Reader',
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                        color: AppTheme.textPrimary,
                       ),
-                      Positioned(
-                        right: 4,
-                        child: IconButton(
-                          icon: const Icon(
-                            Icons.settings_outlined,
-                            size: 24,
-                            color: AppTheme.textPrimary,
-                          ),
-                          tooltip: 'API 源设置',
-                          onPressed: () {
-                            Navigator.push(
-                              context,
-                              MaterialPageRoute(
-                                builder: (context) => const SourceManagementScreen(),
-                              ),
-                            ).then((_) => _loadDiscoverBooks());
-                          },
-                        ),
-                      ),
-                    ],
+                    ),
                   ),
                 ),
                 _buildSearchArea(),
