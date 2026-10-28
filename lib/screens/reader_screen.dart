@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import '../app_theme.dart';
 import '../models/book.dart';
 import '../models/chapter.dart';
 import '../services/api_service.dart';
@@ -61,6 +62,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   // 当前用户视觉所在的章节索引
   late int _currentActiveIndex;
+  late final ValueNotifier<int> _activeChapterNotifier;
+  double _lastDetectPixels = 0.0;
+  final TtsService _ttsService = TtsService();
   bool _isLoadingHead = false;
   bool _isLoadingPrev = false;
   bool _isLoadingMore = false;
@@ -122,12 +126,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void initState() {
     super.initState();
     _currentActiveIndex = widget.initialChapterIndex.clamp(0, widget.chapters.length - 1);
+    _activeChapterNotifier = ValueNotifier<int>(_currentActiveIndex);
     _checkBookshelfStatus();
     _loadPreferences().then((_) {
       _startFromChapter(_currentActiveIndex);
       ReaderSystemService.setVolumeKeyScrollEnabled(_volumeKeyScroll);
     });
     _scrollController.addListener(_onScroll);
+    _ttsService.addListener(_onTtsStateChanged);
     
     // 启用阅读屏幕常亮与定时电量/时间更新
     ReaderSystemService.setKeepScreenOn(true);
@@ -138,7 +144,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   @override
   void dispose() {
-    TtsService().stop();
+    _ttsService.removeListener(_onTtsStateChanged);
+    _ttsService.stop();
+    _activeChapterNotifier.dispose();
     _statusTimer?.cancel();
     ReaderSystemService.setKeepScreenOn(false);
     ReaderSystemService.setVolumeKeyScrollEnabled(false);
@@ -151,6 +159,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
       overlays: SystemUiOverlay.values,
     );
     super.dispose();
+  }
+
+  void _onTtsStateChanged() {
+    if (mounted) {
+      setState(() {});
+    }
   }
 
   Future<void> _updateStatusInfo() async {
@@ -278,39 +292,53 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
   }
 
-  /// 滚动监听：无限下拉加载后续章节 + 检测当前可见章节以同步进度
+  /// 滚动监听：节流局部检测活跃章节 + 双向无限滚动（极速丝滑不掉帧）
   void _onScroll() {
     if (!_scrollController.hasClients) return;
 
-    // 1. 检测当前视口可见的章节，更新标题和持久化阅读历史
-    _detectCurrentVisibleChapter();
+    final currentPixels = _scrollController.position.pixels;
+
+    // 1. 节流检测当前视口可见的章节（位移超过 50px 时才做轻量局部探测，极大提升长文滚屏流畅度）
+    if ((currentPixels - _lastDetectPixels).abs() >= 50.0) {
+      _lastDetectPixels = currentPixels;
+      _detectCurrentVisibleChapterOptimized();
+    }
 
     // 2. 距离顶部 300px 时自动预加载并追加上一章 (实现无缝双向无限滚动)
-    if (_scrollController.position.pixels <= 300 &&
+    if (currentPixels <= 300 &&
         _displayedChapters.isNotEmpty &&
         _displayedChapters.first > 0) {
       _autoPrependPreviousChapter();
     }
 
     // 3. 距离底部 800px 时自动预加载并追加下一章
-    if (_scrollController.position.pixels >=
+    if (currentPixels >=
         _scrollController.position.maxScrollExtent - 800) {
       _autoAppendNextChapter();
     }
   }
 
-  void _detectCurrentVisibleChapter() {
+  /// 高性能局部检测当前活跃章节（仅针对临近章节进行局部探测，避免全量 O(N) 全局矩阵坐标运算）
+  void _detectCurrentVisibleChapterOptimized() {
     if (_displayedChapters.isEmpty) return;
 
-    int active = _displayedChapters.first;
-    for (final chIndex in _displayedChapters) {
+    int active = _currentActiveIndex;
+    final checkIndices = <int>{
+      _currentActiveIndex,
+      if (_displayedChapters.contains(_currentActiveIndex - 1)) _currentActiveIndex - 1,
+      if (_displayedChapters.contains(_currentActiveIndex + 1)) _currentActiveIndex + 1,
+      _displayedChapters.first,
+      _displayedChapters.last,
+    };
+
+    for (final chIndex in checkIndices) {
       final key = _chapterKeys[chIndex];
       if (key?.currentContext != null) {
         final box = key!.currentContext!.findRenderObject() as RenderBox?;
-        if (box != null) {
+        if (box != null && box.attached) {
           final pos = box.localToGlobal(Offset.zero);
-          // 如果该章节标题已滚动到视口顶部 250 像素以内，则判定为当前活动章节
-          if (pos.dy <= 250) {
+          // 章节顶部接近视口上方 250 像素以内即判定为当前活动章节
+          if (pos.dy <= 250 && pos.dy >= -300) {
             active = chIndex;
           }
         }
@@ -318,9 +346,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
 
     if (active != _currentActiveIndex) {
-      setState(() {
-        _currentActiveIndex = active;
-      });
+      _currentActiveIndex = active;
+      _activeChapterNotifier.value = active; // 仅通知微型小部件刷新，不触发全屏 Widget 树 Rebuild
       _persistReadingProgress(active);
     }
   }
@@ -543,6 +570,21 @@ class _ReaderScreenState extends State<ReaderScreen> {
               maxChildSize: 0.95,
               expand: false,
               builder: (_, scrollController) {
+                // 打开目录时，自动平滑滚动定位到当前章节
+                WidgetsBinding.instance.addPostFrameCallback((_) {
+                  if (scrollController.hasClients && filter.isEmpty) {
+                    final targetIndex = isReverse
+                        ? (allChapters.length - 1 - _currentActiveIndex)
+                        : _currentActiveIndex;
+                    // 每个 dense ListTile 约 48px，目标定在视口第 3 项处，让读者一眼看清当前阅读位置
+                    final targetOffset = (targetIndex * 48.0 - 120.0)
+                        .clamp(0.0, scrollController.position.maxScrollExtent);
+                    if ((scrollController.offset - targetOffset).abs() > 30) {
+                      scrollController.jumpTo(targetOffset);
+                    }
+                  }
+                });
+
                 return Column(
                   children: [
                     Padding(
@@ -927,7 +969,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     child: _buildReaderBody(theme),
                   ),
                   // 底部常驻微型状态栏（时间、电量、总进度）
-                  _buildBottomStatusBar(theme, currentChapter),
+                  _buildBottomStatusBar(theme),
                 ],
               ),
             ),
@@ -1110,104 +1152,190 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  Widget _buildBottomStatusBar(ReaderTheme theme, Chapter currentChapter) {
-    final progress = widget.chapters.isNotEmpty
-        ? ((_currentActiveIndex + 1) / widget.chapters.length).clamp(0.0, 1.0)
-        : 0.0;
-    final percentStr = (progress * 100).toStringAsFixed(1);
+  Widget _buildBottomStatusBar(ReaderTheme theme) {
+    return ValueListenableBuilder<int>(
+      valueListenable: _activeChapterNotifier,
+      builder: (context, activeIdx, _) {
+        final ch = (activeIdx >= 0 && activeIdx < widget.chapters.length)
+            ? widget.chapters[activeIdx]
+            : widget.chapters.first;
+        final progress = widget.chapters.isNotEmpty
+            ? ((activeIdx + 1) / widget.chapters.length).clamp(0.0, 1.0)
+            : 0.0;
+        final percentStr = (progress * 100).toStringAsFixed(1);
 
-    return Container(
-      height: 22,
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      color: theme.backgroundColor,
-      child: Row(
-        children: [
-          Expanded(
-            child: Text(
-              currentChapter.title,
-              style: TextStyle(
-                fontSize: 10,
-                color: theme.secondaryColor.withValues(alpha: 0.75),
+        return Container(
+          height: 22,
+          padding: const EdgeInsets.symmetric(horizontal: 16),
+          color: theme.backgroundColor,
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  ch.title,
+                  style: TextStyle(
+                    fontSize: 10,
+                    color: theme.secondaryColor.withValues(alpha: 0.75),
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
               ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
+              const SizedBox(width: 8),
+              Text(
+                '${_currentTimeStr.isNotEmpty ? '$_currentTimeStr  |  ' : ''}${_batteryLevel >= 0 ? '$_batteryLevel%  |  ' : ''}$percentStr%',
+                style: TextStyle(
+                  fontSize: 10,
+                  color: theme.secondaryColor.withValues(alpha: 0.75),
+                ),
+              ),
+            ],
           ),
-          const SizedBox(width: 8),
-          Text(
-            '${_currentTimeStr.isNotEmpty ? '$_currentTimeStr  |  ' : ''}${_batteryLevel >= 0 ? '$_batteryLevel%  |  ' : ''}$percentStr%',
-            style: TextStyle(
-              fontSize: 10,
-              color: theme.secondaryColor.withValues(alpha: 0.75),
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 
-  /// 构建单章内容块
+  /// 构建单章内容块（RepaintBoundary 独立绘制层隔离 + TTS 语句智能高亮）
   Widget _buildChapterBlock(int chapterIndex, ReaderTheme theme, {bool isFirst = false}) {
     final chapter = widget.chapters[chapterIndex];
     final content = _chapterCache[chapterIndex] ?? '';
     final key = _chapterKeys[chapterIndex];
 
-    return Column(
+    final isTtsThisChapter = _ttsService.isActive && _ttsService.currentChapterTitle == chapter.title;
+    final currentTtsText = isTtsThisChapter ? _ttsService.currentText.trim() : '';
+
+    return RepaintBoundary(
       key: key,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (!isFirst) ...[
+            const SizedBox(height: 36),
+            // 章节间优雅分割条
+            Row(
+              children: [
+                Expanded(
+                  child: Divider(
+                    color: theme.secondaryColor.withValues(alpha: 0.3),
+                    thickness: 1,
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Text(
+                    '本章完',
+                    style: TextStyle(fontSize: 12, color: theme.secondaryColor),
+                  ),
+                ),
+                Expanded(
+                  child: Divider(
+                    color: theme.secondaryColor.withValues(alpha: 0.3),
+                    thickness: 1,
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 36),
+          ],
+
+          // 章节大标题
+          Text(
+            chapter.title,
+            style: TextStyle(
+              fontSize: _fontSize + 4,
+              fontWeight: FontWeight.bold,
+              color: theme.textColor,
+              height: 1.4,
+            ),
+          ),
+          const SizedBox(height: 20),
+
+          // 章节正文（段落级渲染 + TTS 正在播放语句实时高亮）
+          _buildChapterParagraphs(content, theme, currentTtsText),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildChapterParagraphs(String content, ReaderTheme theme, String currentTtsText) {
+    if (content.isEmpty) return const SizedBox.shrink();
+    final paragraphs = content.split('\n\n');
+    final isDark = theme.backgroundColor == const Color(0xFF000000) || theme.backgroundColor == const Color(0xFF18181A);
+
+    return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (!isFirst) ...[
-          const SizedBox(height: 36),
-          // 章节间优雅分割条
-          Row(
-            children: [
-              Expanded(
-                child: Divider(
-                  color: theme.secondaryColor.withValues(alpha: 0.3),
-                  thickness: 1,
-                ),
-              ),
-              Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                child: Text(
-                  '本章完',
-                  style: TextStyle(fontSize: 12, color: theme.secondaryColor),
-                ),
-              ),
-              Expanded(
-                child: Divider(
-                  color: theme.secondaryColor.withValues(alpha: 0.3),
-                  thickness: 1,
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 36),
+        for (final p in paragraphs) ...[
+          _buildSingleParagraph(p, theme, currentTtsText, isDark),
+          const SizedBox(height: 8),
         ],
-
-        // 章节大标题
-        Text(
-          chapter.title,
-          style: TextStyle(
-            fontSize: _fontSize + 4,
-            fontWeight: FontWeight.bold,
-            color: theme.textColor,
-            height: 1.4,
-          ),
-        ),
-        const SizedBox(height: 20),
-
-        // 章节正文
-        Text(
-          content,
-          style: TextStyle(
-            fontSize: _fontSize,
-            height: _lineHeight,
-            color: theme.textColor,
-            letterSpacing: 0.5,
-          ),
-        ),
       ],
+    );
+  }
+
+  Widget _buildSingleParagraph(String paragraph, ReaderTheme theme, String currentTtsText, bool isDark) {
+    final trimmed = paragraph.trim();
+    if (trimmed.isEmpty) return const SizedBox.shrink();
+
+    bool isHighlighted = false;
+    if (currentTtsText.isNotEmpty) {
+      final cleanCur = currentTtsText.replaceAll(RegExp(r'[\s\p{P}]', unicode: true), '');
+      final cleanP = trimmed.replaceAll(RegExp(r'[\s\p{P}]', unicode: true), '');
+      if (cleanCur.isNotEmpty && cleanP.isNotEmpty) {
+        if (cleanP.contains(cleanCur) || (cleanCur.length > 6 && cleanP.contains(cleanCur.substring(0, 6)))) {
+          isHighlighted = true;
+        }
+      }
+    }
+
+    if (!isHighlighted) {
+      return Text(
+        paragraph,
+        style: TextStyle(
+          fontSize: _fontSize,
+          height: _lineHeight,
+          color: theme.textColor,
+          letterSpacing: 0.5,
+        ),
+      );
+    }
+
+    // 高亮正在朗读的段落/语句
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 2),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+      decoration: BoxDecoration(
+        color: isDark
+            ? const Color(0xFF2C2C2E)
+            : AppTheme.primaryColor.withValues(alpha: 0.14),
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(
+          color: AppTheme.primaryColor.withValues(alpha: 0.45),
+          width: 1.2,
+        ),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 4, right: 6),
+            child: Icon(Icons.volume_up_rounded, size: 16, color: AppTheme.primaryColor),
+          ),
+          Expanded(
+            child: Text(
+              paragraph,
+              style: TextStyle(
+                fontSize: _fontSize,
+                height: _lineHeight,
+                color: theme.textColor,
+                fontWeight: FontWeight.w600,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ),
+        ],
+      ),
     );
   }
 

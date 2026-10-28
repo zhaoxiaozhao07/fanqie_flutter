@@ -1,4 +1,3 @@
-import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:fanqie_flutter/services/cover_cache_service.dart';
 
