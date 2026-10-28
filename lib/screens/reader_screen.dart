@@ -48,6 +48,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   // 章节内容内存缓存
   final Map<int, String> _chapterCache = {};
+  // 章节是否来自本地持久化离线/已下载存储
+  final Map<int, bool> _chapterIsOffline = {};
   // 当前无限下拉中已渲染展示的章节索引列表
   final List<int> _displayedChapters = [];
   final Map<int, GlobalKey> _chapterKeys = {};
@@ -292,10 +294,20 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (index < 0 || index >= widget.chapters.length) return;
 
     final chapter = widget.chapters[index];
-    final content = await _apiService.getChapterContent(chapter.itemId);
+    
+    // 1. 优先检查本地离线/已下载资源
+    final isOffline = await _apiService.isChapterOffline(widget.book.bookId, chapter.itemId);
+    _chapterIsOffline[index] = isOffline;
+
+    // 2. 获取正文（传入 bookId，内部优先读取 offline_books，若未下载则拉取并自动持久化缓存）
+    final content = await _apiService.getChapterContent(
+      chapter.itemId,
+      bookId: widget.book.bookId,
+    );
 
     if (content != null && content.isNotEmpty) {
       _chapterCache[index] = _formatContent(content);
+      _chapterIsOffline[index] = true;
     }
   }
 
@@ -306,6 +318,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
       if (targetIndex >= widget.chapters.length) break;
       if (!_chapterCache.containsKey(targetIndex)) {
         await _fetchChapterContent(targetIndex);
+      }
+    }
+    // 适当预加载前一章
+    if (startIndex > 1) {
+      final prevIndex = startIndex - 2;
+      if (!_chapterCache.containsKey(prevIndex)) {
+        await _fetchChapterContent(prevIndex);
       }
     }
   }
@@ -669,14 +688,38 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     child: Row(
                       children: [
                         Expanded(
-                          child: Text(
-                            currentChapter.title,
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: theme.secondaryColor,
-                            ),
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
+                          child: Row(
+                            children: [
+                              if (_chapterIsOffline[_currentActiveIndex] == true) ...[
+                                Container(
+                                  margin: const EdgeInsets.only(right: 6),
+                                  padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                                  decoration: BoxDecoration(
+                                    color: theme.secondaryColor.withValues(alpha: 0.15),
+                                    borderRadius: BorderRadius.circular(3),
+                                  ),
+                                  child: Text(
+                                    '已离线',
+                                    style: TextStyle(
+                                      fontSize: 10,
+                                      color: theme.secondaryColor,
+                                      fontWeight: FontWeight.w500,
+                                    ),
+                                  ),
+                                ),
+                              ],
+                              Expanded(
+                                child: Text(
+                                  currentChapter.title,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: theme.secondaryColor,
+                                  ),
+                                  maxLines: 1,
+                                  overflow: TextOverflow.ellipsis,
+                                ),
+                              ),
+                            ],
                           ),
                         ),
                         Text(

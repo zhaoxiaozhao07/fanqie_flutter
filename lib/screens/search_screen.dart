@@ -4,6 +4,7 @@ import '../models/book.dart';
 import '../services/api_service.dart';
 import '../widgets/book_card.dart';
 import '../widgets/loading_widget.dart';
+import '../widgets/download_action_button.dart';
 import 'search_results_screen.dart';
 import 'book_detail_screen.dart';
 
@@ -407,18 +408,25 @@ class _SearchScreenState extends State<SearchScreen> {
             ),
             child: Column(
               children: [
-                const SizedBox(
+                SizedBox(
                   height: 44,
                   width: double.infinity,
-                  child: Center(
-                    child: Text(
-                      '番茄Reader',
-                      style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w600,
-                        color: AppTheme.textPrimary,
+                  child: Stack(
+                    alignment: Alignment.center,
+                    children: const [
+                      Text(
+                        '番茄Reader',
+                        style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w600,
+                          color: AppTheme.textPrimary,
+                        ),
                       ),
-                    ),
+                      Positioned(
+                        right: 8,
+                        child: DownloadActionButton(),
+                      ),
+                    ],
                   ),
                 ),
                 _buildSearchArea(),

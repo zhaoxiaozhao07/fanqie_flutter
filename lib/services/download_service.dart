@@ -97,34 +97,6 @@ class DownloadService extends ChangeNotifier {
     return getActiveTask(bookId) != null;
   }
 
-  /// 获取书籍临时缓存目录
-  Future<Directory> _getCacheDirectory(String bookId) async {
-    final tempDir = await getTemporaryDirectory();
-    final cacheDir = Directory('${tempDir.path}/downloads/$bookId');
-    if (!await cacheDir.exists()) {
-      await cacheDir.create(recursive: true);
-    }
-    return cacheDir;
-  }
-
-  File _getChapterCacheFile(Directory cacheDir, int index) {
-    return File('${cacheDir.path}/$index.txt');
-  }
-
-  Future<void> _clearCache(String bookId) async {
-    try {
-      final tempDir = await getTemporaryDirectory();
-      final cacheDir = Directory('${tempDir.path}/downloads/$bookId');
-      if (await cacheDir.exists()) {
-        await cacheDir.delete(recursive: true);
-      }
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('清理缓存失败: $e');
-      }
-    }
-  }
-
   /// 启动后台下载任务（非阻塞 UI，下载在后台执行）
   DownloadTask startBackgroundDownload({
     required Book book,
@@ -191,12 +163,12 @@ class DownloadService extends ChangeNotifier {
 
       DateTime lastNotifyTime = DateTime.now();
 
-      // 直接调用内置后端引擎并发下载，前端不设人为延迟
+      // 直接调用内置后端引擎高性能并发下载，前端不设人为延迟
       await _apiService.downloadChapters(
         bookId: task.book.bookId,
         chapters: task.chapters,
         isCancelled: () => task.isCancelled,
-        concurrency: 6,
+        concurrency: 12,
         onProgress: (current, total, message) {
           if (task.isCancelled) return;
           task.current = current;
@@ -219,40 +191,19 @@ class DownloadService extends ChangeNotifier {
         return;
       }
 
-      // 将下载章节从通用缓存中整合并拷贝至任务缓存
-      final cacheDir = await _getCacheDirectory(task.book.bookId);
-      for (int i = 0; i < task.chapters.length; i++) {
-        if (task.isCancelled) break;
-        final ch = task.chapters[i];
-        final taskChFile = _getChapterCacheFile(cacheDir, i);
-        if (!await taskChFile.exists() || await taskChFile.length() == 0) {
-          final content = await _apiService.getChapterContent(ch.itemId);
-          if (content != null && content.isNotEmpty) {
-            await taskChFile.writeAsString(content);
-          }
-        }
-      }
-
-      if (task.isCancelled) {
-        task.status = DownloadTaskStatus.cancelled;
-        task.message = '下载已取消';
-        notifyListeners();
-        return;
-      }
-
+      // 下载阶段结束，立即切换为保存阶段，彻底消除停留在最后一章卡死的问题
       task.status = DownloadTaskStatus.saving;
-      task.message = '正在生成并保存文件...';
+      task.message = '章节下载完毕，正在生成 ${task.format} 文件...';
       notifyListeners();
 
       String? filePath;
       if (task.format == 'TXT') {
-        filePath = await _assembleAndSaveTxt(task.book, task.chapters, cacheDir);
+        filePath = await _assembleAndSaveTxt(task.book, task.chapters);
       } else {
-        filePath = await _assembleAndSaveEpub(task.book, task.chapters, cacheDir);
+        filePath = await _assembleAndSaveEpub(task.book, task.chapters);
       }
 
       if (filePath != null) {
-        await _clearCache(task.book.bookId);
         task.status = DownloadTaskStatus.completed;
         task.filePath = filePath;
         task.message = '下载完成';
@@ -288,32 +239,17 @@ class DownloadService extends ChangeNotifier {
       final totalChapters = chapters.length;
       onProgress?.call(0, totalChapters, '开始并发下载...');
 
-      final cacheDir = await _getCacheDirectory(book.bookId);
-
       // 直接使用后端下载接口，无批次人为限制
       await _apiService.downloadChapters(
         bookId: book.bookId,
         chapters: chapters,
-        concurrency: 6,
+        concurrency: 12,
         onProgress: onProgress,
       );
 
-      // 拷贝章节至文件组装目录
-      for (int i = 0; i < chapters.length; i++) {
-        final ch = chapters[i];
-        final taskChFile = _getChapterCacheFile(cacheDir, i);
-        if (!await taskChFile.exists() || await taskChFile.length() == 0) {
-          final content = await _apiService.getChapterContent(ch.itemId);
-          if (content != null && content.isNotEmpty) {
-            await taskChFile.writeAsString(content);
-          }
-        }
-      }
-
       onProgress?.call(totalChapters, totalChapters, '正在合并文件...');
-      final filePath = await _assembleAndSaveTxt(book, chapters, cacheDir);
+      final filePath = await _assembleAndSaveTxt(book, chapters);
       if (filePath != null) {
-        await _clearCache(book.bookId);
         onProgress?.call(totalChapters, totalChapters, '下载完成');
         return filePath;
       }
@@ -339,31 +275,17 @@ class DownloadService extends ChangeNotifier {
       final totalChapters = chapters.length;
       onProgress?.call(0, totalChapters, '开始并发下载...');
 
-      final cacheDir = await _getCacheDirectory(book.bookId);
-
       // 直接使用后端下载接口，无批次人为限制
       await _apiService.downloadChapters(
         bookId: book.bookId,
         chapters: chapters,
-        concurrency: 6,
+        concurrency: 12,
         onProgress: onProgress,
       );
 
-      for (int i = 0; i < chapters.length; i++) {
-        final ch = chapters[i];
-        final taskChFile = _getChapterCacheFile(cacheDir, i);
-        if (!await taskChFile.exists() || await taskChFile.length() == 0) {
-          final content = await _apiService.getChapterContent(ch.itemId);
-          if (content != null && content.isNotEmpty) {
-            await taskChFile.writeAsString(content);
-          }
-        }
-      }
-
       onProgress?.call(totalChapters, totalChapters, '正在生成 EPUB...');
-      final filePath = await _assembleAndSaveEpub(book, chapters, cacheDir);
+      final filePath = await _assembleAndSaveEpub(book, chapters);
       if (filePath != null) {
-        await _clearCache(book.bookId);
         onProgress?.call(totalChapters, totalChapters, '下载完成');
         return filePath;
       }
@@ -375,9 +297,15 @@ class DownloadService extends ChangeNotifier {
   }
 
   /// 组装并保存 TXT 文件
-  Future<String?> _assembleAndSaveTxt(Book book, List<Chapter> chapters, Directory cacheDir) async {
+  Future<String?> _assembleAndSaveTxt(Book book, List<Chapter> chapters) async {
     try {
-      final tempDir = await getTemporaryDirectory();
+      final offlineDir = await _apiService.engine.getOfflineBookDir(book.bookId);
+      Directory tempDir;
+      try {
+        tempDir = await getTemporaryDirectory();
+      } catch (_) {
+        tempDir = Directory.systemTemp;
+      }
       final safeFileName = '${book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '')}.txt';
       final tempFile = File('${tempDir.path}/$safeFileName');
       final sink = tempFile.openWrite();
@@ -385,7 +313,8 @@ class DownloadService extends ChangeNotifier {
       sink.writeln('《${book.bookName}》\n作者: ${book.author}\n\n');
 
       for (int i = 0; i < chapters.length; i++) {
-        final cacheFile = _getChapterCacheFile(cacheDir, i);
+        final ch = chapters[i];
+        final cacheFile = File('${offlineDir.path}/${ch.itemId}.txt');
         if (await cacheFile.exists() && await cacheFile.length() > 0) {
           await sink.addStream(cacheFile.openRead());
         } else {
@@ -434,13 +363,15 @@ class DownloadService extends ChangeNotifier {
   }
 
   /// 组装并保存 EPUB 文件
-  Future<String?> _assembleAndSaveEpub(Book book, List<Chapter> chapters, Directory cacheDir) async {
+  Future<String?> _assembleAndSaveEpub(Book book, List<Chapter> chapters) async {
     try {
+      final offlineDir = await _apiService.engine.getOfflineBookDir(book.bookId);
       final safeFileName = '${book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '')}.epub';
 
       final chapterContents = <Map<String, String>>[];
       for (int i = 0; i < chapters.length; i++) {
-        final cacheFile = _getChapterCacheFile(cacheDir, i);
+        final ch = chapters[i];
+        final cacheFile = File('${offlineDir.path}/${ch.itemId}.txt');
         String content = '[章节内容下载失败]';
         if (await cacheFile.exists() && await cacheFile.length() > 0) {
           content = await cacheFile.readAsString();
@@ -615,7 +546,12 @@ $navPoints  </navMap>
 
       final zipData = ZipEncoder().encode(archive);
 
-      final tempDir = await getTemporaryDirectory();
+      Directory tempDir;
+      try {
+        tempDir = await getTemporaryDirectory();
+      } catch (_) {
+        tempDir = Directory.systemTemp;
+      }
       final tempFile = File('${tempDir.path}/$safeFileName');
       await tempFile.writeAsBytes(zipData);
 

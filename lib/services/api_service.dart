@@ -144,21 +144,32 @@ class ApiService {
   }
 
   /// 7. 章节正文接口（iOS 通道）
-  Future<String?> getIosChapterContent(String itemId) async {
-    return _engine.getChapterContent(itemId);
+  Future<String?> getIosChapterContent(String itemId, {String? bookId}) async {
+    return _engine.getChapterContent(itemId, bookId: bookId);
   }
 
   /// 8. 章节正文接口（普通通道）
   Future<String?> getNormalChapterContent(
     String itemId, {
     String tab = '小说',
+    String? bookId,
   }) async {
-    return _engine.getChapterContent(itemId);
+    return _engine.getChapterContent(itemId, bookId: bookId);
   }
 
   /// 获取单个章节内容
-  Future<String?> getChapterContent(String itemId) async {
-    return _engine.getChapterContent(itemId);
+  Future<String?> getChapterContent(String itemId, {String? bookId}) async {
+    return _engine.getChapterContent(itemId, bookId: bookId);
+  }
+
+  /// 判断某书籍的指定章节是否已离线
+  Future<bool> isChapterOffline(String bookId, String itemId) async {
+    return _engine.isChapterOffline(bookId, itemId);
+  }
+
+  /// 获取某书籍已离线的章节数量
+  Future<int> getOfflineChapterCount(String bookId) async {
+    return _engine.getOfflineChapterCount(bookId);
   }
 
   /// 获取书籍封面图片数据
@@ -191,7 +202,7 @@ class ApiService {
     required List<Chapter> chapters,
     void Function(int current, int total, String message)? onProgress,
     bool Function()? isCancelled,
-    int concurrency = 6,
+    int concurrency = 12,
   }) async {
     return _engine.downloadChapters(
       bookId: bookId,

@@ -33,7 +33,16 @@ class FanqieMobileGateway {
   // 当前正文解密密钥
   Uint8List? _contentKey = _hexToBytes('3fdb97b8bcdfdd6ccdc11b315d52dfbc');
   int _keyVer = 1783624030;
-  bool _isRefreshingKey = false;
+  Completer<bool>? _refreshKeyCompleter;
+  HttpClient? _sharedClient;
+
+  HttpClient get _client {
+    _sharedClient ??= HttpClient()
+      ..maxConnectionsPerHost = 32
+      ..idleTimeout = const Duration(seconds: 30)
+      ..connectionTimeout = const Duration(seconds: 8);
+    return _sharedClient!;
+  }
 
   /// 获取单章完整正文（突破 200 字锁章限制）
   Future<String?> fetchChapter(String itemId, {int retryCount = 0}) async {
@@ -69,22 +78,20 @@ class FanqieMobileGateway {
     final uri = Uri.https('reading.snssdk.com', '/reading/reader/full/v', queryParams);
     final sigHeaders = signRequest(uri.toString());
 
-    HttpClient? client;
     try {
-      client = HttpClient();
-      final req = await client.getUrl(uri).timeout(const Duration(seconds: 15));
+      final req = await _client.getUrl(uri).timeout(const Duration(seconds: 8));
       req.headers.set('User-Agent', userAgent);
       for (final e in sigHeaders.entries) {
         req.headers.set(e.key, e.value);
       }
 
-      final res = await req.close().timeout(const Duration(seconds: 15));
+      final res = await req.close().timeout(const Duration(seconds: 8));
       if (res.statusCode == 200) {
         final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
         final jsonStr = utf8.decode(respBytes, allowMalformed: true);
         if (jsonStr.isEmpty) {
-          if (retryCount < 2) {
-            await Future.delayed(const Duration(milliseconds: 300));
+          if (retryCount < 1) {
+            await Future.delayed(const Duration(milliseconds: 150));
             return await fetchChapter(itemId, retryCount: retryCount + 1);
           }
           return null;
@@ -117,12 +124,10 @@ class FanqieMobileGateway {
       if (kDebugMode) {
         debugPrint('FanqieMobileGateway fetchChapter error: $e');
       }
-      if (retryCount < 1) {
-        await Future.delayed(const Duration(milliseconds: 400));
+      if (retryCount < 2) {
+        await Future.delayed(Duration(milliseconds: 150 * (retryCount + 1)));
         return await fetchChapter(itemId, retryCount: retryCount + 1);
       }
-    } finally {
-      client?.close();
     }
     return null;
   }
@@ -163,16 +168,14 @@ class FanqieMobileGateway {
     final uri = Uri.https('reading.snssdk.com', '/reading/reader/batch_full/v', queryParams);
     final sigHeaders = signRequest(uri.toString());
 
-    HttpClient? client;
     try {
-      client = HttpClient();
-      final req = await client.getUrl(uri).timeout(const Duration(seconds: 20));
+      final req = await _client.getUrl(uri).timeout(const Duration(seconds: 12));
       req.headers.set('User-Agent', userAgent);
       for (final e in sigHeaders.entries) {
         req.headers.set(e.key, e.value);
       }
 
-      final res = await req.close().timeout(const Duration(seconds: 20));
+      final res = await req.close().timeout(const Duration(seconds: 12));
       if (res.statusCode == 200) {
         final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
         final jsonStr = utf8.decode(respBytes, allowMalformed: true);
@@ -203,16 +206,17 @@ class FanqieMobileGateway {
       if (kDebugMode) {
         debugPrint('FanqieMobileGateway fetchBatchChapters error: $e');
       }
-    } finally {
-      client?.close();
     }
     return results;
   }
 
   /// 协商并刷新正文 AES 密钥
   Future<bool> refreshKey() async {
-    if (_isRefreshingKey) return false;
-    _isRefreshingKey = true;
+    if (_refreshKeyCompleter != null) {
+      return _refreshKeyCompleter!.future;
+    }
+    final completer = Completer<bool>();
+    _refreshKeyCompleter = completer;
 
     try {
       var id = BigInt.parse(_deviceId);
@@ -292,20 +296,23 @@ class FanqieMobileGateway {
           if (decKey.length == 16) {
             _contentKey = decKey;
             _keyVer = int.tryParse(j['data']?['keyver']?.toString() ?? '0') ?? _keyVer;
-            client.close();
+            completer.complete(true);
             return true;
           }
         }
       }
       client.close();
+      completer.complete(false);
+      return false;
     } catch (e) {
       if (kDebugMode) {
         debugPrint('FanqieMobileGateway refreshKey error: $e');
       }
+      completer.complete(false);
+      return false;
     } finally {
-      _isRefreshingKey = false;
+      _refreshKeyCompleter = null;
     }
-    return false;
   }
 
   /// 清洗移动端正文 HTML，还原标准排版与标题
@@ -383,6 +390,33 @@ class FanqieMobileGateway {
   static const List<int> _argus551Tail9 = [0xea, 0xfb, 0x2c, 0xfe, 0x85, 0x68, 0x51, 0x91, 0x54];
   static final BigInt _simonZ = BigInt.parse('3dc94c3a046d678b', radix: 16);
   static final BigInt _mask64 = (BigInt.one << 64) - BigInt.one;
+
+  // 预编译 Simon-64/128 72 轮密钥，避免重复大整数幂运算
+  static final List<BigInt> _simonPrecomputedRoundKeys = () {
+    final out = <BigInt>[];
+    for (int i = 0; i < 4; i++) {
+      var v = BigInt.zero;
+      for (int j = 0; j < 8; j++) {
+        v |= BigInt.from(_argusSignKey[i * 8 + j]) << (j * 8);
+      }
+      out.add(v);
+    }
+    final key = List<BigInt>.filled(72, BigInt.zero);
+    key[0] = out[0];
+    key[1] = out[1];
+    key[2] = out[2];
+    key[3] = out[3];
+
+    for (int i = 4; i < 72; i++) {
+      var tmp = _rotr64(key[i - 1], 3);
+      tmp ^= key[i - 3];
+      tmp ^= _rotr64(tmp, 1);
+      final notVal = (~key[i - 4]) & _mask64;
+      final bitVal = (_simonZ >> ((i - 4) % 62)) & BigInt.one;
+      key[i] = (notVal ^ tmp ^ bitVal ^ BigInt.from(3)) & _mask64;
+    }
+    return key;
+  }();
 
   static Map<String, String> signRequest(String url, {List<int>? body}) {
     final uri = Uri.parse(url);
@@ -506,7 +540,6 @@ class FanqieMobileGateway {
   }
 
   static Uint8List _simonEncryptPadded(Uint8List protobuf) {
-    final key = _simonKeyList();
     final encPb = Uint8List(protobuf.length);
     for (int i = 0; i < protobuf.length ~/ 16; i++) {
       var a = BigInt.zero;
@@ -515,7 +548,7 @@ class FanqieMobileGateway {
         a |= BigInt.from(protobuf[i * 16 + j]) << (j * 8);
         b |= BigInt.from(protobuf[i * 16 + 8 + j]) << (j * 8);
       }
-      final ct = _simonEnc([a, b], key);
+      final ct = _simonEnc([a, b]);
       for (int j = 0; j < 8; j++) {
         encPb[i * 16 + j] = ((ct[0] >> (j * 8)) & BigInt.from(255)).toInt();
         encPb[i * 16 + 8 + j] = ((ct[1] >> (j * 8)) & BigInt.from(255)).toInt();
@@ -524,49 +557,17 @@ class FanqieMobileGateway {
     return encPb;
   }
 
-  static List<BigInt> _simonKeyList() {
-    final key = _argusSignKey;
-    final out = <BigInt>[];
-    for (int i = 0; i < 4; i++) {
-      var v = BigInt.zero;
-      for (int j = 0; j < 8; j++) {
-        v |= BigInt.from(key[i * 8 + j]) << (j * 8);
-      }
-      out.add(v);
-    }
-    return out;
-  }
-
-  static List<BigInt> _simonEnc(List<BigInt> pt, List<BigInt> k) {
-    final roundKeys = _simonKeyExpansion(k);
+  static List<BigInt> _simonEnc(List<BigInt> pt) {
     var xi = pt[0];
     var xi1 = pt[1];
 
-    for (final roundKey in roundKeys) {
+    for (final roundKey in _simonPrecomputedRoundKeys) {
       final tmp = xi1;
       final f = (_rotl64(xi1, 1) & _rotl64(xi1, 8)) & _mask64;
       xi1 = (xi ^ f ^ _rotl64(xi1, 2) ^ roundKey) & _mask64;
       xi = tmp;
     }
     return [xi, xi1];
-  }
-
-  static List<BigInt> _simonKeyExpansion(List<BigInt> k) {
-    final key = List<BigInt>.filled(72, BigInt.zero);
-    key[0] = k[0];
-    key[1] = k[1];
-    key[2] = k[2];
-    key[3] = k[3];
-
-    for (int i = 4; i < 72; i++) {
-      var tmp = _rotr64(key[i - 1], 3);
-      tmp ^= key[i - 3];
-      tmp ^= _rotr64(tmp, 1);
-      final notVal = (~key[i - 4]) & _mask64;
-      final bitVal = (_simonZ >> ((i - 4) % 62)) & BigInt.one;
-      key[i] = (notVal ^ tmp ^ bitVal ^ BigInt.from(3)) & _mask64;
-    }
-    return key;
   }
 
   static String _ladonEncrypt(int khronos, int lcId, int aid, Uint8List randomBytes) {

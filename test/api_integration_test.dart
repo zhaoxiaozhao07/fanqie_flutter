@@ -111,6 +111,24 @@ void main() {
       expect(fullContent!.length, greaterThan(1500));
       expect(fullContent.contains('APP端专享/锁章章节'), isFalse);
     });
+
+    test('7. Offline book resources priority and persistent chapter cache', () async {
+      const testBookId = 'test_offline_book_999';
+      const testItemId = 'test_item_999';
+      const mockContent = '这是测试的离线本地正文内容，阅读时必须优先读取本地已下载资源！这是测试章节的第二段内容，确保文本长度超过五十个字符以通过有效性检验。';
+
+      final offlineFile = await apiService.engine.getOfflineChapterFile(testBookId, testItemId);
+      await offlineFile.writeAsString(mockContent);
+
+      final isOffline = await apiService.isChapterOffline(testBookId, testItemId);
+      expect(isOffline, isTrue);
+
+      final fetchedContent = await apiService.getChapterContent(testItemId, bookId: testBookId);
+      expect(fetchedContent, equals(mockContent));
+
+      final offlineCount = await apiService.getOfflineChapterCount(testBookId);
+      expect(offlineCount, greaterThanOrEqualTo(1));
+    });
   });
 
   group('DownloadService Background Download Tests', () {

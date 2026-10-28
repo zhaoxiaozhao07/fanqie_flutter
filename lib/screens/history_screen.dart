@@ -11,6 +11,7 @@ import '../services/download_service.dart';
 import '../services/reading_history_service.dart';
 import '../widgets/history_card.dart';
 import '../widgets/loading_widget.dart';
+import '../widgets/download_action_button.dart';
 import 'book_detail_screen.dart';
 import 'reader_screen.dart';
 
@@ -310,6 +311,8 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
               )
             : null,
         actions: [
+          if (!_isCurrentSelectionMode)
+            const DownloadActionButton(),
           if (!_isCurrentSelectionMode && _currentListCount > 0) ...[
             IconButton(
               icon: const Icon(Icons.checklist_rounded),

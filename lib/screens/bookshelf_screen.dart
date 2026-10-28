@@ -10,6 +10,7 @@ import '../models/download_history.dart';
 import '../services/api_service.dart';
 import '../services/bookshelf_service.dart';
 import '../services/history_service.dart';
+import '../widgets/download_action_button.dart';
 import 'book_detail_screen.dart';
 import 'reader_screen.dart';
 
@@ -383,6 +384,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
             : null,
         actions: [
           if (!_isSelectionMode) ...[
+            const DownloadActionButton(),
             // 切换 列表 / 三列 视图按钮
             IconButton(
               icon: Icon(
