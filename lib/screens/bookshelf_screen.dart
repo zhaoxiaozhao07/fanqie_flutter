@@ -113,12 +113,80 @@ class BookshelfScreenState extends State<BookshelfScreen> {
       downloads = await _downloadHistoryService.getHistoryList();
     } catch (_) {}
 
+    // 1. 跨数据源封面互相补全 (已下载 <-> 书架收藏)
+    final Map<String, String> coverMap = {};
+    for (final d in downloads) {
+      if (d.thumbUrl != null && d.thumbUrl!.isNotEmpty) {
+        coverMap[d.bookId] = d.thumbUrl!;
+      }
+    }
+    for (final b in shelfList) {
+      if (b.thumbUrl != null && b.thumbUrl!.isNotEmpty) {
+        coverMap[b.bookId] = b.thumbUrl!;
+      }
+    }
+
+    // 互补缺失的书封
+    for (int i = 0; i < shelfList.length; i++) {
+      final b = shelfList[i];
+      if ((b.thumbUrl == null || b.thumbUrl!.isEmpty) && coverMap.containsKey(b.bookId)) {
+        final cover = coverMap[b.bookId]!;
+        shelfList[i] = b.copyWithCover(cover);
+        _bookshelfService.updateCover(b.bookId, cover);
+      }
+    }
+    for (int i = 0; i < downloads.length; i++) {
+      final d = downloads[i];
+      if ((d.thumbUrl == null || d.thumbUrl!.isEmpty) && coverMap.containsKey(d.bookId)) {
+        final cover = coverMap[d.bookId]!;
+        downloads[i] = d.copyWithCover(cover);
+        _downloadHistoryService.updateCover(d.bookId, cover);
+      }
+    }
+
     if (mounted) {
       setState(() {
         _books = shelfList;
         _downloadedBooks = downloads;
         _isLoading = false;
       });
+    }
+
+    // 2. 针对依然没有封面的早期历史数据，静默后台联网补全并持久化
+    _autoFetchMissingCovers(shelfList, downloads);
+  }
+
+  void _autoFetchMissingCovers(List<BookshelfBook> shelfList, List<DownloadHistory> downloads) async {
+    final missingBookIds = <String>{};
+    for (final b in shelfList) {
+      if (b.thumbUrl == null || b.thumbUrl!.isEmpty) {
+        missingBookIds.add(b.bookId);
+      }
+    }
+    for (final d in downloads) {
+      if (d.thumbUrl == null || d.thumbUrl!.isEmpty) {
+        missingBookIds.add(d.bookId);
+      }
+    }
+
+    if (missingBookIds.isEmpty) return;
+
+    bool hasUpdated = false;
+    for (final bookId in missingBookIds) {
+      if (!mounted) return;
+      try {
+        final detail = await _apiService.getBookDetail(bookId);
+        if (detail?.thumbUrl != null && detail!.thumbUrl!.isNotEmpty) {
+          final cover = detail.thumbUrl!;
+          await _bookshelfService.updateCover(bookId, cover);
+          await _downloadHistoryService.updateCover(bookId, cover);
+          hasUpdated = true;
+        }
+      } catch (_) {}
+    }
+
+    if (hasUpdated && mounted) {
+      _loadData(silent: true);
     }
   }
 
@@ -731,7 +799,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
           padding: const EdgeInsets.all(16),
           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: 3,
-            childAspectRatio: 0.60,
+            childAspectRatio: 0.48,
             crossAxisSpacing: 14,
             mainAxisSpacing: 16,
           ),
@@ -1052,7 +1120,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
           padding: const EdgeInsets.all(16),
           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: 3,
-            childAspectRatio: 0.60,
+            childAspectRatio: 0.48,
             crossAxisSpacing: 14,
             mainAxisSpacing: 16,
           ),

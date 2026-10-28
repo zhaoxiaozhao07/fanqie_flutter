@@ -91,6 +91,16 @@ class HistoryService {
     await _saveHistory();
   }
 
+  /// 更新指定书籍记录的封面（若原封面为空）
+  Future<void> updateCover(String bookId, String thumbUrl) async {
+    await initialize();
+    final index = _historyList.indexWhere((item) => item.bookId == bookId);
+    if (index != -1 && (_historyList[index].thumbUrl == null || _historyList[index].thumbUrl!.isEmpty)) {
+      _historyList[index] = _historyList[index].copyWithCover(thumbUrl);
+      await _saveHistory();
+    }
+  }
+
   /// 清空所有历史记录
   Future<void> clearAllHistory() async {
     await initialize();

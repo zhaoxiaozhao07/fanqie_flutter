@@ -100,6 +100,22 @@ class DownloadHistory {
     return '$fileSize B';
   }
 
+  DownloadHistory copyWithCover(String cover) {
+    return DownloadHistory(
+      bookId: bookId,
+      bookName: bookName,
+      author: author,
+      thumbUrl: cover,
+      category: category,
+      creationStatus: creationStatus,
+      wordNumber: wordNumber,
+      downloadTime: downloadTime,
+      format: format,
+      filePath: filePath,
+      fileSize: fileSize,
+    );
+  }
+
   /// 获取格式化的下载时间显示
   String get formattedDownloadTime {
     final now = DateTime.now();

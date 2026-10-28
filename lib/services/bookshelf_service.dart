@@ -145,6 +145,16 @@ class BookshelfService {
     }
   }
 
+  /// 更新书籍封面（若原有封面为空）
+  Future<void> updateCover(String bookId, String thumbUrl) async {
+    await initialize();
+    final index = _books.indexWhere((b) => b.bookId == bookId);
+    if (index != -1 && (_books[index].thumbUrl == null || _books[index].thumbUrl!.isEmpty)) {
+      _books[index] = _books[index].copyWithCover(thumbUrl);
+      await _save();
+    }
+  }
+
   /// 获取某本书的进度
   BookshelfBook? getBook(String bookId) {
     try {

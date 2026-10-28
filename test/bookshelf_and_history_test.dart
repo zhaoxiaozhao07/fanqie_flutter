@@ -39,6 +39,18 @@ void main() {
       expect(service.isInBookshelf('b1'), isFalse);
       expect(service.isInBookshelf('b2'), isFalse);
     });
+
+    test('Update cover heals missing cover', () async {
+      final service = BookshelfService();
+      await service.initialize();
+      final bookNoCover = Book(bookId: 'b_no_cover', bookName: 'No Cover Book', author: 'Author');
+      await service.addToBookshelf(bookNoCover);
+      expect(service.getBook('b_no_cover')?.thumbUrl, isNull);
+
+      await service.updateCover('b_no_cover', 'https://example.com/cover.jpg');
+      expect(service.getBook('b_no_cover')?.thumbUrl, equals('https://example.com/cover.jpg'));
+      await service.removeFromBookshelf('b_no_cover');
+    });
   });
 
   group('ReadingHistoryService Tests', () {

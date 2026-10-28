@@ -86,6 +86,23 @@ class BookshelfBook {
     );
   }
 
+  BookshelfBook copyWithCover(String cover) {
+    return BookshelfBook(
+      bookId: bookId,
+      bookName: bookName,
+      author: author,
+      thumbUrl: cover,
+      category: category,
+      creationStatus: creationStatus,
+      score: score,
+      abstract: abstract,
+      lastReadChapterTitle: lastReadChapterTitle,
+      lastReadChapterIndex: lastReadChapterIndex,
+      lastReadTime: lastReadTime,
+      addedTime: addedTime,
+    );
+  }
+
   Map<String, dynamic> toJson() {
     return {
       'book_id': bookId,
