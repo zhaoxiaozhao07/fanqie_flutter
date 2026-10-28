@@ -1,3 +1,4 @@
+import 'fanqie_mobile_gateway.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -532,7 +533,9 @@ class FanqieBackendEngine {
     };
   }
 
-  /// 6. 获取章节正文内容
+  final FanqieMobileGateway _mobileGateway = FanqieMobileGateway();
+
+  /// 6. 获取章节正文内容（优先走移动端接口，彻底突破 200 字截断与锁章限制）
   Future<String?> getChapterContent(String itemId) async {
     final cleanId = itemId.trim();
     if (cleanId.isEmpty) return null;
@@ -542,13 +545,30 @@ class FanqieBackendEngine {
       final cacheFile = await _getChapterCacheFile(cleanId);
       if (await cacheFile.exists()) {
         final cached = await cacheFile.readAsString();
-        if (cached.length > 50) {
+        if (cached.length > 50 && !cached.contains('APP端专享/锁章章节')) {
           return cached;
         }
       }
     } catch (_) {}
 
-    // 2. 网络获取与反爬解密
+    // 2. 优先通过移动端通道获取完整无锁正文 (对接 reading.snssdk.com 移动端专属接口)
+    try {
+      final mobileContent = await _mobileGateway.fetchChapter(cleanId);
+      if (mobileContent != null && mobileContent.length > 50) {
+        // 成功获取完整正文，写入本地缓存
+        try {
+          final cacheFile = await _getChapterCacheFile(cleanId);
+          await cacheFile.writeAsString(mobileContent);
+        } catch (_) {}
+        return mobileContent;
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('FanqieBackendEngine mobile fetchChapter failed: $e');
+      }
+    }
+
+    // 3. 兜底回退到 Web 端阅览接口
     final uri = Uri.parse('https://fanqienovel.com/reader/$cleanId');
     for (int retry = 0; retry < 2; retry++) {
       try {
@@ -570,7 +590,6 @@ class FanqieBackendEngine {
                     if (isLocked || decrypted.length <= 200) {
                       return '$decrypted\n\n[提示：本章为番茄APP端专享/锁章章节，当前官方Web端仅提供试读预览]';
                     } else {
-                      // 完整章节：写入本地持久化缓存
                       try {
                         final cacheFile = await _getChapterCacheFile(cleanId);
                         await cacheFile.writeAsString(decrypted);

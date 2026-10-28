@@ -104,6 +104,12 @@ void main() {
       // Second fetch hits local cache
       final cachedContent = await apiService.getChapterContent(firstItemId);
       expect(cachedContent, equals(content));
+
+      // Test mobile gateway on chapter 101 (which was locked with 200 chars on Web)
+      final fullContent = await apiService.getChapterContent('7202445625546736180');
+      expect(fullContent, isNotNull);
+      expect(fullContent!.length, greaterThan(1500));
+      expect(fullContent.contains('APP端专享/锁章章节'), isFalse);
     });
   });
 
