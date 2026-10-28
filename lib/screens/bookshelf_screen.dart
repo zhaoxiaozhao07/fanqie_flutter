@@ -4,6 +4,7 @@ import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../app_theme.dart';
 import '../main.dart';
+import '../models/book.dart';
 import '../models/bookshelf_book.dart';
 import '../models/chapter.dart';
 import '../models/download_history.dart';
@@ -113,34 +114,44 @@ class BookshelfScreenState extends State<BookshelfScreen> {
       downloads = await _downloadHistoryService.getHistoryList();
     } catch (_) {}
 
-    // 1. 跨数据源封面互相补全 (已下载 <-> 书架收藏)
-    final Map<String, String> coverMap = {};
+    // 1. 跨数据源封面互相补全 (双索引：同时支持 bookId 与 bookName 匹配，并转换为永久 CDN 直链)
+    final Map<String, String> coverByBookId = {};
+    final Map<String, String> coverByName = {};
+
     for (final d in downloads) {
       if (d.thumbUrl != null && d.thumbUrl!.isNotEmpty) {
-        coverMap[d.bookId] = d.thumbUrl!;
+        final clean = normalizeCoverUrl(d.thumbUrl!);
+        if (clean != null && clean.isNotEmpty) {
+          coverByBookId[d.bookId] = clean;
+          coverByName[d.bookName.trim()] = clean;
+        }
       }
     }
     for (final b in shelfList) {
       if (b.thumbUrl != null && b.thumbUrl!.isNotEmpty) {
-        coverMap[b.bookId] = b.thumbUrl!;
+        final clean = normalizeCoverUrl(b.thumbUrl!);
+        if (clean != null && clean.isNotEmpty) {
+          coverByBookId[b.bookId] = clean;
+          coverByName[b.bookName.trim()] = clean;
+        }
       }
     }
 
-    // 互补缺失的书封
+    // 互相补全缺失的书封（无论是 bookId 相同还是书名相同）
     for (int i = 0; i < shelfList.length; i++) {
       final b = shelfList[i];
-      if ((b.thumbUrl == null || b.thumbUrl!.isEmpty) && coverMap.containsKey(b.bookId)) {
-        final cover = coverMap[b.bookId]!;
-        shelfList[i] = b.copyWithCover(cover);
-        _bookshelfService.updateCover(b.bookId, cover);
+      final resolvedCover = coverByBookId[b.bookId] ?? coverByName[b.bookName.trim()];
+      if ((b.thumbUrl == null || b.thumbUrl!.isEmpty || b.thumbUrl!.contains('x-expires')) && resolvedCover != null) {
+        shelfList[i] = b.copyWithCover(resolvedCover);
+        _bookshelfService.updateCover(b.bookId, resolvedCover);
       }
     }
     for (int i = 0; i < downloads.length; i++) {
       final d = downloads[i];
-      if ((d.thumbUrl == null || d.thumbUrl!.isEmpty) && coverMap.containsKey(d.bookId)) {
-        final cover = coverMap[d.bookId]!;
-        downloads[i] = d.copyWithCover(cover);
-        _downloadHistoryService.updateCover(d.bookId, cover);
+      final resolvedCover = coverByBookId[d.bookId] ?? coverByName[d.bookName.trim()];
+      if ((d.thumbUrl == null || d.thumbUrl!.isEmpty || d.thumbUrl!.contains('x-expires')) && resolvedCover != null) {
+        downloads[i] = d.copyWithCover(resolvedCover);
+        _downloadHistoryService.updateCover(d.bookId, resolvedCover);
       }
     }
 
@@ -152,32 +163,61 @@ class BookshelfScreenState extends State<BookshelfScreen> {
       });
     }
 
-    // 2. 针对依然没有封面的早期历史数据，静默后台联网补全并持久化
+    // 2. 针对依然没有有效封面的早期历史数据，静默后台搜索补全并持久化
     _autoFetchMissingCovers(shelfList, downloads);
   }
 
+  /// 将可能带防盗链时效签名的图片 URL 转换为永久静态 CDN 直链
+  static String? normalizeCoverUrl(String? url) {
+    if (url == null || url.isEmpty) return null;
+    final clean = url.trim();
+    if (!clean.startsWith('http')) return null;
+
+    final match = RegExp(r'/novel-pic/([a-zA-Z0-9_\-]+)').firstMatch(clean);
+    if (match != null) {
+      final hash = match.group(1);
+      if (hash != null && hash.isNotEmpty) {
+        return 'https://p6-tt.bytecdn.cn/novel-pic/$hash~tplv-shrink:640:0.image';
+      }
+    }
+    return clean;
+  }
+
   void _autoFetchMissingCovers(List<BookshelfBook> shelfList, List<DownloadHistory> downloads) async {
-    final missingBookIds = <String>{};
+    final missingBooks = <String, String>{}; // bookId -> bookName
     for (final b in shelfList) {
-      if (b.thumbUrl == null || b.thumbUrl!.isEmpty) {
-        missingBookIds.add(b.bookId);
+      if (b.thumbUrl == null || b.thumbUrl!.isEmpty || b.thumbUrl!.contains('x-expires')) {
+        missingBooks[b.bookId] = b.bookName;
       }
     }
     for (final d in downloads) {
-      if (d.thumbUrl == null || d.thumbUrl!.isEmpty) {
-        missingBookIds.add(d.bookId);
+      if (d.thumbUrl == null || d.thumbUrl!.isEmpty || d.thumbUrl!.contains('x-expires')) {
+        missingBooks[d.bookId] = d.bookName;
       }
     }
 
-    if (missingBookIds.isEmpty) return;
+    if (missingBooks.isEmpty) return;
 
     bool hasUpdated = false;
-    for (final bookId in missingBookIds) {
+    for (final entry in missingBooks.entries) {
       if (!mounted) return;
+      final bookId = entry.key;
+      final bookName = entry.value;
       try {
-        final detail = await _apiService.getBookDetail(bookId);
-        if (detail?.thumbUrl != null && detail!.thumbUrl!.isNotEmpty) {
-          final cover = detail.thumbUrl!;
+        // 优先通过书名搜索获取永久直链封面
+        final searchRes = await _apiService.searchBooks(bookName);
+        String? newCover;
+        if (searchRes.isNotEmpty && searchRes.first.thumbUrl != null && searchRes.first.thumbUrl!.isNotEmpty) {
+          newCover = normalizeCoverUrl(searchRes.first.thumbUrl);
+        } else {
+          final detail = await _apiService.getBookDetail(bookId);
+          if (detail?.thumbUrl != null && detail!.thumbUrl!.isNotEmpty) {
+            newCover = normalizeCoverUrl(detail.thumbUrl);
+          }
+        }
+
+        if (newCover != null && newCover.isNotEmpty) {
+          final cover = newCover;
           await _bookshelfService.updateCover(bookId, cover);
           await _downloadHistoryService.updateCover(bookId, cover);
           hasUpdated = true;
@@ -334,6 +374,39 @@ class BookshelfScreenState extends State<BookshelfScreen> {
         ),
       ),
     ).then((_) => _loadData(silent: true));
+  }
+
+  /// 跳转到书籍详情页
+  void _openBookDetail(Book book) {
+    Navigator.push(
+      context,
+      MaterialPageRoute(builder: (_) => BookDetailScreen(book: book)),
+    ).then((_) => _loadData(silent: true));
+  }
+
+  /// 统一的高清封面构建组件（自动转换直链，提供优雅阴影与圆角）
+  Widget _buildCoverWidget(String? rawUrl, {double iconSize = 28}) {
+    final url = normalizeCoverUrl(rawUrl);
+    if (url != null && url.isNotEmpty) {
+      return CachedNetworkImage(
+        imageUrl: url,
+        fit: BoxFit.cover,
+        cacheManager: BookCoverCacheManager.instance,
+        placeholder: (context, url) => Container(color: AppTheme.primaryLight),
+        errorWidget: (context, url, error) => Container(
+          color: AppTheme.primaryLight,
+          child: Center(
+            child: Icon(Icons.book, size: iconSize, color: AppTheme.primaryColor.withValues(alpha: 0.6)),
+          ),
+        ),
+      );
+    }
+    return Container(
+      color: AppTheme.primaryLight,
+      child: Center(
+        child: Icon(Icons.book, size: iconSize, color: AppTheme.primaryColor.withValues(alpha: 0.6)),
+      ),
+    );
   }
 
   /// 直接阅读已下载的小说
@@ -678,73 +751,90 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                       onChanged: (_) => _toggleSelection(shelfBook.bookId),
                     ),
                   ),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(6),
-                  child: SizedBox(
-                    width: 50,
-                    height: 70,
-                    child: shelfBook.thumbUrl != null && shelfBook.thumbUrl!.isNotEmpty
-                        ? CachedNetworkImage(
-                            imageUrl: shelfBook.thumbUrl!,
-                            fit: BoxFit.cover,
-                            cacheManager: BookCoverCacheManager.instance,
-                            placeholder: (context, url) => Container(color: AppTheme.primaryLight),
-                            errorWidget: (context, url, error) => Container(
-                              color: AppTheme.primaryLight,
-                              child: const Icon(Icons.book, size: 24, color: AppTheme.primaryColor),
-                            ),
-                          )
-                        : Container(
-                            color: AppTheme.primaryLight,
-                            child: const Icon(Icons.book, size: 24, color: AppTheme.primaryColor),
-                          ),
+                // 点击书封 -> 立即进入阅读！
+                GestureDetector(
+                  onTap: () {
+                    if (_isSelectionMode) {
+                      _toggleSelection(shelfBook.bookId);
+                    } else {
+                      _continueReading(shelfBook);
+                    }
+                  },
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: SizedBox(
+                      width: 52,
+                      height: 74,
+                      child: _buildCoverWidget(shelfBook.thumbUrl, iconSize: 22),
+                    ),
                   ),
                 ),
               ],
             ),
-            title: Text(
-              shelfBook.bookName,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+            // 点击书名 -> 进入书籍详情！
+            title: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                if (_isSelectionMode) {
+                  _toggleSelection(shelfBook.bookId);
+                } else {
+                  _openBookDetail(shelfBook.toBook());
+                }
+              },
+              child: Text(
+                shelfBook.bookName,
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
-            subtitle: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(height: 4),
-                Text(
-                  '作者: ${shelfBook.author}',
-                  style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
-                  maxLines: 1,
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        shelfBook.lastReadChapterTitle != null
-                            ? '读至: ${shelfBook.lastReadChapterTitle}'
-                            : '尚未开始阅读',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: shelfBook.lastReadChapterTitle != null
-                              ? AppTheme.primaryColor
-                              : AppTheme.textHint,
-                          fontWeight: shelfBook.lastReadChapterTitle != null
-                              ? FontWeight.w500
-                              : FontWeight.normal,
+            subtitle: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                if (_isSelectionMode) {
+                  _toggleSelection(shelfBook.bookId);
+                } else {
+                  _openBookDetail(shelfBook.toBook());
+                }
+              },
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 4),
+                  Text(
+                    '作者: ${shelfBook.author}',
+                    style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                    maxLines: 1,
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          shelfBook.lastReadChapterTitle != null
+                              ? '读至: ${shelfBook.lastReadChapterTitle}'
+                              : '尚未开始阅读',
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: shelfBook.lastReadChapterTitle != null
+                                ? AppTheme.primaryColor
+                                : AppTheme.textHint,
+                            fontWeight: shelfBook.lastReadChapterTitle != null
+                                ? FontWeight.w500
+                                : FontWeight.normal,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
                         ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
                       ),
-                    ),
-                    Text(
-                      _formatTime(shelfBook.lastReadTime),
-                      style: const TextStyle(fontSize: 10, color: AppTheme.textHint),
-                    ),
-                  ],
-                ),
-              ],
+                      Text(
+                        _formatTime(shelfBook.lastReadTime),
+                        style: const TextStyle(fontSize: 10, color: AppTheme.textHint),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
             trailing: !_isSelectionMode
                 ? OutlinedButton(
@@ -799,7 +889,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
           padding: const EdgeInsets.all(16),
           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: 3,
-            childAspectRatio: 0.48,
+            childAspectRatio: 0.49,
             crossAxisSpacing: 14,
             mainAxisSpacing: 16,
           ),
@@ -808,57 +898,45 @@ class BookshelfScreenState extends State<BookshelfScreen> {
             final shelfBook = _books[index];
             final isSelected = _selectedBookIds.contains(shelfBook.bookId);
 
-            return GestureDetector(
-              onTap: () {
-                if (_isSelectionMode) {
-                  _toggleSelection(shelfBook.bookId);
-                } else {
-                  _continueReading(shelfBook);
-                }
-              },
-              onLongPress: () {
-                if (!_isSelectionMode) {
-                  setState(() {
-                    _isSelectionMode = true;
-                    _selectedBookIds.add(shelfBook.bookId);
-                  });
-                }
-              },
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // 封面与选择框
-                  Expanded(
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 1. 封面容器（严格固定 1 : 1.42 长方形比例，点击进入阅读）
+                AspectRatio(
+                  aspectRatio: 1 / 1.42,
+                  child: GestureDetector(
+                    onTap: () {
+                      if (_isSelectionMode) {
+                        _toggleSelection(shelfBook.bookId);
+                      } else {
+                        _continueReading(shelfBook); // 点击封面 -> 直接进入阅读！
+                      }
+                    },
+                    onLongPress: () {
+                      if (!_isSelectionMode) {
+                        setState(() {
+                          _isSelectionMode = true;
+                          _selectedBookIds.add(shelfBook.bookId);
+                        });
+                      }
+                    },
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Container(
-                            decoration: BoxDecoration(
-                              boxShadow: [
-                                BoxShadow(
-                                  color: Colors.black.withValues(alpha: 0.1),
-                                  blurRadius: 6,
-                                  offset: const Offset(0, 3),
-                                ),
-                              ],
-                            ),
-                            child: shelfBook.thumbUrl != null && shelfBook.thumbUrl!.isNotEmpty
-                                ? CachedNetworkImage(
-                                    imageUrl: shelfBook.thumbUrl!,
-                                    fit: BoxFit.cover,
-                                    cacheManager: BookCoverCacheManager.instance,
-                                    placeholder: (context, url) => Container(color: AppTheme.primaryLight),
-                                    errorWidget: (context, url, error) => Container(
-                                      color: AppTheme.primaryLight,
-                                      child: const Icon(Icons.book, size: 28, color: AppTheme.primaryColor),
-                                    ),
-                                  )
-                                : Container(
-                                    color: AppTheme.primaryLight,
-                                    child: const Icon(Icons.book, size: 28, color: AppTheme.primaryColor),
-                                  ),
+                        Container(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(8),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.12),
+                                blurRadius: 6,
+                                offset: const Offset(1, 3),
+                              ),
+                            ],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: _buildCoverWidget(shelfBook.thumbUrl, iconSize: 28),
                           ),
                         ),
                         if (_isSelectionMode)
@@ -904,24 +982,52 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                       ],
                     ),
                   ),
-                  const SizedBox(height: 6),
-                  // 书名
-                  Text(
-                    shelfBook.bookName,
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 6),
+                // 2. 书名与作者（严格固定高度，点击书名/作者 -> 进书籍详情！）
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {
+                    if (_isSelectionMode) {
+                      _toggleSelection(shelfBook.bookId);
+                    } else {
+                      _openBookDetail(shelfBook.toBook()); // 点击名称 -> 进入书籍详情！
+                    }
+                  },
+                  onLongPress: () {
+                    if (!_isSelectionMode) {
+                      setState(() {
+                        _isSelectionMode = true;
+                        _selectedBookIds.add(shelfBook.bookId);
+                      });
+                    }
+                  },
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        height: 36, // 严格固定两行高度，确保所有卡片对齐
+                        child: Text(
+                          shelfBook.bookName,
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, height: 1.3),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      SizedBox(
+                        height: 16,
+                        child: Text(
+                          shelfBook.author,
+                          style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 2),
-                  // 作者
-                  Text(
-                    shelfBook.author,
-                    style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
+                ),
+              ],
             );
           },
         ),
@@ -1011,67 +1117,84 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                       onChanged: (_) => _toggleSelection(download.bookId),
                     ),
                   ),
-                ClipRRect(
-                  borderRadius: BorderRadius.circular(6),
-                  child: SizedBox(
-                    width: 50,
-                    height: 70,
-                    child: download.thumbUrl != null && download.thumbUrl!.isNotEmpty
-                        ? CachedNetworkImage(
-                            imageUrl: download.thumbUrl!,
-                            fit: BoxFit.cover,
-                            cacheManager: BookCoverCacheManager.instance,
-                            placeholder: (context, url) => Container(color: AppTheme.primaryLight),
-                            errorWidget: (context, url, error) => Container(
-                              color: AppTheme.primaryLight,
-                              child: const Icon(Icons.book, size: 24, color: AppTheme.primaryColor),
-                            ),
-                          )
-                        : Container(
-                            color: AppTheme.primaryLight,
-                            child: const Icon(Icons.book, size: 24, color: AppTheme.primaryColor),
-                          ),
+                // 点击书封 -> 立即进入阅读！
+                GestureDetector(
+                  onTap: () {
+                    if (_isSelectionMode) {
+                      _toggleSelection(download.bookId);
+                    } else {
+                      _readDownloadedBook(download);
+                    }
+                  },
+                  child: ClipRRect(
+                    borderRadius: BorderRadius.circular(6),
+                    child: SizedBox(
+                      width: 52,
+                      height: 74,
+                      child: _buildCoverWidget(download.thumbUrl, iconSize: 22),
+                    ),
                   ),
                 ),
               ],
             ),
-            title: Text(
-              download.bookName,
-              style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+            // 点击书名 -> 进入书籍详情！
+            title: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                if (_isSelectionMode) {
+                  _toggleSelection(download.bookId);
+                } else {
+                  _openBookDetail(download.toBook());
+                }
+              },
+              child: Text(
+                download.bookName,
+                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
-            subtitle: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                const SizedBox(height: 4),
-                Text(
-                  '作者: ${download.author}',
-                  style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
-                  maxLines: 1,
-                ),
-                const SizedBox(height: 4),
-                Row(
-                  children: [
-                    Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: AppTheme.primaryColor.withValues(alpha: 0.1),
-                        borderRadius: BorderRadius.circular(4),
+            subtitle: GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              onTap: () {
+                if (_isSelectionMode) {
+                  _toggleSelection(download.bookId);
+                } else {
+                  _openBookDetail(download.toBook());
+                }
+              },
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const SizedBox(height: 4),
+                  Text(
+                    '作者: ${download.author}',
+                    style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                    maxLines: 1,
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: AppTheme.primaryColor.withValues(alpha: 0.1),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text(
+                          download.format,
+                          style: const TextStyle(fontSize: 10, color: AppTheme.primaryColor, fontWeight: FontWeight.bold),
+                        ),
                       ),
-                      child: Text(
-                        download.format,
-                        style: const TextStyle(fontSize: 10, color: AppTheme.primaryColor, fontWeight: FontWeight.bold),
+                      const SizedBox(width: 8),
+                      Text(
+                        download.formattedFileSize,
+                        style: const TextStyle(fontSize: 11, color: AppTheme.textHint),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    Text(
-                      download.formattedFileSize,
-                      style: const TextStyle(fontSize: 11, color: AppTheme.textHint),
-                    ),
-                  ],
-                ),
-              ],
+                    ],
+                  ),
+                ],
+              ),
             ),
             trailing: !_isSelectionMode
                 ? ElevatedButton.icon(
@@ -1087,13 +1210,6 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                     ),
                   )
                 : null,
-            onTap: () {
-              if (_isSelectionMode) {
-                _toggleSelection(download.bookId);
-              } else {
-                _readDownloadedBook(download);
-              }
-            },
             onLongPress: () {
               if (!_isSelectionMode) {
                 setState(() {
@@ -1120,7 +1236,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
           padding: const EdgeInsets.all(16),
           gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: 3,
-            childAspectRatio: 0.48,
+            childAspectRatio: 0.49,
             crossAxisSpacing: 14,
             mainAxisSpacing: 16,
           ),
@@ -1129,46 +1245,46 @@ class BookshelfScreenState extends State<BookshelfScreen> {
             final download = _downloadedBooks[index];
             final isSelected = _selectedBookIds.contains(download.bookId);
 
-            return GestureDetector(
-              onTap: () {
-                if (_isSelectionMode) {
-                  _toggleSelection(download.bookId);
-                } else {
-                  _readDownloadedBook(download);
-                }
-              },
-              onLongPress: () {
-                if (!_isSelectionMode) {
-                  setState(() {
-                    _isSelectionMode = true;
-                    _selectedBookIds.add(download.bookId);
-                  });
-                }
-              },
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                // 1. 封面容器（严格固定 1 : 1.42 比例，点击进入阅读）
+                AspectRatio(
+                  aspectRatio: 1 / 1.42,
+                  child: GestureDetector(
+                    onTap: () {
+                      if (_isSelectionMode) {
+                        _toggleSelection(download.bookId);
+                      } else {
+                        _readDownloadedBook(download); // 点击封面 -> 直接进入阅读！
+                      }
+                    },
+                    onLongPress: () {
+                      if (!_isSelectionMode) {
+                        setState(() {
+                          _isSelectionMode = true;
+                          _selectedBookIds.add(download.bookId);
+                        });
+                      }
+                    },
                     child: Stack(
                       fit: StackFit.expand,
                       children: [
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: download.thumbUrl != null && download.thumbUrl!.isNotEmpty
-                              ? CachedNetworkImage(
-                                  imageUrl: download.thumbUrl!,
-                                  fit: BoxFit.cover,
-                                  cacheManager: BookCoverCacheManager.instance,
-                                  placeholder: (context, url) => Container(color: AppTheme.primaryLight),
-                                  errorWidget: (context, url, error) => Container(
-                                    color: AppTheme.primaryLight,
-                                    child: const Icon(Icons.book, size: 28, color: AppTheme.primaryColor),
-                                  ),
-                                )
-                              : Container(
-                                  color: AppTheme.primaryLight,
-                                  child: const Icon(Icons.book, size: 28, color: AppTheme.primaryColor),
-                                ),
+                        Container(
+                          decoration: BoxDecoration(
+                            borderRadius: BorderRadius.circular(8),
+                            boxShadow: [
+                              BoxShadow(
+                                color: Colors.black.withValues(alpha: 0.12),
+                                blurRadius: 6,
+                                offset: const Offset(1, 3),
+                              ),
+                            ],
+                          ),
+                          child: ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: _buildCoverWidget(download.thumbUrl, iconSize: 28),
+                          ),
                         ),
                         if (_isSelectionMode)
                           Positioned(
@@ -1208,22 +1324,52 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                       ],
                     ),
                   ),
-                  const SizedBox(height: 6),
-                  Text(
-                    download.bookName,
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
+                ),
+                const SizedBox(height: 6),
+                // 2. 书名与作者（严格固定高度，点击进入书籍详情）
+                GestureDetector(
+                  behavior: HitTestBehavior.opaque,
+                  onTap: () {
+                    if (_isSelectionMode) {
+                      _toggleSelection(download.bookId);
+                    } else {
+                      _openBookDetail(download.toBook()); // 点击名称 -> 进书籍详情！
+                    }
+                  },
+                  onLongPress: () {
+                    if (!_isSelectionMode) {
+                      setState(() {
+                        _isSelectionMode = true;
+                        _selectedBookIds.add(download.bookId);
+                      });
+                    }
+                  },
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      SizedBox(
+                        height: 36, // 严格固定两行高度
+                        child: Text(
+                          download.bookName,
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, height: 1.3),
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                      const SizedBox(height: 2),
+                      SizedBox(
+                        height: 16,
+                        child: Text(
+                          '${download.author} · ${download.formattedFileSize}',
+                          style: const TextStyle(fontSize: 10, color: AppTheme.textSecondary),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
-                  const SizedBox(height: 2),
-                  Text(
-                    '${download.author} · ${download.formattedFileSize}',
-                    style: const TextStyle(fontSize: 10, color: AppTheme.textSecondary),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
-              ),
+                ),
+              ],
             );
           },
         ),
