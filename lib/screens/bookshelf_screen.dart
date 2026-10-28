@@ -1,9 +1,7 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../app_theme.dart';
-import '../main.dart';
 import '../models/book.dart';
 import '../models/bookshelf_book.dart';
 import '../models/chapter.dart';
@@ -11,6 +9,7 @@ import '../models/download_history.dart';
 import '../services/api_service.dart';
 import '../services/bookshelf_service.dart';
 import '../services/history_service.dart';
+import '../widgets/book_cover_widget.dart';
 import '../widgets/download_action_button.dart';
 import 'book_detail_screen.dart';
 import 'reader_screen.dart';
@@ -120,7 +119,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
 
     for (final d in downloads) {
       if (d.thumbUrl != null && d.thumbUrl!.isNotEmpty) {
-        final clean = normalizeCoverUrl(d.thumbUrl!);
+        final clean = cleanCoverUrl(d.thumbUrl!);
         if (clean != null && clean.isNotEmpty) {
           coverByBookId[d.bookId] = clean;
           coverByName[d.bookName.trim()] = clean;
@@ -129,7 +128,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     }
     for (final b in shelfList) {
       if (b.thumbUrl != null && b.thumbUrl!.isNotEmpty) {
-        final clean = normalizeCoverUrl(b.thumbUrl!);
+        final clean = cleanCoverUrl(b.thumbUrl!);
         if (clean != null && clean.isNotEmpty) {
           coverByBookId[b.bookId] = clean;
           coverByName[b.bookName.trim()] = clean;
@@ -141,7 +140,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     for (int i = 0; i < shelfList.length; i++) {
       final b = shelfList[i];
       final resolvedCover = coverByBookId[b.bookId] ?? coverByName[b.bookName.trim()];
-      if ((b.thumbUrl == null || b.thumbUrl!.isEmpty || b.thumbUrl!.contains('x-expires')) && resolvedCover != null) {
+      if ((b.thumbUrl == null || b.thumbUrl!.isEmpty) && resolvedCover != null) {
         shelfList[i] = b.copyWithCover(resolvedCover);
         _bookshelfService.updateCover(b.bookId, resolvedCover);
       }
@@ -149,7 +148,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     for (int i = 0; i < downloads.length; i++) {
       final d = downloads[i];
       final resolvedCover = coverByBookId[d.bookId] ?? coverByName[d.bookName.trim()];
-      if ((d.thumbUrl == null || d.thumbUrl!.isEmpty || d.thumbUrl!.contains('x-expires')) && resolvedCover != null) {
+      if ((d.thumbUrl == null || d.thumbUrl!.isEmpty) && resolvedCover != null) {
         downloads[i] = d.copyWithCover(resolvedCover);
         _downloadHistoryService.updateCover(d.bookId, resolvedCover);
       }
@@ -167,31 +166,25 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     _autoFetchMissingCovers(shelfList, downloads);
   }
 
-  /// 将可能带防盗链时效签名的图片 URL 转换为永久静态 CDN 直链
-  static String? normalizeCoverUrl(String? url) {
+  /// 安全的 URL 清洗（升级协议为 https，保留完整有效链接）
+  static String? cleanCoverUrl(String? url) {
     if (url == null || url.isEmpty) return null;
-    final clean = url.trim();
-    if (!clean.startsWith('http')) return null;
-
-    final match = RegExp(r'/novel-pic/([a-zA-Z0-9_\-]+)').firstMatch(clean);
-    if (match != null) {
-      final hash = match.group(1);
-      if (hash != null && hash.isNotEmpty) {
-        return 'https://p6-tt.bytecdn.cn/novel-pic/$hash~tplv-shrink:640:0.image';
-      }
+    var clean = url.trim();
+    if (clean.startsWith('http://')) {
+      clean = clean.replaceFirst('http://', 'https://');
     }
-    return clean;
+    return clean.startsWith('https://') ? clean : null;
   }
 
   void _autoFetchMissingCovers(List<BookshelfBook> shelfList, List<DownloadHistory> downloads) async {
     final missingBooks = <String, String>{}; // bookId -> bookName
     for (final b in shelfList) {
-      if (b.thumbUrl == null || b.thumbUrl!.isEmpty || b.thumbUrl!.contains('x-expires')) {
+      if (b.thumbUrl == null || b.thumbUrl!.isEmpty) {
         missingBooks[b.bookId] = b.bookName;
       }
     }
     for (final d in downloads) {
-      if (d.thumbUrl == null || d.thumbUrl!.isEmpty || d.thumbUrl!.contains('x-expires')) {
+      if (d.thumbUrl == null || d.thumbUrl!.isEmpty) {
         missingBooks[d.bookId] = d.bookName;
       }
     }
@@ -204,15 +197,15 @@ class BookshelfScreenState extends State<BookshelfScreen> {
       final bookId = entry.key;
       final bookName = entry.value;
       try {
-        // 优先通过书名搜索获取永久直链封面
+        // 优先通过书名搜索获取最新封面
         final searchRes = await _apiService.searchBooks(bookName);
         String? newCover;
         if (searchRes.isNotEmpty && searchRes.first.thumbUrl != null && searchRes.first.thumbUrl!.isNotEmpty) {
-          newCover = normalizeCoverUrl(searchRes.first.thumbUrl);
+          newCover = cleanCoverUrl(searchRes.first.thumbUrl);
         } else {
           final detail = await _apiService.getBookDetail(bookId);
           if (detail?.thumbUrl != null && detail!.thumbUrl!.isNotEmpty) {
-            newCover = normalizeCoverUrl(detail.thumbUrl);
+            newCover = cleanCoverUrl(detail.thumbUrl);
           }
         }
 
@@ -382,31 +375,6 @@ class BookshelfScreenState extends State<BookshelfScreen> {
       context,
       MaterialPageRoute(builder: (_) => BookDetailScreen(book: book)),
     ).then((_) => _loadData(silent: true));
-  }
-
-  /// 统一的高清封面构建组件（自动转换直链，提供优雅阴影与圆角）
-  Widget _buildCoverWidget(String? rawUrl, {double iconSize = 28}) {
-    final url = normalizeCoverUrl(rawUrl);
-    if (url != null && url.isNotEmpty) {
-      return CachedNetworkImage(
-        imageUrl: url,
-        fit: BoxFit.cover,
-        cacheManager: BookCoverCacheManager.instance,
-        placeholder: (context, url) => Container(color: AppTheme.primaryLight),
-        errorWidget: (context, url, error) => Container(
-          color: AppTheme.primaryLight,
-          child: Center(
-            child: Icon(Icons.book, size: iconSize, color: AppTheme.primaryColor.withValues(alpha: 0.6)),
-          ),
-        ),
-      );
-    }
-    return Container(
-      color: AppTheme.primaryLight,
-      child: Center(
-        child: Icon(Icons.book, size: iconSize, color: AppTheme.primaryColor.withValues(alpha: 0.6)),
-      ),
-    );
   }
 
   /// 直接阅读已下载的小说
@@ -765,7 +733,12 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                     child: SizedBox(
                       width: 52,
                       height: 74,
-                      child: _buildCoverWidget(shelfBook.thumbUrl, iconSize: 22),
+                      child: BookCoverWidget(
+                        bookId: shelfBook.bookId,
+                        bookName: shelfBook.bookName,
+                        thumbUrl: shelfBook.thumbUrl,
+                        iconSize: 22,
+                      ),
                     ),
                   ),
                 ),
@@ -936,7 +909,12 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                           ),
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(8),
-                            child: _buildCoverWidget(shelfBook.thumbUrl, iconSize: 28),
+                            child: BookCoverWidget(
+                              bookId: shelfBook.bookId,
+                              bookName: shelfBook.bookName,
+                              thumbUrl: shelfBook.thumbUrl,
+                              iconSize: 28,
+                            ),
                           ),
                         ),
                         if (_isSelectionMode)
@@ -1131,7 +1109,13 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                     child: SizedBox(
                       width: 52,
                       height: 74,
-                      child: _buildCoverWidget(download.thumbUrl, iconSize: 22),
+                      child: BookCoverWidget(
+                        bookId: download.bookId,
+                        bookName: download.bookName,
+                        thumbUrl: download.thumbUrl,
+                        epubPath: download.filePath,
+                        iconSize: 22,
+                      ),
                     ),
                   ),
                 ),
@@ -1283,7 +1267,13 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                           ),
                           child: ClipRRect(
                             borderRadius: BorderRadius.circular(8),
-                            child: _buildCoverWidget(download.thumbUrl, iconSize: 28),
+                            child: BookCoverWidget(
+                              bookId: download.bookId,
+                              bookName: download.bookName,
+                              thumbUrl: download.thumbUrl,
+                              epubPath: download.filePath,
+                              iconSize: 28,
+                            ),
                           ),
                         ),
                         if (_isSelectionMode)
