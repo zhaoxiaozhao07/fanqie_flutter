@@ -67,60 +67,37 @@ class MainActivity: FlutterActivity() {
                     result.success(-1)
                 }
             } else if (call.method == "initNativeTts") {
-                if (nativeTts == null) {
-                    nativeTts = TextToSpeech(this) { status ->
-                        if (status == TextToSpeech.SUCCESS) {
-                            var langRes = nativeTts?.setLanguage(Locale.CHINA)
-                            if (langRes == TextToSpeech.LANG_MISSING_DATA || langRes == TextToSpeech.LANG_NOT_SUPPORTED) {
-                                langRes = nativeTts?.setLanguage(Locale.CHINESE)
-                            }
-                            if (langRes == TextToSpeech.LANG_MISSING_DATA || langRes == TextToSpeech.LANG_NOT_SUPPORTED) {
-                                nativeTts?.setLanguage(Locale.SIMPLIFIED_CHINESE)
-                            }
-                            nativeTtsReady = true
-                            nativeTts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
-                                override fun onStart(utteranceId: String?) {}
-                                override fun onDone(utteranceId: String?) {
-                                    runOnUiThread {
-                                        channelInstance?.invokeMethod("onTtsComplete", utteranceId)
-                                    }
-                                }
-                                override fun onError(utteranceId: String?) {
-                                    runOnUiThread {
-                                        channelInstance?.invokeMethod("onTtsError", utteranceId)
-                                    }
-                                }
-                            })
-                        }
-                    }
-                }
+                initNativeTtsInternal()
                 result.success(true)
             } else if (call.method == "speakNativeTts") {
                 val text = call.argument<String>("text") ?: ""
                 val rate = call.argument<Double>("rate") ?: 1.0
-                val id = call.argument<String>("id") ?: "tts"
+                val id = call.argument<String>("id") ?: "tts_${System.currentTimeMillis()}"
                 
-                // 若尚未初始化，立即初始化
-                if (nativeTts == null) {
-                    nativeTts = TextToSpeech(this) { status ->
-                        if (status == TextToSpeech.SUCCESS) {
-                            nativeTts?.setLanguage(Locale.CHINA)
-                            nativeTtsReady = true
-                        }
-                    }
-                }
+                initNativeTtsInternal()
 
                 // 如果尚未 ready，在异步线程中短暂等待就绪
                 Thread {
                     var waitCount = 0
-                    while (!nativeTtsReady && waitCount < 15) {
-                        try { Thread.sleep(100) } catch (e: Exception) {}
+                    while (!nativeTtsReady && waitCount < 20) {
+                        try { Thread.sleep(80) } catch (e: Exception) {}
                         waitCount++
                     }
                     runOnUiThread {
                 if (nativeTtsReady && nativeTts != null) {
                     nativeTts?.setSpeechRate(rate.toFloat())
-                            val speakRes = nativeTts?.speak(text, TextToSpeech.QUEUE_FLUSH, null, id)
+                            val speakRes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                                val params = android.os.Bundle().apply {
+                                    putString(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, id)
+                                }
+                                nativeTts?.speak(text, TextToSpeech.QUEUE_FLUSH, params, id)
+                            } else {
+                                val params = HashMap<String, String>().apply {
+                                    put(TextToSpeech.Engine.KEY_PARAM_UTTERANCE_ID, id)
+                                }
+                                @Suppress("DEPRECATION")
+                                nativeTts?.speak(text, TextToSpeech.QUEUE_FLUSH, params)
+                            }
                             if (speakRes == TextToSpeech.SUCCESS) {
                                 result.success(true)
                             } else {
@@ -192,6 +169,36 @@ class MainActivity: FlutterActivity() {
                 }
             } else {
                 result.notImplemented()
+            }
+        }
+    }
+
+    private fun initNativeTtsInternal() {
+        if (nativeTts == null) {
+            nativeTts = TextToSpeech(this) { status ->
+                if (status == TextToSpeech.SUCCESS) {
+                    var langRes = nativeTts?.setLanguage(Locale.CHINA)
+                    if (langRes == TextToSpeech.LANG_MISSING_DATA || langRes == TextToSpeech.LANG_NOT_SUPPORTED) {
+                        langRes = nativeTts?.setLanguage(Locale.CHINESE)
+                    }
+                    if (langRes == TextToSpeech.LANG_MISSING_DATA || langRes == TextToSpeech.LANG_NOT_SUPPORTED) {
+                        nativeTts?.setLanguage(Locale.SIMPLIFIED_CHINESE)
+                    }
+                    nativeTtsReady = true
+                    nativeTts?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                        override fun onStart(utteranceId: String?) {}
+                        override fun onDone(utteranceId: String?) {
+                            runOnUiThread {
+                                channelInstance?.invokeMethod("onTtsComplete", utteranceId)
+                            }
+                        }
+                        override fun onError(utteranceId: String?) {
+                            runOnUiThread {
+                                channelInstance?.invokeMethod("onTtsError", utteranceId)
+                            }
+                        }
+                    })
+                }
             }
         }
     }

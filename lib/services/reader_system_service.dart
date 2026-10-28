@@ -6,14 +6,34 @@ import 'package:flutter/services.dart';
 class ReaderSystemService {
   static const MethodChannel _channel = MethodChannel('com.fanqie.fanqie_flutter/download');
 
-  /// 注册音量键物理滚动回调
-  static void registerVolumeKeyListener(void Function(String direction)? callback) {
+  static void Function(String direction)? _volumeKeyCallback;
+  static void Function(String method, dynamic args)? _ttsCallback;
+  static bool _handlerInitialized = false;
+
+  /// 统一初始化单一消息处理总线，避免多个服务 setMethodCallHandler 互相覆盖
+  static void _ensureGlobalHandler() {
+    if (_handlerInitialized) return;
+    _handlerInitialized = true;
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'onVolumeScroll') {
         final dir = call.arguments?.toString() ?? 'down';
-        callback?.call(dir);
+        _volumeKeyCallback?.call(dir);
+      } else if (call.method.startsWith('onTts') || call.method.startsWith('onAudio')) {
+        _ttsCallback?.call(call.method, call.arguments);
       }
     });
+  }
+
+  /// 注册音量键物理滚动回调
+  static void registerVolumeKeyListener(void Function(String direction)? callback) {
+    _ensureGlobalHandler();
+    _volumeKeyCallback = callback;
+  }
+
+  /// 注册全局 TTS/音频完成事件回调
+  static void registerTtsListener(void Function(String method, dynamic args)? callback) {
+    _ensureGlobalHandler();
+    _ttsCallback = callback;
   }
 
   /// 开启或关闭音量键按键拦截

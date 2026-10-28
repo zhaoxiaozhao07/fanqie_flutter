@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'reader_system_service.dart';
 
 /// TTS 发音引擎类型
 enum TtsEngineType {
@@ -86,19 +87,23 @@ class TtsService extends ChangeNotifier {
   int _timerRemainingMinutes = 0;
   int get timerRemainingMinutes => _timerRemainingMinutes;
 
+  // 播放看门狗超时定时器（防止极端异常下漏掉回调导致播放停滞）
+  Timer? _watchdogTimer;
+
   // 预取 Future 映射
   final Map<int, Future<String?>> _preloadFutures = {};
   final http.Client _httpClient = http.Client();
 
   void _initPlatformListener() {
-    _channel.setMethodCallHandler((call) async {
-      if (call.method == 'onTtsComplete' || call.method == 'onAudioComplete') {
+    // 统一通过 ReaderSystemService 消息路由总线监听播放事件，彻底消除 Handler 互相覆盖 Bug
+    ReaderSystemService.registerTtsListener((method, args) {
+      if (method == 'onTtsComplete' || method == 'onAudioComplete') {
         _onChunkFinished();
-      } else if (call.method == 'onTtsError' || call.method == 'onAudioError') {
-        // 容错播放下一个切片
+      } else if (method == 'onTtsError' || method == 'onAudioError') {
         _onChunkFinished();
       }
     });
+
     // 初始化原生 TTS
     if (Platform.isAndroid) {
       _channel.invokeMethod('initNativeTts');
@@ -215,12 +220,22 @@ class TtsService extends ChangeNotifier {
   Future<void> _playCurrentChunk() async {
     if (_currentIndex >= _chunks.length) {
       _state = TtsPlayState.stopped;
+      _watchdogTimer?.cancel();
       notifyListeners();
       onChapterComplete?.call(_currentIndex);
       return;
     }
 
     final chunk = _chunks[_currentIndex];
+    
+    // 启动当前切片播放看门狗（预估发音秒数 + 容错裕量），确保无论原生还是网络发音绝不卡顿挂起
+    _watchdogTimer?.cancel();
+    final estSeconds = ((chunk.text.length / 3.8) / _speechRate + 6.0).clamp(6.0, 40.0).toInt();
+    _watchdogTimer = Timer(Duration(seconds: estSeconds), () {
+      if (isActive && _currentIndex == chunk.index) {
+        _onChunkFinished();
+      }
+    });
 
     // 1. 若使用 OpenAI TTS，启动滑动窗口预取流水线（预拉取后面 2 个切片）
     if (_engineType == TtsEngineType.openAi) {
@@ -330,6 +345,7 @@ class TtsService extends ChangeNotifier {
 
   /// 切片播放完毕回调，立即切入下一个切片
   void _onChunkFinished() {
+    _watchdogTimer?.cancel();
     if (_state != TtsPlayState.playing && _state != TtsPlayState.buffering) return;
 
     _currentIndex++;
@@ -344,6 +360,7 @@ class TtsService extends ChangeNotifier {
 
   /// 暂停播放
   Future<void> pause() async {
+    _watchdogTimer?.cancel();
     if (_state != TtsPlayState.playing) return;
     _state = TtsPlayState.paused;
     notifyListeners();
@@ -370,6 +387,7 @@ class TtsService extends ChangeNotifier {
 
   /// 停止播放并清理队列
   Future<void> stop() async {
+    _watchdogTimer?.cancel();
     _state = TtsPlayState.stopped;
     _stopTimer?.cancel();
     _timerRemainingMinutes = 0;

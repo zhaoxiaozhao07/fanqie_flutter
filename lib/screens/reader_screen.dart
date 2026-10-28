@@ -164,6 +164,44 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void _onTtsStateChanged() {
     if (mounted) {
       setState(() {});
+      if (_ttsService.isPlaying && _scrollController.hasClients) {
+        _autoScrollFollowTts();
+      }
+    }
+  }
+
+  /// 智能字幕式自动平滑滚屏跟随朗读进度
+  void _autoScrollFollowTts() {
+    final chIdx = widget.chapters.indexWhere((c) => c.title == _ttsService.currentChapterTitle);
+    if (chIdx == -1 || !_displayedChapters.contains(chIdx)) return;
+
+    final key = _chapterKeys[chIdx];
+    final box = key?.currentContext?.findRenderObject() as RenderBox?;
+    if (box == null || !box.attached) return;
+
+    final chapterPos = box.localToGlobal(Offset.zero);
+    final chapterHeight = box.size.height;
+    final totalChunks = _ttsService.chunks.length;
+    final curChunk = _ttsService.currentIndex;
+
+    if (totalChunks <= 0) return;
+
+    // 计算当前朗读切片在屏幕上的绝对垂直坐标
+    final progressInChapter = (curChunk / totalChunks).clamp(0.0, 1.0);
+    final currentSentenceDy = chapterPos.dy + progressInChapter * chapterHeight;
+
+    final screenHeight = MediaQuery.of(context).size.height;
+    final desiredDy = screenHeight * 0.35; // 黄金视线停留区（屏幕上方 35% 处）
+
+    final delta = currentSentenceDy - desiredDy;
+    if (delta.abs() > 35.0) {
+      final targetOffset = (_scrollController.offset + delta)
+          .clamp(0.0, _scrollController.position.maxScrollExtent);
+      _scrollController.animateTo(
+        targetOffset,
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeOutCubic,
+      );
     }
   }
 
@@ -1278,18 +1316,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final trimmed = paragraph.trim();
     if (trimmed.isEmpty) return const SizedBox.shrink();
 
-    bool isHighlighted = false;
-    if (currentTtsText.isNotEmpty) {
-      final cleanCur = currentTtsText.replaceAll(RegExp(r'[\s\p{P}]', unicode: true), '');
-      final cleanP = trimmed.replaceAll(RegExp(r'[\s\p{P}]', unicode: true), '');
-      if (cleanCur.isNotEmpty && cleanP.isNotEmpty) {
-        if (cleanP.contains(cleanCur) || (cleanCur.length > 6 && cleanP.contains(cleanCur.substring(0, 6)))) {
-          isHighlighted = true;
-        }
-      }
-    }
-
-    if (!isHighlighted) {
+    if (currentTtsText.isEmpty) {
       return Text(
         paragraph,
         style: TextStyle(
@@ -1301,17 +1328,82 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
-    // 高亮正在朗读的段落/语句
+    // 提取当前朗读块中的核心语句（去标点后大于 2 个字符的子串）
+    final cleanTts = currentTtsText.replaceAll(RegExp(r'[\s\r\n]'), '');
+    final cleanParagraph = trimmed.replaceAll(RegExp(r'[\s\r\n]'), '');
+
+    // 判断本段是否完全或部分被当前 TTS 朗读覆盖
+    final isFullMatch = cleanTts.contains(cleanParagraph) || cleanParagraph.contains(cleanTts);
+
+    // 按自然句切分进行富文本全覆盖高亮（彻底解决“只亮了一句，朗读了好几句”的问题）
+    final sentencePattern = RegExp(r'[^。！？；!?;]+[。！？；!?;]?');
+    final matches = sentencePattern.allMatches(paragraph);
+
+    if (matches.isEmpty) {
+      return Text(
+        paragraph,
+        style: TextStyle(
+          fontSize: _fontSize,
+          height: _lineHeight,
+          color: theme.textColor,
+          letterSpacing: 0.5,
+        ),
+      );
+    }
+
+    final spans = <TextSpan>[];
+    final highlightBg = isDark
+        ? const Color(0xFF3A3A3C)
+        : AppTheme.primaryColor.withValues(alpha: 0.22);
+
+    bool hasAnyHighlight = false;
+
+    for (final match in matches) {
+      final sentence = match.group(0) ?? '';
+      final cleanSent = sentence.replaceAll(RegExp(r'[\s\p{P}]', unicode: true), '');
+
+      final isSentHighlighted = cleanSent.isNotEmpty &&
+          (cleanTts.contains(cleanSent) ||
+              (cleanSent.length > 4 && cleanTts.contains(cleanSent.substring(0, 4))) ||
+              isFullMatch);
+
+      if (isSentHighlighted) hasAnyHighlight = true;
+
+      spans.add(
+        TextSpan(
+          text: sentence,
+          style: TextStyle(
+            fontSize: _fontSize,
+            height: _lineHeight,
+            color: isSentHighlighted ? (isDark ? Colors.white : AppTheme.primaryColor) : theme.textColor,
+            backgroundColor: isSentHighlighted ? highlightBg : null,
+            fontWeight: isSentHighlighted ? FontWeight.w600 : FontWeight.normal,
+            letterSpacing: 0.5,
+          ),
+        ),
+      );
+    }
+
+    if (!hasAnyHighlight) {
+      return Text(
+        paragraph,
+        style: TextStyle(
+          fontSize: _fontSize,
+          height: _lineHeight,
+          color: theme.textColor,
+          letterSpacing: 0.5,
+        ),
+      );
+    }
+
     return Container(
       margin: const EdgeInsets.symmetric(vertical: 2),
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
       decoration: BoxDecoration(
-        color: isDark
-            ? const Color(0xFF2C2C2E)
-            : AppTheme.primaryColor.withValues(alpha: 0.14),
+        color: isDark ? const Color(0xFF242426) : AppTheme.primaryLight.withValues(alpha: 0.6),
         borderRadius: BorderRadius.circular(8),
         border: Border.all(
-          color: AppTheme.primaryColor.withValues(alpha: 0.45),
+          color: AppTheme.primaryColor.withValues(alpha: 0.35),
           width: 1.2,
         ),
       ),
@@ -1323,15 +1415,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
             child: Icon(Icons.volume_up_rounded, size: 16, color: AppTheme.primaryColor),
           ),
           Expanded(
-            child: Text(
-              paragraph,
-              style: TextStyle(
-                fontSize: _fontSize,
-                height: _lineHeight,
-                color: theme.textColor,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.5,
-              ),
+            child: Text.rich(
+              TextSpan(children: spans),
             ),
           ),
         ],
