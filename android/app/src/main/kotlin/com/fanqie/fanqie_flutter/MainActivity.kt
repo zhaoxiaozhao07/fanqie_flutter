@@ -1,5 +1,6 @@
 package com.fanqie.fanqie_flutter
 
+import android.view.KeyEvent
 import android.content.Context
 import android.content.ContentValues
 import android.os.BatteryManager
@@ -16,10 +17,14 @@ import java.io.FileInputStream
 
 class MainActivity: FlutterActivity() {
     private val CHANNEL = "com.fanqie.fanqie_flutter/download"
+    private var volumeKeyScrollEnabled = false
+    private var channelInstance: MethodChannel? = null
 
     override fun configureFlutterEngine(@NonNull flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL).setMethodCallHandler { call, result ->
+        val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, CHANNEL)
+        channelInstance = channel
+        channel.setMethodCallHandler { call, result ->
             if (call.method == "saveToDownloads") {
                 val filePath = call.argument<String>("filePath")
                 val fileName = call.argument<String>("fileName")
@@ -43,6 +48,9 @@ class MainActivity: FlutterActivity() {
                     window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
                 }
                 result.success(true)
+            } else if (call.method == "setVolumeKeyScrollEnabled") {
+                volumeKeyScrollEnabled = call.argument<Boolean>("enabled") ?: false
+                result.success(true)
             } else if (call.method == "getBatteryLevel") {
                 try {
                     val bm = getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
@@ -55,6 +63,19 @@ class MainActivity: FlutterActivity() {
                 result.notImplemented()
             }
         }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (volumeKeyScrollEnabled) {
+            if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN) {
+                channelInstance?.invokeMethod("onVolumeScroll", "down")
+                return true
+            } else if (keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+                channelInstance?.invokeMethod("onVolumeScroll", "up")
+                return true
+            }
+        }
+        return super.onKeyDown(keyCode, event)
     }
 
     private fun saveFileToDownloads(sourcePath: String, fileName: String, mimeType: String): Boolean {

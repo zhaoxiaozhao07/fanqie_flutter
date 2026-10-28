@@ -75,6 +75,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
   double _fontSize = 18.0;
   double _lineHeight = 1.8;
   int _themeIndex = 1; // 默认羊皮纸
+  double _horizontalPadding = 20.0; // 页面边距：14 紧凑, 20 适中, 28 宽松
+  bool _volumeKeyScroll = false; // 音量物理键翻页滚动
 
   static const List<ReaderTheme> _themes = [
     ReaderTheme(
@@ -105,6 +107,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
       secondaryColor: Color(0xFF5C5C60),
       systemBrightness: Brightness.dark,
     ),
+    ReaderTheme(
+      name: '纯黑',
+      backgroundColor: Color(0xFF000000),
+      textColor: Color(0xFFC7C7CC),
+      secondaryColor: Color(0xFF636366),
+      systemBrightness: Brightness.dark,
+    ),
   ];
 
   @override
@@ -114,11 +123,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _checkBookshelfStatus();
     _loadPreferences().then((_) {
       _startFromChapter(_currentActiveIndex);
+      ReaderSystemService.setVolumeKeyScrollEnabled(_volumeKeyScroll);
     });
     _scrollController.addListener(_onScroll);
     
     // 启用阅读屏幕常亮与定时电量/时间更新
     ReaderSystemService.setKeepScreenOn(true);
+    ReaderSystemService.registerVolumeKeyListener(_onVolumeScroll);
     _updateStatusInfo();
     _statusTimer = Timer.periodic(const Duration(seconds: 30), (_) => _updateStatusInfo());
   }
@@ -127,6 +138,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void dispose() {
     _statusTimer?.cancel();
     ReaderSystemService.setKeepScreenOn(false);
+    ReaderSystemService.setVolumeKeyScrollEnabled(false);
+    ReaderSystemService.registerVolumeKeyListener(null);
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _apiService.dispose();
@@ -166,6 +179,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _fontSize = prefs.getDouble('reader_font_size') ?? 18.0;
       _lineHeight = prefs.getDouble('reader_line_height') ?? 1.8;
       _themeIndex = (prefs.getInt('reader_theme_index') ?? 1).clamp(0, _themes.length - 1);
+      _horizontalPadding = prefs.getDouble('reader_horizontal_padding') ?? 20.0;
+      _volumeKeyScroll = prefs.getBool('reader_volume_key_scroll') ?? false;
     });
   }
 
@@ -174,6 +189,22 @@ class _ReaderScreenState extends State<ReaderScreen> {
     await prefs.setDouble('reader_font_size', _fontSize);
     await prefs.setDouble('reader_line_height', _lineHeight);
     await prefs.setInt('reader_theme_index', _themeIndex);
+    await prefs.setDouble('reader_horizontal_padding', _horizontalPadding);
+    await prefs.setBool('reader_volume_key_scroll', _volumeKeyScroll);
+  }
+
+  void _onVolumeScroll(String direction) {
+    if (!_volumeKeyScroll || !_scrollController.hasClients) return;
+    final viewHeight = MediaQuery.of(context).size.height * 0.75;
+    final target = direction == 'down'
+        ? (_scrollController.offset + viewHeight).clamp(0.0, _scrollController.position.maxScrollExtent)
+        : (_scrollController.offset - viewHeight).clamp(0.0, _scrollController.position.maxScrollExtent);
+
+    _scrollController.animateTo(
+      target,
+      duration: const Duration(milliseconds: 220),
+      curve: Curves.easeOutCubic,
+    );
   }
 
   /// 保存当前章节进度到 SharedPreferences、书架和阅读历史
@@ -688,6 +719,50 @@ class _ReaderScreenState extends State<ReaderScreen> {
                       ),
                     ],
                   ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Text(
+                        '页边距',
+                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
+                      ),
+                      const Spacer(),
+                      SegmentedButton<double>(
+                        segments: const [
+                          ButtonSegment(value: 14.0, label: Text('窄边')),
+                          ButtonSegment(value: 20.0, label: Text('适中')),
+                          ButtonSegment(value: 28.0, label: Text('宽边')),
+                        ],
+                        selected: {_horizontalPadding},
+                        showSelectedIcon: false,
+                        onSelectionChanged: (val) {
+                          setState(() => _horizontalPadding = val.first);
+                          setModalState(() {});
+                          _savePreferences();
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Text(
+                        '音量键翻页滚动',
+                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
+                      ),
+                      const Spacer(),
+                      Switch.adaptive(
+                        value: _volumeKeyScroll,
+                        activeTrackColor: Theme.of(context).primaryColor,
+                        onChanged: (val) {
+                          setState(() => _volumeKeyScroll = val);
+                          setModalState(() {});
+                          _savePreferences();
+                          ReaderSystemService.setVolumeKeyScrollEnabled(val);
+                        },
+                      ),
+                    ],
+                  ),
                   const SizedBox(height: 16),
                   Row(
                     children: [
@@ -904,7 +979,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       controller: _scrollController,
       child: SingleChildScrollView(
         controller: _scrollController,
-        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 12),
+        padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 12),
         physics: const BouncingScrollPhysics(),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,

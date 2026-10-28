@@ -6,6 +6,26 @@ import 'package:flutter/services.dart';
 class ReaderSystemService {
   static const MethodChannel _channel = MethodChannel('com.fanqie.fanqie_flutter/download');
 
+  /// 注册音量键物理滚动回调
+  static void registerVolumeKeyListener(void Function(String direction)? callback) {
+    _channel.setMethodCallHandler((call) async {
+      if (call.method == 'onVolumeScroll') {
+        final dir = call.arguments?.toString() ?? 'down';
+        callback?.call(dir);
+      }
+    });
+  }
+
+  /// 开启或关闭音量键按键拦截
+  static Future<void> setVolumeKeyScrollEnabled(bool enabled) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('setVolumeKeyScrollEnabled', {'enabled': enabled});
+    } catch (e) {
+      if (kDebugMode) debugPrint('setVolumeKeyScrollEnabled error: $e');
+    }
+  }
+
   /// 设置阅读时屏幕常亮
   static Future<void> setKeepScreenOn(bool enabled) async {
     if (!Platform.isAndroid) return;
