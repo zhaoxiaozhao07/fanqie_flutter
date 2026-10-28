@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -5,7 +6,9 @@ import '../models/book.dart';
 import '../models/chapter.dart';
 import '../services/api_service.dart';
 import '../services/bookshelf_service.dart';
+import '../services/download_service.dart';
 import '../services/reading_history_service.dart';
+import '../services/reader_system_service.dart';
 
 /// 阅读器主题配置
 class ReaderTheme {
@@ -57,10 +60,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
   // 当前用户视觉所在的章节索引
   late int _currentActiveIndex;
   bool _isLoadingHead = false;
+  bool _isLoadingPrev = false;
   bool _isLoadingMore = false;
   String? _errorMessage;
   bool _showControls = false;
   bool _isInBookshelf = false;
+
+  // 底部常驻微型状态信息（时间与电池电量）
+  Timer? _statusTimer;
+  String _currentTimeStr = '';
+  int _batteryLevel = -1;
 
   // 用户偏好
   double _fontSize = 18.0;
@@ -107,10 +116,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _startFromChapter(_currentActiveIndex);
     });
     _scrollController.addListener(_onScroll);
+    
+    // 启用阅读屏幕常亮与定时电量/时间更新
+    ReaderSystemService.setKeepScreenOn(true);
+    _updateStatusInfo();
+    _statusTimer = Timer.periodic(const Duration(seconds: 30), (_) => _updateStatusInfo());
   }
 
   @override
   void dispose() {
+    _statusTimer?.cancel();
+    ReaderSystemService.setKeepScreenOn(false);
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _apiService.dispose();
@@ -119,6 +135,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
       overlays: SystemUiOverlay.values,
     );
     super.dispose();
+  }
+
+  Future<void> _updateStatusInfo() async {
+    final now = DateTime.now();
+    final hour = now.hour.toString().padLeft(2, '0');
+    final minute = now.minute.toString().padLeft(2, '0');
+    final battery = await ReaderSystemService.getBatteryLevel();
+    if (mounted) {
+      setState(() {
+        _currentTimeStr = '$hour:$minute';
+        _batteryLevel = battery;
+      });
+    }
   }
 
   Future<void> _checkBookshelfStatus() async {
@@ -222,7 +251,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
     // 1. 检测当前视口可见的章节，更新标题和持久化阅读历史
     _detectCurrentVisibleChapter();
 
-    // 2. 距离底部 800px 时自动预加载并追加下一章
+    // 2. 距离顶部 300px 时自动预加载并追加上一章 (实现无缝双向无限滚动)
+    if (_scrollController.position.pixels <= 300 &&
+        _displayedChapters.isNotEmpty &&
+        _displayedChapters.first > 0) {
+      _autoPrependPreviousChapter();
+    }
+
+    // 3. 距离底部 800px 时自动预加载并追加下一章
     if (_scrollController.position.pixels >=
         _scrollController.position.maxScrollExtent - 800) {
       _autoAppendNextChapter();
@@ -252,6 +288,60 @@ class _ReaderScreenState extends State<ReaderScreen> {
         _currentActiveIndex = active;
       });
       _persistReadingProgress(active);
+    }
+  }
+
+  /// 自动向上拉伸追加上一章（实现双向无缝连续阅读）
+  Future<void> _autoPrependPreviousChapter() async {
+    if (_isLoadingPrev || _displayedChapters.isEmpty) return;
+
+    final prevIndex = _displayedChapters.first - 1;
+    if (prevIndex < 0) return;
+
+    _isLoadingPrev = true;
+
+    // 确保内容在缓存中
+    if (!_chapterCache.containsKey(prevIndex)) {
+      await _fetchChapterContent(prevIndex);
+    }
+
+    if (!mounted) {
+      _isLoadingPrev = false;
+      return;
+    }
+
+    if (_chapterCache.containsKey(prevIndex)) {
+      // 记录插入前的位置与最大滚动距离
+      final oldMaxScroll = _scrollController.position.maxScrollExtent;
+      final oldPixels = _scrollController.position.pixels;
+
+      setState(() {
+        if (!_displayedChapters.contains(prevIndex)) {
+          _displayedChapters.insert(0, prevIndex);
+          _chapterKeys[prevIndex] = GlobalKey();
+        }
+      });
+
+      // 帧渲染完成后精确补偿滚动偏移量，确保当前读者视口内容纹丝不动
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_scrollController.hasClients) {
+          _isLoadingPrev = false;
+          return;
+        }
+        final newMaxScroll = _scrollController.position.maxScrollExtent;
+        final delta = newMaxScroll - oldMaxScroll;
+        if (delta > 0) {
+          _scrollController.jumpTo(oldPixels + delta);
+        }
+        _isLoadingPrev = false;
+      });
+
+      // 静默预加载更前面的章节
+      if (prevIndex > 0) {
+        _preloadNextChapters(prevIndex - 1, count: 1);
+      }
+    } else {
+      _isLoadingPrev = false;
     }
   }
 
@@ -736,6 +826,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   Expanded(
                     child: _buildReaderBody(theme),
                   ),
+                  // 底部常驻微型状态栏（时间、电量、总进度）
+                  _buildBottomStatusBar(theme, currentChapter),
                 ],
               ),
             ),
@@ -817,6 +909,45 @@ class _ReaderScreenState extends State<ReaderScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
+            // 顶部上一章指示器/触发器
+            if (_displayedChapters.isNotEmpty && _displayedChapters.first > 0)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Center(
+                  child: TextButton.icon(
+                    onPressed: _isLoadingPrev ? null : _autoPrependPreviousChapter,
+                    icon: _isLoadingPrev
+                        ? SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                theme.secondaryColor.withValues(alpha: 0.6),
+                              ),
+                            ),
+                          )
+                        : Icon(Icons.arrow_upward_rounded, size: 16, color: theme.secondaryColor),
+                    label: Text(
+                      _isLoadingPrev
+                          ? '正在加载上一章...'
+                          : '上滑或点击加载：${widget.chapters[_displayedChapters.first - 1].title}',
+                      style: TextStyle(fontSize: 12, color: theme.secondaryColor),
+                    ),
+                  ),
+                ),
+              )
+            else if (_displayedChapters.isNotEmpty && _displayedChapters.first == 0)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 20),
+                child: Center(
+                  child: Text(
+                    '— 已是第一章 —',
+                    style: TextStyle(fontSize: 12, color: theme.secondaryColor.withValues(alpha: 0.6)),
+                  ),
+                ),
+              ),
+
             // 渲染所有已加载的章节
             for (int i = 0; i < _displayedChapters.length; i++)
               _buildChapterBlock(_displayedChapters[i], theme, isFirst: i == 0),
@@ -863,6 +994,42 @@ class _ReaderScreenState extends State<ReaderScreen> {
             const SizedBox(height: 32),
           ],
         ),
+      ),
+    );
+  }
+
+  Widget _buildBottomStatusBar(ReaderTheme theme, Chapter currentChapter) {
+    final progress = widget.chapters.isNotEmpty
+        ? ((_currentActiveIndex + 1) / widget.chapters.length).clamp(0.0, 1.0)
+        : 0.0;
+    final percentStr = (progress * 100).toStringAsFixed(1);
+
+    return Container(
+      height: 22,
+      padding: const EdgeInsets.symmetric(horizontal: 16),
+      color: theme.backgroundColor,
+      child: Row(
+        children: [
+          Expanded(
+            child: Text(
+              currentChapter.title,
+              style: TextStyle(
+                fontSize: 10,
+                color: theme.secondaryColor.withValues(alpha: 0.75),
+              ),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '${_currentTimeStr.isNotEmpty ? '$_currentTimeStr  |  ' : ''}${_batteryLevel >= 0 ? '$_batteryLevel%  |  ' : ''}$percentStr%',
+            style: TextStyle(
+              fontSize: 10,
+              color: theme.secondaryColor.withValues(alpha: 0.75),
+            ),
+          ),
+        ],
       ),
     );
   }
@@ -981,6 +1148,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 tooltip: '目录',
                 onPressed: _showDirectoryDrawer,
               ),
+              IconButton(
+                icon: Icon(Icons.download_for_offline_outlined, size: 22, color: theme.textColor),
+                tooltip: '批量离线',
+                onPressed: _showQuickCacheModal,
+              ),
             ],
           ),
         ),
@@ -988,6 +1160,112 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
+  void _showQuickCacheModal() {
+    final currentTheme = _themes[_themeIndex];
+    final remainingCount = widget.chapters.length - _currentActiveIndex - 1;
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: currentTheme.backgroundColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: currentTheme.secondaryColor.withValues(alpha: 0.3),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                '批量离线缓存',
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: currentTheme.textColor,
+                ),
+              ),
+              const SizedBox(height: 6),
+              Text(
+                '当前位置：第 ${_currentActiveIndex + 1} 章，后续未读 ${remainingCount > 0 ? remainingCount : 0} 章',
+                style: TextStyle(fontSize: 12, color: currentTheme.secondaryColor),
+              ),
+              const SizedBox(height: 16),
+              _buildCacheOptionTile(
+                currentTheme,
+                title: '缓存后续 20 章',
+                subtitle: '适合通勤快速离线阅读',
+                onTap: () => _triggerBatchDownload(20),
+              ),
+              _buildCacheOptionTile(
+                currentTheme,
+                title: '缓存后续 50 章',
+                subtitle: '深度阅读推荐',
+                onTap: () => _triggerBatchDownload(50),
+              ),
+              _buildCacheOptionTile(
+                currentTheme,
+                title: '缓存全书未读章节 (${remainingCount > 0 ? remainingCount : 0} 章)',
+                subtitle: '离线保存整本剩余内容',
+                onTap: () => _triggerBatchDownload(remainingCount),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildCacheOptionTile(
+    ReaderTheme theme, {
+    required String title,
+    required String subtitle,
+    required VoidCallback onTap,
+  }) {
+    return ListTile(
+      contentPadding: EdgeInsets.zero,
+      title: Text(title, style: TextStyle(color: theme.textColor, fontWeight: FontWeight.w600, fontSize: 14)),
+      subtitle: Text(subtitle, style: TextStyle(color: theme.secondaryColor, fontSize: 12)),
+      trailing: Icon(Icons.arrow_forward_ios, size: 14, color: theme.secondaryColor),
+      onTap: () {
+        Navigator.pop(context);
+        onTap();
+      },
+    );
+  }
+
+  void _triggerBatchDownload(int count) {
+    if (count <= 0) return;
+    final startIndex = _currentActiveIndex;
+    final endIndex = (startIndex + count).clamp(0, widget.chapters.length);
+    final targetChapters = widget.chapters.sublist(startIndex, endIndex);
+
+    if (targetChapters.isEmpty) return;
+
+    DownloadService().startBackgroundDownload(
+      book: widget.book,
+      chapters: targetChapters,
+      format: 'TXT',
+    );
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('已开始在后台离线 ${targetChapters.length} 章，可在顶栏下载管理查看进度'),
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
   Widget _buildBottomBar(ReaderTheme theme) {
     return Container(
       decoration: BoxDecoration(

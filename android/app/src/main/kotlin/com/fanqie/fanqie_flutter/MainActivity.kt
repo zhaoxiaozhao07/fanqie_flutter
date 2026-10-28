@@ -1,9 +1,12 @@
 package com.fanqie.fanqie_flutter
 
+import android.content.Context
 import android.content.ContentValues
+import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
 import android.provider.MediaStore
+import android.view.WindowManager
 import androidx.annotation.NonNull
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -31,6 +34,22 @@ class MainActivity: FlutterActivity() {
                     }
                 } else {
                     result.error("INVALID_ARGS", "Missing arguments (filePath, fileName, mimeType)", null)
+                }
+            } else if (call.method == "setKeepScreenOn") {
+                val enabled = call.argument<Boolean>("enabled") ?: false
+                if (enabled) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                }
+                result.success(true)
+            } else if (call.method == "getBatteryLevel") {
+                try {
+                    val bm = getSystemService(Context.BATTERY_SERVICE) as? BatteryManager
+                    val level = bm?.getIntProperty(BatteryManager.BATTERY_PROPERTY_CAPACITY) ?: -1
+                    result.success(level)
+                } catch (e: Exception) {
+                    result.success(-1)
                 }
             } else {
                 result.notImplemented()
