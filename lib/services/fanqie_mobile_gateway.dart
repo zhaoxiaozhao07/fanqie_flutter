@@ -7,6 +7,7 @@ import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
 import 'package:pointycastle/digests/sm3.dart';
 import 'package:pointycastle/export.dart' as pc;
+import '../models/comment.dart';
 
 /// 番茄小说移动端接口与解密网关 (Fanqie Mobile Gateway)
 /// 参考 Fanqie-novel-Downloader (POf-L) 及移动端协议实现：
@@ -24,6 +25,30 @@ class FanqieMobileGateway {
   // 默认种子设备（与移动端对齐）
   final String _deviceId = '2187355326004404';
   final String _installId = '2187355326270644';
+
+  Map<String, String> _buildCommonParams({Map<String, String>? extra}) {
+    return {
+      'iid': _installId,
+      'device_id': _deviceId,
+      'ac': 'wifi',
+      'channel': '43536163a',
+      'aid': '1967',
+      'app_name': 'novelapp',
+      'version_code': '70132',
+      'version_name': '7.0.1.32',
+      'device_platform': 'android',
+      'os': 'android',
+      'ssmix': 'a',
+      'os_version': '10',
+      'device_type': 'P30',
+      'device_brand': 'realme',
+      'update_version_code': '70132',
+      'manifest_version_code': '70132',
+      'pv_player': '70132',
+      'compliance_status': '0',
+      if (extra != null) ...extra,
+    };
+  }
 
   // 16 字节 AES 密钥协商初始公共密钥
   static final Uint8List _sharedKey = Uint8List.fromList([
@@ -53,27 +78,10 @@ class FanqieMobileGateway {
       await refreshKey();
     }
 
-    final queryParams = {
-      'iid': _installId,
-      'device_id': _deviceId,
-      'ac': 'wifi',
-      'channel': '43536163a',
-      'aid': '1967',
-      'app_name': 'novelapp',
-      'version_code': '70132',
-      'version_name': '7.0.1.32',
-      'device_platform': 'android',
-      'os': 'android',
-      'ssmix': 'a',
-      'os_version': '10',
-      'device_type': 'P30',
-      'device_brand': 'realme',
-      'update_version_code': '70132',
-      'manifest_version_code': '70132',
-      'pv_player': '70132',
+    final queryParams = _buildCommonParams(extra: {
       'item_id': cleanId,
       'req_type': '1',
-    };
+    });
 
     final uri = Uri.https('reading.snssdk.com', '/reading/reader/full/v', queryParams);
     final sigHeaders = signRequest(uri.toString());
@@ -141,29 +149,12 @@ class FanqieMobileGateway {
       await refreshKey();
     }
 
-    final queryParams = {
-      'iid': _installId,
-      'device_id': _deviceId,
-      'ac': 'wifi',
-      'channel': '43536163a',
-      'aid': '1967',
-      'app_name': 'novelapp',
-      'version_code': '70132',
-      'version_name': '7.0.1.32',
-      'device_platform': 'android',
-      'os': 'android',
-      'ssmix': 'a',
-      'os_version': '10',
-      'device_type': 'P30',
-      'device_brand': 'realme',
-      'update_version_code': '70132',
-      'manifest_version_code': '70132',
-      'pv_player': '70132',
+    final queryParams = _buildCommonParams(extra: {
       'book_id': bookId,
       'item_ids': itemIds.join(','),
       'novel_text_type': '1',
       'req_type': '1',
-    };
+    });
 
     final uri = Uri.https('reading.snssdk.com', '/reading/reader/batch_full/v', queryParams);
     final sigHeaders = signRequest(uri.toString());
@@ -243,25 +234,7 @@ class FanqieMobileGateway {
       final plainBody = jsonEncode({'content': base64.encode(content)});
       final gzipped = GZipEncoder().encode(utf8.encode(plainBody));
 
-      final queryParams = {
-        'iid': _installId,
-        'device_id': _deviceId,
-        'ac': 'wifi',
-        'channel': '43536163a',
-        'aid': '1967',
-        'app_name': 'novelapp',
-        'version_code': '70132',
-        'version_name': '7.0.1.32',
-        'device_platform': 'android',
-        'os': 'android',
-        'ssmix': 'a',
-        'os_version': '10',
-        'device_type': 'P30',
-        'device_brand': 'realme',
-        'update_version_code': '70132',
-        'manifest_version_code': '70132',
-        'pv_player': '70132',
-      };
+      final queryParams = _buildCommonParams();
 
       final uri = Uri.https('reading.snssdk.com', '/reading/crypt/registerkey', queryParams);
       final sigHeaders = signRequest(uri.toString(), body: gzipped);
@@ -363,6 +336,495 @@ class FanqieMobileGateway {
         .replaceAll('&gt;', '>')
         .replaceAll('&quot;', '"')
         .replaceAll('&#39;', "'");
+  }
+
+  // ==========================================
+  // 官方评论/段评/书评/回复体系
+  // ==========================================
+
+  /// 重写图片 URL 为公共 WebP 格式（解决 HEIC 格式及特定私有模板在部分设备上无法解码的问题）
+  static String cleanCommentImageUrl(String? rawUrl, {int targetWidth = 800}) {
+    if (rawUrl == null || rawUrl.isEmpty) return '';
+    final url = rawUrl.trim();
+    final noQuery = url.split('?').first;
+    final uri = Uri.tryParse(noQuery);
+    if (uri == null) return url;
+    final host = uri.host;
+    final path = uri.path;
+
+    if (!host.contains('fqnovelpic.com') && !host.contains('byteimg.com')) {
+      return url;
+    }
+
+    final tplvIdx = path.indexOf('~tplv');
+    if (tplvIdx <= 0) return url;
+
+    final head = path.substring(0, tplvIdx);
+    if (!head.startsWith('/tos-cn-i-') && !head.startsWith('/img/novel-static/')) {
+      return url;
+    }
+
+    final w = targetWidth.clamp(16, 2048);
+    return 'https://p3-novel.byteimg.com$head~tplv-1yzifmftcy-expand:$w:0:0.webp';
+  }
+
+  /// 从评论数据中提取有效的配图直链
+  static List<String> extractCommentImages(dynamic rawImageDataList) {
+    final urls = <String>[];
+    if (rawImageDataList == null) return urls;
+
+    void processEntry(dynamic item) {
+      if (item is Map) {
+        final webUrl = item['web_url']?.toString() ??
+            item['dynamic_url']?.toString() ??
+            item['url']?.toString();
+        if (webUrl != null && webUrl.isNotEmpty) {
+          urls.add(cleanCommentImageUrl(webUrl));
+        }
+      }
+    }
+
+    if (rawImageDataList is Map) {
+      final imgData = rawImageDataList['image_data'];
+      if (imgData is List) {
+        for (final item in imgData) {
+          processEntry(item);
+        }
+      } else if (imgData is Map) {
+        processEntry(imgData);
+      }
+    } else if (rawImageDataList is List) {
+      for (final item in rawImageDataList) {
+        processEntry(item);
+      }
+    }
+    return urls;
+  }
+
+  /// 提取用户身份标签/称号
+  static List<String> extractUserTitles(dynamic userTag) {
+    final titles = <String>[];
+    if (userTag is! Map) return titles;
+
+    if (userTag['is_author'] == true) {
+      titles.add('作者');
+    } else if (userTag['is_official_cert'] == true) {
+      titles.add('官方');
+    } else if (userTag['is_cp'] == true) {
+      titles.add('小编');
+    }
+
+    final titleInfoList = userTag['user_title_info'];
+    if (titleInfoList is List) {
+      for (final t in titleInfoList) {
+        if (t is Map) {
+          if (t['is_vip_title'] == true) continue;
+          if (userTag['is_author'] == true && t['is_author_title'] == true) continue;
+          final zh = t['zh_title']?.toString().trim() ?? '';
+          if (zh.isNotEmpty && !titles.contains(zh)) {
+            titles.add(zh);
+            if (titles.length >= 3) break;
+          }
+        }
+      }
+    }
+
+    final sticker = userTag['sticker'];
+    if (sticker is Map && sticker['is_worn'] == true) {
+      final name = sticker['sticker']?['name']?.toString().trim() ?? '';
+      if (name.isNotEmpty && !titles.contains(name) && titles.length < 3) {
+        titles.add(name);
+      }
+    }
+    return titles;
+  }
+
+  /// 解析单条评论
+  static CommentItem? parseCommentItem(
+    dynamic raw, {
+    String bookId = '',
+    String chapterId = '',
+    int defaultParaIndex = 0,
+  }) {
+    if (raw is! Map) return null;
+    final comment = raw['comment'] is Map ? raw['comment'] as Map : raw;
+    final cid = comment['comment_id']?.toString() ?? '';
+    if (cid.isEmpty) return null;
+
+    final common = comment['common'] is Map
+        ? comment['common'] as Map
+        : (comment['Common'] is Map ? comment['Common'] as Map : const {});
+    final content = common['content'] is Map ? common['content'] as Map : const {};
+    final userInfo = common['user_info'] is Map ? common['user_info'] as Map : const {};
+    final baseInfo = userInfo['base_info'] is Map ? userInfo['base_info'] as Map : userInfo;
+    final userTag = userInfo['user_tag'] is Map ? userInfo['user_tag'] as Map : const {};
+    final stat = comment['stat'] is Map ? comment['stat'] as Map : const {};
+    final expand = comment['expand'] is Map ? comment['expand'] as Map : const {};
+    final pos = expand['comment_pos'] is Map ? expand['comment_pos'] as Map : const {};
+
+    final text = content['text']?.toString() ?? common['text']?.toString() ?? '';
+    final rawImages = content['image_data_list'] ?? content['image_data'];
+    final images = extractCommentImages(rawImages);
+    final titles = extractUserTitles(userTag);
+    final rawAvatar = baseInfo['user_avatar']?.toString() ?? '';
+    final avatar = cleanCommentImageUrl(rawAvatar, targetWidth: 144);
+
+    final paraIdx = pos['start_para_index'] is int
+        ? pos['start_para_index'] as int
+        : int.tryParse(pos['start_para_index']?.toString() ?? '') ?? defaultParaIndex;
+
+    return CommentItem(
+      id: cid,
+      bookId: bookId,
+      chapterId: chapterId,
+      paraIndex: paraIdx,
+      userName: baseInfo['user_name']?.toString() ?? '书友',
+      userId: baseInfo['user_id']?.toString() ?? '',
+      avatar: avatar,
+      isAuthor: userTag['is_author'] == true,
+      isVip: userTag['is_vip'] == true || userTag['is_blue_vip'] == true,
+      titles: titles,
+      text: text,
+      images: images,
+      createTime: int.tryParse(common['create_timestamp']?.toString() ?? '') ?? 0,
+      diggCount: int.tryParse(stat['digg_count']?.toString() ?? '') ?? 0,
+      replyCount: int.tryParse(stat['reply_count']?.toString() ?? '') ?? 0,
+      score: int.tryParse(expand['score']?.toString() ?? ''),
+      paraSrcContent: expand['para_src_content']?.toString(),
+    );
+  }
+
+  /// 解析单条回复
+  static CommentReplyItem? parseReplyItem(dynamic raw, String parentCommentId) {
+    if (raw is! Map) return null;
+    final rid = raw['reply_id']?.toString() ?? '';
+    if (rid.isEmpty) return null;
+
+    final common = raw['Common'] is Map
+        ? raw['Common'] as Map
+        : (raw['common'] is Map ? raw['common'] as Map : const {});
+    final content = common['content'] is Map ? common['content'] as Map : const {};
+    final userInfo = common['user_info'] is Map ? common['user_info'] as Map : const {};
+    final baseInfo = userInfo['base_info'] is Map ? userInfo['base_info'] as Map : userInfo;
+    final userTag = userInfo['user_tag'] is Map ? userInfo['user_tag'] as Map : const {};
+    final stat = raw['stat'] is Map ? raw['stat'] as Map : const {};
+
+    final text = content['text']?.toString() ?? '';
+    final rawImages = content['image_data_list'] ?? content['image_data'];
+    final images = extractCommentImages(rawImages);
+    final titles = extractUserTitles(userTag);
+    final rawAvatar = baseInfo['user_avatar']?.toString() ?? '';
+    final avatar = cleanCommentImageUrl(rawAvatar, targetWidth: 144);
+
+    return CommentReplyItem(
+      replyId: rid,
+      parentCommentId: parentCommentId,
+      parentReplyId: raw['reply_to_reply_id']?.toString(),
+      userName: baseInfo['user_name']?.toString() ?? '书友',
+      userId: baseInfo['user_id']?.toString() ?? '',
+      avatar: avatar,
+      isAuthor: userTag['is_author'] == true,
+      titles: titles,
+      text: text,
+      images: images,
+      createTime: int.tryParse(common['create_timestamp']?.toString() ?? '') ?? 0,
+      diggCount: int.tryParse(stat['digg_count']?.toString() ?? '') ?? 0,
+    );
+  }
+
+  /// 1. 获取章节内各段评论数量统计 (idea/list)
+  Future<ChapterCommentStats?> fetchChapterCommentStats(String itemId) async {
+    final cleanId = itemId.trim();
+    if (cleanId.isEmpty) return null;
+
+    final queryParams = _buildCommonParams(extra: {
+      'comment_source': '3',
+      'item_id': cleanId,
+      'server_channel': '7',
+    });
+
+    final uri = Uri.https('reading.snssdk.com', '/novel/commentapi/idea/list/$cleanId/v1/', queryParams);
+    final sigHeaders = signRequest(uri.toString());
+
+    try {
+      final req = await _client.getUrl(uri).timeout(const Duration(seconds: 8));
+      req.headers.set('User-Agent', userAgent);
+      for (final e in sigHeaders.entries) {
+        req.headers.set(e.key, e.value);
+      }
+
+      final res = await req.close().timeout(const Duration(seconds: 8));
+      if (res.statusCode == 200) {
+        final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
+        final jsonStr = utf8.decode(respBytes, allowMalformed: true);
+        if (jsonStr.isNotEmpty) {
+          final j = jsonDecode(jsonStr);
+          if (j is Map && j['code'] == 0 && j['data'] is Map) {
+            final data = j['data']['data'];
+            if (data is Map) {
+              final counts = <int, int>{};
+              var total = 0;
+              for (final entry in data.entries) {
+                final pIdx = int.tryParse(entry.key.toString());
+                final c = int.tryParse(entry.value?['count']?.toString() ?? '0') ?? 0;
+                if (pIdx != null && c > 0) {
+                  counts[pIdx] = c;
+                  total += c;
+                }
+              }
+              return ChapterCommentStats(
+                chapterId: cleanId,
+                counts: counts,
+                totalCount: total,
+              );
+            }
+          }
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('FanqieMobileGateway fetchChapterCommentStats error: $e');
+      }
+    }
+    return null;
+  }
+
+  /// 2. 获取指定段落的评论列表 (comment/list)
+  Future<CommentPageData?> fetchParagraphComments(
+    String bookId,
+    String itemId,
+    int paraIndex, {
+    int sort = 1, // 1=最热, 3=最新
+    String cursor = '',
+    int count = 20,
+  }) async {
+    final cleanItemId = itemId.trim();
+    final cleanBookId = bookId.trim();
+    if (cleanItemId.isEmpty) return null;
+
+    final queryParams = _buildCommonParams();
+    final uri = Uri.https('reading.snssdk.com', '/novel/commentapi/comment/list/$cleanItemId/v1/', queryParams);
+
+    final bodyMap = {
+      'chapter_id': cleanItemId,
+      'comment_source': 2,
+      'comment_type': 1,
+      'group_type': 15,
+      'count': count.clamp(1, 50),
+      'sort': sort,
+      'cursor': cursor,
+      'business_param': {
+        'book_id': cleanBookId,
+        'item_version': '0',
+        'para_index': paraIndex,
+      },
+    };
+
+    final bodyBytes = utf8.encode(jsonEncode(bodyMap));
+    final sigHeaders = signRequest(uri.toString(), body: bodyBytes);
+
+    try {
+      final req = await _client.postUrl(uri).timeout(const Duration(seconds: 10));
+      req.headers.set('User-Agent', userAgent);
+      req.headers.set('Content-Type', 'application/json; charset=utf-8');
+      for (final e in sigHeaders.entries) {
+        // 段评列表禁止携带 x-ss-stub，否则上游直接报 110001
+        if (e.key == 'x-ss-stub') continue;
+        req.headers.set(e.key, e.value);
+      }
+      req.add(bodyBytes);
+
+      final res = await req.close().timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
+        final jsonStr = utf8.decode(respBytes, allowMalformed: true);
+        if (jsonStr.isNotEmpty) {
+          final j = jsonDecode(jsonStr);
+          if (j is Map && j['code'] == 0 && j['data'] is Map) {
+            final d = j['data'] as Map;
+            final dataList = d['data_list'] as List<dynamic>? ?? const [];
+            final info = d['common_list_info'] as Map<String, dynamic>? ?? const {};
+
+            final comments = <CommentItem>[];
+            for (final item in dataList) {
+              final parsed = parseCommentItem(
+                item,
+                bookId: cleanBookId,
+                chapterId: cleanItemId,
+                defaultParaIndex: paraIndex,
+              );
+              if (parsed != null) {
+                comments.add(parsed);
+              }
+            }
+
+            return CommentPageData(
+              comments: comments,
+              cursor: info['cursor']?.toString() ?? '',
+              hasMore: info['has_more'] == true,
+              total: int.tryParse(info['total']?.toString() ?? '') ?? comments.length,
+            );
+          }
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('FanqieMobileGateway fetchParagraphComments error: $e');
+      }
+    }
+    return null;
+  }
+
+  /// 3. 获取楼中楼二级回复列表 (reply/list)
+  Future<CommentReplyPageData?> fetchCommentReplies(
+    String commentId, {
+    String cursor = '',
+    int count = 20,
+  }) async {
+    final cleanId = commentId.trim();
+    if (cleanId.isEmpty) return null;
+
+    final queryParams = _buildCommonParams();
+    final uri = Uri.https('reading.snssdk.com', '/novel/commentapi/reply/list/$cleanId/v1/', queryParams);
+
+    final bodyMap = {
+      'comment_id': cleanId,
+      'comment_source': 5,
+      'comment_type': 1,
+      'group_type': 15,
+      'count': count.clamp(1, 50),
+      'cursor': cursor,
+    };
+
+    final bodyBytes = utf8.encode(jsonEncode(bodyMap));
+    final sigHeaders = signRequest(uri.toString(), body: bodyBytes);
+
+    try {
+      final req = await _client.postUrl(uri).timeout(const Duration(seconds: 10));
+      req.headers.set('User-Agent', userAgent);
+      req.headers.set('Content-Type', 'application/json; charset=utf-8');
+      for (final e in sigHeaders.entries) {
+        if (e.key == 'x-ss-stub') continue;
+        req.headers.set(e.key, e.value);
+      }
+      req.add(bodyBytes);
+
+      final res = await req.close().timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
+        final jsonStr = utf8.decode(respBytes, allowMalformed: true);
+        if (jsonStr.isNotEmpty) {
+          final j = jsonDecode(jsonStr);
+          if (j is Map && j['code'] == 0 && j['data'] is Map) {
+            final d = j['data'] as Map;
+            final replyList = d['reply_list'] as List<dynamic>? ?? const [];
+            final info = (d['comment_list_info'] ?? d['common_list_info']) as Map<String, dynamic>? ?? const {};
+
+            final replies = <CommentReplyItem>[];
+            for (final item in replyList) {
+              final parsed = parseReplyItem(item, cleanId);
+              if (parsed != null) {
+                replies.add(parsed);
+              }
+            }
+
+            return CommentReplyPageData(
+              replies: replies,
+              cursor: info['cursor']?.toString() ?? '',
+              hasMore: info['has_more'] == true,
+              total: int.tryParse(info['total']?.toString() ?? '') ?? replies.length,
+            );
+          }
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('FanqieMobileGateway fetchCommentReplies error: $e');
+      }
+    }
+    return null;
+  }
+
+  /// 4. 获取全书书评列表 (书籍详情页)
+  Future<CommentPageData?> fetchBookReviews(
+    String bookId, {
+    int sort = 1, // 1=最热, 3=最新
+    String cursor = '',
+    int count = 20,
+  }) async {
+    final cleanBookId = bookId.trim();
+    if (cleanBookId.isEmpty) return null;
+
+    final queryParams = _buildCommonParams();
+    final uri = Uri.https('reading.snssdk.com', '/novel/commentapi/comment/list/$cleanBookId/v1/', queryParams);
+
+    final bodyMap = {
+      'business_param': {
+        'book_id': cleanBookId,
+        'need_count': true,
+        'fold_type': 1,
+      },
+      'comment_source': 1,
+      'comment_type': 2,
+      'count': count.clamp(1, 50),
+      'group_id': cleanBookId,
+      'group_type': 1,
+      'server_channel': 5,
+      'sort': sort,
+      if (cursor.isNotEmpty) 'cursor': cursor,
+    };
+
+    final bodyBytes = utf8.encode(jsonEncode(bodyMap));
+    final sigHeaders = signRequest(uri.toString(), body: bodyBytes);
+
+    try {
+      final req = await _client.postUrl(uri).timeout(const Duration(seconds: 10));
+      req.headers.set('User-Agent', userAgent);
+      req.headers.set('Content-Type', 'application/json; charset=utf-8');
+      for (final e in sigHeaders.entries) {
+        req.headers.set(e.key, e.value);
+      }
+      req.add(bodyBytes);
+
+      final res = await req.close().timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
+        final jsonStr = utf8.decode(respBytes, allowMalformed: true);
+        if (jsonStr.isNotEmpty) {
+          final j = jsonDecode(jsonStr);
+          if (j is Map && j['code'] == 0 && j['data'] is Map) {
+            final d = j['data'] as Map;
+            final dataList = d['data_list'] as List<dynamic>? ?? const [];
+            final info = d['common_list_info'] as Map<String, dynamic>? ?? const {};
+
+            final comments = <CommentItem>[];
+            for (final item in dataList) {
+              final parsed = parseCommentItem(
+                item,
+                bookId: cleanBookId,
+                chapterId: '',
+                defaultParaIndex: 0,
+              );
+              if (parsed != null) {
+                comments.add(parsed);
+              }
+            }
+
+            return CommentPageData(
+              comments: comments,
+              cursor: info['cursor']?.toString() ?? '',
+              hasMore: info['has_more'] == true,
+              total: int.tryParse(info['total']?.toString() ?? '') ?? comments.length,
+            );
+          }
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('FanqieMobileGateway fetchBookReviews error: $e');
+      }
+    }
+    return null;
   }
 
   /// AES-128-CBC 解密正文并处理 Gzip

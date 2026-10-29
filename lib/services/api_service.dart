@@ -1,8 +1,13 @@
+import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 import '../models/book.dart';
 import '../models/chapter.dart';
+import '../models/comment.dart';
 import 'fanqie_backend_engine.dart';
+import 'fanqie_mobile_gateway.dart';
 
 /// API 服务 - 接入内置番茄小说后端引擎
 /// 覆盖原有全部接口并直接内置运行：
@@ -20,6 +25,7 @@ import 'fanqie_backend_engine.dart';
 /// - downloadChapters: 高性能全章节并发下载
 class ApiService {
   final FanqieBackendEngine _engine;
+  final FanqieMobileGateway _mobileGateway = FanqieMobileGateway();
   final http.Client _client;
 
   ApiService({http.Client? client, FanqieBackendEngine? engine})
@@ -170,6 +176,184 @@ class ApiService {
   /// 获取某书籍已离线的章节数量
   Future<int> getOfflineChapterCount(String bookId) async {
     return _engine.getOfflineChapterCount(bookId);
+  }
+
+  // ==========================================
+  // 评论与段评体系（支持在线获取与离线本地缓存）
+  // ==========================================
+
+  /// 获取评论本地持久化存储目录
+  Future<Directory> _getCommentCacheDir({String? bookId}) async {
+    Directory baseDir;
+    try {
+      baseDir = await getApplicationDocumentsDirectory();
+    } catch (_) {
+      baseDir = Directory.systemTemp;
+    }
+    String path;
+    if (bookId != null && bookId.isNotEmpty) {
+      path = '${baseDir.path}/offline_books/$bookId/comments';
+    } else {
+      path = '${baseDir.path}/comment_cache';
+    }
+    final dir = Directory(path);
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
+    }
+    return dir;
+  }
+
+  /// 获取章节段评数量统计（支持离线缓存回退）
+  Future<ChapterCommentStats?> getChapterCommentStats(String itemId, {String? bookId}) async {
+    final cleanId = itemId.trim();
+    if (cleanId.isEmpty) return null;
+
+    // 1. 尝试在线获取
+    try {
+      final stats = await _mobileGateway.fetchChapterCommentStats(cleanId);
+      if (stats != null) {
+        // 异步写入缓存（通用缓存与离线书籍目录）
+        _saveCommentStatsToDisk(cleanId, stats, bookId: bookId);
+        return stats;
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('获取段评统计失败，尝试离线缓存: $e');
+      }
+    }
+
+    // 2. 在线获取失败或无网络时，尝试读取本地缓存
+    return _loadCommentStatsFromDisk(cleanId, bookId: bookId);
+  }
+
+  void _saveCommentStatsToDisk(String itemId, ChapterCommentStats stats, {String? bookId}) async {
+    try {
+      final jsonStr = jsonEncode(stats.toJson());
+      final dir = await _getCommentCacheDir(bookId: bookId);
+      final file = File('${dir.path}/stats_$itemId.json');
+      await file.writeAsString(jsonStr);
+
+      // 如果提供了离线书籍ID，同步写入通用缓存
+      if (bookId != null && bookId.isNotEmpty) {
+        final commonDir = await _getCommentCacheDir();
+        final commonFile = File('${commonDir.path}/stats_$itemId.json');
+        await commonFile.writeAsString(jsonStr);
+      }
+    } catch (_) {}
+  }
+
+  Future<ChapterCommentStats?> _loadCommentStatsFromDisk(String itemId, {String? bookId}) async {
+    try {
+      if (bookId != null && bookId.isNotEmpty) {
+        final offlineDir = await _getCommentCacheDir(bookId: bookId);
+        final offlineFile = File('${offlineDir.path}/stats_$itemId.json');
+        if (await offlineFile.exists()) {
+          final content = await offlineFile.readAsString();
+          return ChapterCommentStats.fromJson(jsonDecode(content));
+        }
+      }
+
+      final commonDir = await _getCommentCacheDir();
+      final commonFile = File('${commonDir.path}/stats_$itemId.json');
+      if (await commonFile.exists()) {
+        final content = await commonFile.readAsString();
+        return ChapterCommentStats.fromJson(jsonDecode(content));
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// 获取指定段落评论列表（支持离线缓存回退）
+  Future<CommentPageData?> getParagraphComments(
+    String bookId,
+    String itemId,
+    int paraIndex, {
+    int sort = 1,
+    String cursor = '',
+    int count = 20,
+  }) async {
+    final cleanItemId = itemId.trim();
+    final cleanBookId = bookId.trim();
+
+    // 1. 尝试在线获取
+    try {
+      final page = await _mobileGateway.fetchParagraphComments(
+        cleanBookId,
+        cleanItemId,
+        paraIndex,
+        sort: sort,
+        cursor: cursor,
+        count: count,
+      );
+      if (page != null) {
+        // 仅对第一页做本地离线缓存
+        if (cursor.isEmpty) {
+          _saveParagraphCommentsToDisk(cleanBookId, cleanItemId, paraIndex, sort, page);
+        }
+        return page;
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('获取段落评论列表失败，尝试离线缓存: $e');
+      }
+    }
+
+    // 2. 离线/网络失败回退（首屏）
+    if (cursor.isEmpty) {
+      return _loadParagraphCommentsFromDisk(cleanBookId, cleanItemId, paraIndex, sort);
+    }
+    return null;
+  }
+
+  void _saveParagraphCommentsToDisk(
+    String bookId,
+    String itemId,
+    int paraIndex,
+    int sort,
+    CommentPageData page,
+  ) async {
+    try {
+      final jsonStr = jsonEncode(page.toJson());
+      final dir = await _getCommentCacheDir(bookId: bookId);
+      final file = File('${dir.path}/para_${itemId}_${paraIndex}_s$sort.json');
+      await file.writeAsString(jsonStr);
+    } catch (_) {}
+  }
+
+  Future<CommentPageData?> _loadParagraphCommentsFromDisk(
+    String bookId,
+    String itemId,
+    int paraIndex,
+    int sort,
+  ) async {
+    try {
+      final dir = await _getCommentCacheDir(bookId: bookId);
+      final file = File('${dir.path}/para_${itemId}_${paraIndex}_s$sort.json');
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        return CommentPageData.fromJson(jsonDecode(content));
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  /// 获取指定评论的楼中楼二级回复列表
+  Future<CommentReplyPageData?> getCommentReplies(
+    String commentId, {
+    String cursor = '',
+    int count = 20,
+  }) async {
+    return _mobileGateway.fetchCommentReplies(commentId, cursor: cursor, count: count);
+  }
+
+  /// 获取全书读者书评列表 (书籍详情页)
+  Future<CommentPageData?> getBookReviews(
+    String bookId, {
+    int sort = 1,
+    String cursor = '',
+    int count = 20,
+  }) async {
+    return _mobileGateway.fetchBookReviews(bookId, sort: sort, cursor: cursor, count: count);
   }
 
   /// 获取书籍封面图片数据

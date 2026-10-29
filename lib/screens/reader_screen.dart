@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/book.dart';
 import '../models/chapter.dart';
+import '../models/comment.dart';
 import '../services/api_service.dart';
 import '../services/bookshelf_service.dart';
 import '../services/download_service.dart';
@@ -11,6 +12,7 @@ import '../services/reading_history_service.dart';
 import '../services/reader_system_service.dart';
 import '../services/tts_service.dart';
 import '../widgets/tts_player_panel.dart';
+import '../widgets/paragraph_comment_sheet.dart';
 
 /// 阅读器主题配置
 class ReaderTheme {
@@ -60,6 +62,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
   // 当前无限下拉中已渲染展示的章节索引列表
   final List<int> _displayedChapters = [];
   final Map<int, GlobalKey> _chapterKeys = {};
+  final Map<String, GlobalKey> _paragraphKeys = {};
+
+  // 章节段评统计缓存 (itemId -> stats)
+  final Map<String, ChapterCommentStats> _chapterCommentStats = {};
+  // 定位原文时高亮提示的目标段落 key
+  String? _highlightedParagraphKey;
+  Timer? _highlightTimer;
 
   // 当前用户视觉所在的章节索引
   late int _currentActiveIndex;
@@ -84,6 +93,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   int _themeIndex = 1; // 默认羊皮纸
   double _horizontalPadding = 20.0; // 页面边距：14 紧凑, 20 适中, 28 宽松
   bool _volumeKeyScroll = false; // 音量物理键翻页滚动
+  bool _showCommentBubbles = true; // 是否显示段评气泡
 
   static const List<ReaderTheme> _themes = [
     ReaderTheme(
@@ -154,6 +164,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _ttsService.stop();
     _activeChapterNotifier.dispose();
     _statusTimer?.cancel();
+    _highlightTimer?.cancel();
     ReaderSystemService.setKeepScreenOn(false);
     ReaderSystemService.setVolumeKeyScrollEnabled(false);
     ReaderSystemService.registerVolumeKeyListener(null);
@@ -242,6 +253,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _themeIndex = (prefs.getInt('reader_theme_index') ?? 1).clamp(0, _themes.length - 1);
       _horizontalPadding = prefs.getDouble('reader_horizontal_padding') ?? 20.0;
       _volumeKeyScroll = prefs.getBool('reader_volume_key_scroll') ?? false;
+      _showCommentBubbles = prefs.getBool('reader_show_comment_bubbles') ?? true;
     });
   }
 
@@ -252,6 +264,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     await prefs.setInt('reader_theme_index', _themeIndex);
     await prefs.setDouble('reader_horizontal_padding', _horizontalPadding);
     await prefs.setBool('reader_volume_key_scroll', _volumeKeyScroll);
+    await prefs.setBool('reader_show_comment_bubbles', _showCommentBubbles);
   }
 
   void _onVolumeScroll(String direction) {
@@ -503,7 +516,24 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (content != null && content.isNotEmpty) {
       _chapterCache[index] = _formatContent(content, chapterTitle: chapter.title);
       _chapterIsOffline[index] = true;
+      _fetchCommentStats(chapter.itemId);
     }
+  }
+
+  /// 异步拉取章节段评数量统计
+  void _fetchCommentStats(String itemId) async {
+    if (_chapterCommentStats.containsKey(itemId)) return;
+    try {
+      final stats = await _apiService.getChapterCommentStats(
+        itemId,
+        bookId: widget.book.bookId,
+      );
+      if (stats != null && mounted) {
+        setState(() {
+          _chapterCommentStats[itemId] = stats;
+        });
+      }
+    } catch (_) {}
   }
 
   /// 后台静默预加载后续章节
@@ -870,6 +900,25 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           setModalState(() {});
                           _savePreferences();
                           ReaderSystemService.setVolumeKeyScrollEnabled(val);
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Text(
+                        '段评气泡',
+                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
+                      ),
+                      const Spacer(),
+                      Switch.adaptive(
+                        value: _showCommentBubbles,
+                        activeTrackColor: Theme.of(context).primaryColor,
+                        onChanged: (val) {
+                          setState(() => _showCommentBubbles = val);
+                          setModalState(() {});
+                          _savePreferences();
                         },
                       ),
                     ],
@@ -1296,34 +1345,58 @@ class _ReaderScreenState extends State<ReaderScreen> {
           const SizedBox(height: 20),
 
           // 章节正文（段落级渲染 + TTS 正在播放语句实时高亮）
-          _buildChapterParagraphs(content, theme, currentTtsText),
+          _buildChapterParagraphs(chapterIndex, content, theme, currentTtsText),
         ],
       ),
     );
   }
 
-  Widget _buildChapterParagraphs(String content, ReaderTheme theme, String currentTtsText) {
+  Widget _buildChapterParagraphs(int chapterIndex, String content, ReaderTheme theme, String currentTtsText) {
     if (content.isEmpty) return const SizedBox.shrink();
+    final chapter = widget.chapters[chapterIndex];
     final paragraphs = content.split('\n\n');
     final isDark = theme.backgroundColor == const Color(0xFF000000) || theme.backgroundColor == const Color(0xFF18181A);
+    final stats = _chapterCommentStats[chapter.itemId];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        for (final p in paragraphs) ...[
-          _buildSingleParagraph(p, theme, currentTtsText, isDark),
+        for (int pIdx = 0; pIdx < paragraphs.length; pIdx++) ...[
+          _buildSingleParagraph(
+            paragraphs[pIdx],
+            theme,
+            currentTtsText,
+            isDark,
+            chapter: chapter,
+            paraIndex: pIdx,
+            commentCount: stats?.getCount(pIdx) ?? 0,
+          ),
           const SizedBox(height: 8),
         ],
       ],
     );
   }
 
-  Widget _buildSingleParagraph(String paragraph, ReaderTheme theme, String currentTtsText, bool isDark) {
+  Widget _buildSingleParagraph(
+    String paragraph,
+    ReaderTheme theme,
+    String currentTtsText,
+    bool isDark, {
+    required Chapter chapter,
+    required int paraIndex,
+    required int commentCount,
+  }) {
     final trimmed = paragraph.trim();
     if (trimmed.isEmpty) return const SizedBox.shrink();
 
+    final paraKeyStr = '${chapter.itemId}_$paraIndex';
+    final pKey = _paragraphKeys.putIfAbsent(paraKeyStr, () => GlobalKey());
+    final isLocateTarget = _highlightedParagraphKey == paraKeyStr;
+    final showBubble = _showCommentBubbles && commentCount > 0;
+
+    Widget textWidget;
     if (currentTtsText.isEmpty) {
-      return Text(
+      textWidget = Text(
         paragraph,
         style: TextStyle(
           fontSize: _fontSize,
@@ -1332,77 +1405,203 @@ class _ReaderScreenState extends State<ReaderScreen> {
           letterSpacing: 0.5,
         ),
       );
-    }
+    } else {
+      // 提取当前朗读块中的核心语句
+      final cleanTts = currentTtsText.replaceAll(RegExp(r'[\s\r\n]'), '');
+      final cleanParagraph = trimmed.replaceAll(RegExp(r'[\s\r\n]'), '');
 
-    // 提取当前朗读块中的核心语句
-    final cleanTts = currentTtsText.replaceAll(RegExp(r'[\s\r\n]'), '');
-    final cleanParagraph = trimmed.replaceAll(RegExp(r'[\s\r\n]'), '');
+      final isFullMatch = cleanTts.contains(cleanParagraph) || cleanParagraph.contains(cleanTts);
 
-    final isFullMatch = cleanTts.contains(cleanParagraph) || cleanParagraph.contains(cleanTts);
+      // 按自然句切分进行富文本高亮（Word 荧光笔标记风格，无外围多余边框）
+      final sentencePattern = RegExp(r'[^。！？；!?;]+[。！？；!?;]?');
+      final matches = sentencePattern.allMatches(paragraph);
 
-    // 按自然句切分进行富文本高亮（Word 荧光笔标记风格，无外围多余边框）
-    final sentencePattern = RegExp(r'[^。！？；!?;]+[。！？；!?;]?');
-    final matches = sentencePattern.allMatches(paragraph);
-
-    if (matches.isEmpty) {
-      return Text(
-        paragraph,
-        style: TextStyle(
-          fontSize: _fontSize,
-          height: _lineHeight,
-          color: theme.textColor,
-          letterSpacing: 0.5,
-        ),
-      );
-    }
-
-    final spans = <TextSpan>[];
-    // 主题专属同色系温润高亮底色：绝不刺眼，自然与纸面融为一体
-    final highlightMarkerBg = theme.highlightColor;
-
-    bool hasAnyHighlight = false;
-
-    for (final match in matches) {
-      final sentence = match.group(0) ?? '';
-      final cleanSent = sentence.replaceAll(RegExp(r'[\s\p{P}]', unicode: true), '');
-
-      final isSentHighlighted = cleanSent.isNotEmpty &&
-          (cleanTts.contains(cleanSent) ||
-              (cleanSent.length > 4 && cleanTts.contains(cleanSent.substring(0, 4))) ||
-              isFullMatch);
-
-      if (isSentHighlighted) hasAnyHighlight = true;
-
-      spans.add(
-        TextSpan(
-          text: sentence,
+      if (matches.isEmpty) {
+        textWidget = Text(
+          paragraph,
           style: TextStyle(
             fontSize: _fontSize,
             height: _lineHeight,
             color: theme.textColor,
-            backgroundColor: isSentHighlighted ? highlightMarkerBg : null,
-            fontWeight: isSentHighlighted ? FontWeight.w500 : FontWeight.normal,
             letterSpacing: 0.5,
           ),
-        ),
-      );
+        );
+      } else {
+        final spans = <TextSpan>[];
+        final highlightMarkerBg = theme.highlightColor;
+        bool hasAnyHighlight = false;
+
+        for (final match in matches) {
+          final sentence = match.group(0) ?? '';
+          final cleanSent = sentence.replaceAll(RegExp(r'[\s\p{P}]', unicode: true), '');
+
+          final isSentHighlighted = cleanSent.isNotEmpty &&
+              (cleanTts.contains(cleanSent) ||
+                  (cleanSent.length > 4 && cleanTts.contains(cleanSent.substring(0, 4))) ||
+                  isFullMatch);
+
+          if (isSentHighlighted) hasAnyHighlight = true;
+
+          spans.add(
+            TextSpan(
+              text: sentence,
+              style: TextStyle(
+                fontSize: _fontSize,
+                height: _lineHeight,
+                color: theme.textColor,
+                backgroundColor: isSentHighlighted ? highlightMarkerBg : null,
+                fontWeight: isSentHighlighted ? FontWeight.w500 : FontWeight.normal,
+                letterSpacing: 0.5,
+              ),
+            ),
+          );
+        }
+
+        if (!hasAnyHighlight) {
+          textWidget = Text(
+            paragraph,
+            style: TextStyle(
+              fontSize: _fontSize,
+              height: _lineHeight,
+              color: theme.textColor,
+              letterSpacing: 0.5,
+            ),
+          );
+        } else {
+          textWidget = Text.rich(
+            TextSpan(children: spans),
+          );
+        }
+      }
     }
 
-    if (!hasAnyHighlight) {
-      return Text(
-        paragraph,
-        style: TextStyle(
-          fontSize: _fontSize,
-          height: _lineHeight,
-          color: theme.textColor,
-          letterSpacing: 0.5,
-        ),
-      );
-    }
+    return Container(
+      key: pKey,
+      padding: isLocateTarget ? const EdgeInsets.symmetric(vertical: 2, horizontal: 4) : EdgeInsets.zero,
+      decoration: isLocateTarget
+          ? BoxDecoration(
+              color: theme.highlightColor.withValues(alpha: 0.85),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: Theme.of(context).primaryColor, width: 1.2),
+            )
+          : null,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          textWidget,
+          if (showBubble) ...[
+            const SizedBox(height: 2),
+            Align(
+              alignment: Alignment.centerRight,
+              child: GestureDetector(
+                onTap: () => _openParagraphComments(
+                  chapter: chapter,
+                  paraIndex: paraIndex,
+                  paraText: trimmed,
+                ),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? Colors.white.withValues(alpha: 0.08)
+                        : theme.highlightColor.withValues(alpha: 0.95),
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(
+                      color: theme.secondaryColor.withValues(alpha: 0.25),
+                      width: 0.5,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.chat_bubble_outline,
+                        size: 11,
+                        color: isDark ? Colors.white70 : theme.secondaryColor,
+                      ),
+                      const SizedBox(width: 3),
+                      Text(
+                        commentCount > 999 ? '999+' : '$commentCount',
+                        style: TextStyle(
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                          color: isDark ? Colors.white70 : theme.secondaryColor,
+                          height: 1.1,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
 
-    // 采用与 Word / 荧光笔标记笔完全一致的内联底色高亮，保持自然段落缩进与行气流转，毫无多余边框打扰
-    return Text.rich(
-      TextSpan(children: spans),
+  /// 打开指定段落评论抽屉
+  void _openParagraphComments({
+    required Chapter chapter,
+    required int paraIndex,
+    required String paraText,
+  }) {
+    final theme = _themes[_themeIndex];
+    ParagraphCommentSheet.show(
+      context: context,
+      bookId: widget.book.bookId,
+      chapterId: chapter.itemId,
+      paraIndex: paraIndex,
+      paraText: paraText,
+      chapterTitle: chapter.title,
+      backgroundColor: theme.backgroundColor,
+      textColor: theme.textColor,
+      secondaryColor: theme.secondaryColor,
+      highlightColor: theme.highlightColor,
+      onLocateParagraph: () => _locateParagraph(chapter, paraIndex),
+    );
+  }
+
+  /// 定位并高亮原文段落
+  void _locateParagraph(Chapter chapter, int paraIndex) {
+    final key = '${chapter.itemId}_$paraIndex';
+    final targetContext = _paragraphKeys[key]?.currentContext;
+    if (targetContext != null) {
+      Scrollable.ensureVisible(
+        targetContext,
+        duration: const Duration(milliseconds: 350),
+        curve: Curves.easeOutCubic,
+        alignment: 0.25,
+      );
+      setState(() {
+        _highlightedParagraphKey = key;
+      });
+      _highlightTimer?.cancel();
+      _highlightTimer = Timer(const Duration(milliseconds: 2500), () {
+        if (mounted) {
+          setState(() {
+            _highlightedParagraphKey = null;
+          });
+        }
+      });
+    }
+  }
+
+  /// 显示本章段评概览
+  void _showChapterCommentsOverview() {
+    final chapter = widget.chapters[_currentActiveIndex];
+    final theme = _themes[_themeIndex];
+    ParagraphCommentSheet.show(
+      context: context,
+      bookId: widget.book.bookId,
+      chapterId: chapter.itemId,
+      paraIndex: 0,
+      paraText: '',
+      chapterTitle: chapter.title,
+      backgroundColor: theme.backgroundColor,
+      textColor: theme.textColor,
+      secondaryColor: theme.secondaryColor,
+      highlightColor: theme.highlightColor,
     );
   }
 
@@ -1701,6 +1900,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     onPressed: _startTtsReading,
                     icon: Icon(Icons.headphones_outlined, color: theme.textColor, size: 20),
                     label: Text('听书', style: TextStyle(color: theme.textColor)),
+                  ),
+                  TextButton.icon(
+                    onPressed: _showChapterCommentsOverview,
+                    icon: Icon(Icons.chat_bubble_outline, color: theme.textColor, size: 20),
+                    label: Text('段评', style: TextStyle(color: theme.textColor)),
                   ),
                   TextButton.icon(
                     onPressed: _showSettingsModal,

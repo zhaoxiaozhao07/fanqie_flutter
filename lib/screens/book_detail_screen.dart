@@ -4,12 +4,14 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../app_theme.dart';
 import '../models/book.dart';
 import '../models/chapter.dart';
+import '../models/comment.dart';
 import '../services/api_service.dart';
 import '../services/bookshelf_service.dart';
 import '../services/reading_history_service.dart';
 import '../services/download_service.dart';
 import '../widgets/download_dialog.dart';
 import '../widgets/loading_widget.dart';
+import '../widgets/paragraph_comment_sheet.dart';
 import 'reader_screen.dart';
 
 /// 书籍详情页面
@@ -33,6 +35,8 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   bool _isLoading = true;
   bool _abstractExpanded = false;
   bool _isInBookshelf = false;
+  CommentPageData? _bookReviews;
+  bool _isLoadingReviews = false;
 
   int? _lastReadIndex;
   String? _lastReadTitle;
@@ -41,6 +45,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   void initState() {
     super.initState();
     _loadBookDetail();
+    _loadBookReviews();
   }
 
   @override
@@ -74,6 +79,40 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       }
       await _loadReadingProgress();
     }
+  }
+
+  /// 异步加载书籍评价与书评
+  Future<void> _loadBookReviews() async {
+    setState(() => _isLoadingReviews = true);
+    try {
+      final reviews = await _apiService.getBookReviews(widget.book.bookId, count: 5);
+      if (mounted) {
+        setState(() {
+          _bookReviews = reviews;
+          _isLoadingReviews = false;
+        });
+      }
+    } catch (_) {
+      if (mounted) {
+        setState(() => _isLoadingReviews = false);
+      }
+    }
+  }
+
+  void _showAllReviewsModal() {
+    ParagraphCommentSheet.show(
+      context: context,
+      bookId: widget.book.bookId,
+      chapterId: '',
+      paraIndex: 0,
+      paraText: '',
+      chapterTitle: '',
+      isBookReview: true,
+      backgroundColor: Colors.white,
+      textColor: AppTheme.textPrimary,
+      secondaryColor: AppTheme.textSecondary,
+      highlightColor: AppTheme.primaryLight,
+    );
   }
 
   /// 加载上次阅读记录
@@ -515,6 +554,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               ),
             ),
             SliverToBoxAdapter(child: _buildBookInfo(book)),
+            SliverToBoxAdapter(child: _buildReviewsSection(book)),
 
             // 如果当前书籍正在后台下载，在此处展示清晰的非阻塞进度卡片
             if (activeTask != null)
@@ -665,6 +705,145 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
           ],
         );
       },
+    );
+  }
+
+  /// 构建读者书评精选区块
+  Widget _buildReviewsSection(Book book) {
+    final reviews = _bookReviews?.comments ?? const [];
+    if (_isLoadingReviews && reviews.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+        child: Center(
+          child: SizedBox(
+            width: 18,
+            height: 18,
+            child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.primaryColor),
+          ),
+        ),
+      );
+    }
+
+    if (reviews.isEmpty) return const SizedBox.shrink();
+
+    final previewReviews = reviews.take(2).toList();
+
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Row(
+                children: [
+                  const Text(
+                    '读者书评',
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: AppTheme.textPrimary,
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  if (_bookReviews != null && _bookReviews!.total > 0)
+                    Text(
+                      '(${_bookReviews!.total}条)',
+                      style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                    ),
+                ],
+              ),
+              TextButton.icon(
+                onPressed: _showAllReviewsModal,
+                icon: const Icon(Icons.arrow_forward_ios, size: 12),
+                label: const Text('查看全部', style: TextStyle(fontSize: 13)),
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: EdgeInsets.zero,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          for (final r in previewReviews) ...[
+            Padding(
+              padding: const EdgeInsets.symmetric(vertical: 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      CircleAvatar(
+                        radius: 11,
+                        backgroundColor: Colors.grey.shade200,
+                        backgroundImage: r.avatar.isNotEmpty ? NetworkImage(r.avatar) : null,
+                        child: r.avatar.isEmpty
+                            ? Text(
+                                r.userName.isNotEmpty ? r.userName[0] : '友',
+                                style: const TextStyle(fontSize: 9, color: AppTheme.textPrimary),
+                              )
+                            : null,
+                      ),
+                      const SizedBox(width: 6),
+                      Flexible(
+                        child: Text(
+                          r.userName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.bold,
+                            color: AppTheme.textPrimary,
+                          ),
+                        ),
+                      ),
+                      const Spacer(),
+                      if (r.diggCount > 0)
+                        Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.thumb_up_alt_outlined, size: 11, color: AppTheme.textHint),
+                            const SizedBox(width: 3),
+                            Text(
+                              '${r.diggCount}',
+                              style: const TextStyle(fontSize: 11, color: AppTheme.textHint),
+                            ),
+                          ],
+                        ),
+                    ],
+                  ),
+                  const SizedBox(height: 4),
+                  Text(
+                    r.text,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      fontSize: 13,
+                      color: AppTheme.textSecondary,
+                      height: 1.4,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            if (r != previewReviews.last)
+              Divider(height: 12, thickness: 0.5, color: Colors.grey.shade100),
+          ],
+        ],
+      ),
     );
   }
 
