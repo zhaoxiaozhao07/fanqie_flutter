@@ -18,6 +18,7 @@ class ReaderTheme {
   final Color backgroundColor;
   final Color textColor;
   final Color secondaryColor;
+  final Color highlightColor; // 主题专属同色系温和高亮底色
   final Brightness systemBrightness;
 
   const ReaderTheme({
@@ -25,6 +26,7 @@ class ReaderTheme {
     required this.backgroundColor,
     required this.textColor,
     required this.secondaryColor,
+    required this.highlightColor,
     required this.systemBrightness,
   });
 }
@@ -89,6 +91,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       backgroundColor: Color(0xFFFAF9F6),
       textColor: Color(0xFF222222),
       secondaryColor: Color(0xFF757575),
+      highlightColor: Color(0xFFE8E2D2), // 淡雅米暖底色，温润不刺眼
       systemBrightness: Brightness.light,
     ),
     ReaderTheme(
@@ -96,6 +99,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       backgroundColor: Color(0xFFF5EEDC),
       textColor: Color(0xFF3B2F2F),
       secondaryColor: Color(0xFF7E7265),
+      highlightColor: Color(0xFFE5DAC4), // 羊皮纸同色系浅茶色，浑然一体
       systemBrightness: Brightness.light,
     ),
     ReaderTheme(
@@ -103,6 +107,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       backgroundColor: Color(0xFFE2EED9),
       textColor: Color(0xFF233621),
       secondaryColor: Color(0xFF5D7058),
+      highlightColor: Color(0xFFCEE0C3), // 护眼绿同色系浅春草色，清爽柔和
       systemBrightness: Brightness.light,
     ),
     ReaderTheme(
@@ -110,6 +115,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       backgroundColor: Color(0xFF18181A),
       textColor: Color(0xFFB8B8B8),
       secondaryColor: Color(0xFF5C5C60),
+      highlightColor: Color(0xFF28282C), // 沉稳深碳灰，夜晚完全不眩光
       systemBrightness: Brightness.dark,
     ),
     ReaderTheme(
@@ -117,6 +123,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       backgroundColor: Color(0xFF000000),
       textColor: Color(0xFFC7C7CC),
       secondaryColor: Color(0xFF636366),
+      highlightColor: Color(0xFF222224), // 哑光低对比深灰，OLED 省电柔和
       systemBrightness: Brightness.dark,
     ),
   ];
@@ -1350,11 +1357,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
 
     final spans = <TextSpan>[];
-    // Word 经典荧光笔底色：浅色模式下为柔和淡杏黄/金黄，深色模式下为柔和暗金琥珀色
-    final highlightMarkerBg = isDark
-        ? const Color(0xFF5D481C).withValues(alpha: 0.85)
-        : const Color(0xFFFFF176).withValues(alpha: 0.58);
-    final highlightedTextColor = isDark ? const Color(0xFFFFD54F) : const Color(0xFF1A1A1A);
+    // 主题专属同色系温润高亮底色：绝不刺眼，自然与纸面融为一体
+    final highlightMarkerBg = theme.highlightColor;
 
     bool hasAnyHighlight = false;
 
@@ -1375,7 +1379,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
           style: TextStyle(
             fontSize: _fontSize,
             height: _lineHeight,
-            color: isSentHighlighted ? highlightedTextColor : theme.textColor,
+            color: theme.textColor,
             backgroundColor: isSentHighlighted ? highlightMarkerBg : null,
             fontWeight: isSentHighlighted ? FontWeight.w500 : FontWeight.normal,
             letterSpacing: 0.5,
