@@ -1394,15 +1394,17 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final isLocateTarget = _highlightedParagraphKey == paraKeyStr;
     final showBubble = _showCommentBubbles && commentCount > 0;
 
-    Widget textWidget;
+    final inlineSpans = <InlineSpan>[];
     if (currentTtsText.isEmpty) {
-      textWidget = Text(
-        paragraph,
-        style: TextStyle(
-          fontSize: _fontSize,
-          height: _lineHeight,
-          color: theme.textColor,
-          letterSpacing: 0.5,
+      inlineSpans.add(
+        TextSpan(
+          text: paragraph,
+          style: TextStyle(
+            fontSize: _fontSize,
+            height: _lineHeight,
+            color: theme.textColor,
+            letterSpacing: 0.5,
+          ),
         ),
       );
     } else {
@@ -1417,13 +1419,15 @@ class _ReaderScreenState extends State<ReaderScreen> {
       final matches = sentencePattern.allMatches(paragraph);
 
       if (matches.isEmpty) {
-        textWidget = Text(
-          paragraph,
-          style: TextStyle(
-            fontSize: _fontSize,
-            height: _lineHeight,
-            color: theme.textColor,
-            letterSpacing: 0.5,
+        inlineSpans.add(
+          TextSpan(
+            text: paragraph,
+            style: TextStyle(
+              fontSize: _fontSize,
+              height: _lineHeight,
+              color: theme.textColor,
+              letterSpacing: 0.5,
+            ),
           ),
         );
       } else {
@@ -1458,21 +1462,73 @@ class _ReaderScreenState extends State<ReaderScreen> {
         }
 
         if (!hasAnyHighlight) {
-          textWidget = Text(
-            paragraph,
-            style: TextStyle(
-              fontSize: _fontSize,
-              height: _lineHeight,
-              color: theme.textColor,
-              letterSpacing: 0.5,
+          inlineSpans.add(
+            TextSpan(
+              text: paragraph,
+              style: TextStyle(
+                fontSize: _fontSize,
+                height: _lineHeight,
+                color: theme.textColor,
+                letterSpacing: 0.5,
+              ),
             ),
           );
         } else {
-          textWidget = Text.rich(
-            TextSpan(children: spans),
-          );
+          inlineSpans.addAll(spans);
         }
       }
+    }
+
+    // 紧跟在段落最后几个字/标点符号后面的内联气泡角标，不单独另起一行
+    if (showBubble) {
+      inlineSpans.add(
+        WidgetSpan(
+          alignment: PlaceholderAlignment.middle,
+          child: Padding(
+            padding: const EdgeInsets.only(left: 4.0),
+            child: GestureDetector(
+              onTap: () => _openParagraphComments(
+                chapter: chapter,
+                paraIndex: paraIndex,
+                paraText: trimmed,
+              ),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? Colors.white.withValues(alpha: 0.12)
+                      : theme.highlightColor.withValues(alpha: 0.95),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(
+                    color: theme.secondaryColor.withValues(alpha: 0.3),
+                    width: 0.5,
+                  ),
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.chat_bubble_outline,
+                      size: 10,
+                      color: isDark ? Colors.white70 : theme.secondaryColor,
+                    ),
+                    const SizedBox(width: 2.5),
+                    Text(
+                      commentCount > 999 ? '999+' : '$commentCount',
+                      style: TextStyle(
+                        fontSize: 9.5,
+                        fontWeight: FontWeight.bold,
+                        color: isDark ? Colors.white70 : theme.secondaryColor,
+                        height: 1.1,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      );
     }
 
     return Container(
@@ -1485,57 +1541,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
               border: Border.all(color: Theme.of(context).primaryColor, width: 1.2),
             )
           : null,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          textWidget,
-          if (showBubble) ...[
-            const SizedBox(height: 2),
-            Align(
-              alignment: Alignment.centerRight,
-              child: GestureDetector(
-                onTap: () => _openParagraphComments(
-                  chapter: chapter,
-                  paraIndex: paraIndex,
-                  paraText: trimmed,
-                ),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
-                  decoration: BoxDecoration(
-                    color: isDark
-                        ? Colors.white.withValues(alpha: 0.08)
-                        : theme.highlightColor.withValues(alpha: 0.95),
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(
-                      color: theme.secondaryColor.withValues(alpha: 0.25),
-                      width: 0.5,
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.chat_bubble_outline,
-                        size: 11,
-                        color: isDark ? Colors.white70 : theme.secondaryColor,
-                      ),
-                      const SizedBox(width: 3),
-                      Text(
-                        commentCount > 999 ? '999+' : '$commentCount',
-                        style: TextStyle(
-                          fontSize: 10,
-                          fontWeight: FontWeight.bold,
-                          color: isDark ? Colors.white70 : theme.secondaryColor,
-                          height: 1.1,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ],
+      child: Text.rich(
+        TextSpan(children: inlineSpans),
       ),
     );
   }
