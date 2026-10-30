@@ -133,13 +133,19 @@ class BookmarkService {
     String note = '',
   }) async {
     final notes = List<ReadingNote>.from(await getNotes(bookId));
+    // 避免同一段落重复划线同一文本
+    notes.removeWhere((n) =>
+        n.chapterIndex == chapterIndex &&
+        n.paragraphIndex == paragraphIndex &&
+        n.text.trim() == text.trim());
+
     final newNote = ReadingNote(
       id: '${bookId}_${chapterIndex}_p${paragraphIndex}_${DateTime.now().millisecondsSinceEpoch}',
       bookId: bookId,
       chapterIndex: chapterIndex,
       chapterTitle: chapterTitle,
       paragraphIndex: paragraphIndex,
-      text: text,
+      text: text.trim(),
       note: note,
       createdAt: DateTime.now(),
     );
@@ -162,6 +168,23 @@ class BookmarkService {
   Future<void> removeNoteByText(String text, String bookId) async {
     final notes = List<ReadingNote>.from(await getNotes(bookId));
     notes.removeWhere((n) => n.text.trim() == text.trim());
+    _notesMap[bookId] = notes;
+    await _saveNotes(bookId, notes);
+    changeNotifier.value++;
+  }
+
+  Future<void> removeNoteByParagraph({
+    required String bookId,
+    required int chapterIndex,
+    required int paragraphIndex,
+    required String text,
+  }) async {
+    final notes = List<ReadingNote>.from(await getNotes(bookId));
+    final clean = text.trim();
+    notes.removeWhere((n) =>
+        n.chapterIndex == chapterIndex &&
+        n.paragraphIndex == paragraphIndex &&
+        (n.text.trim() == clean || n.text.contains(clean) || clean.contains(n.text.trim())));
     _notesMap[bookId] = notes;
     await _saveNotes(bookId, notes);
     changeNotifier.value++;
