@@ -167,7 +167,8 @@ class BookmarkService {
 
   Future<void> removeNoteByText(String text, String bookId) async {
     final notes = List<ReadingNote>.from(await getNotes(bookId));
-    notes.removeWhere((n) => n.text.trim() == text.trim());
+    final clean = text.trim();
+    notes.removeWhere((n) => n.text.trim() == clean || n.text.contains(clean) || clean.contains(n.text.trim()));
     _notesMap[bookId] = notes;
     await _saveNotes(bookId, notes);
     changeNotifier.value++;
@@ -183,7 +184,7 @@ class BookmarkService {
     final clean = text.trim();
     notes.removeWhere((n) =>
         n.chapterIndex == chapterIndex &&
-        n.paragraphIndex == paragraphIndex &&
+        (paragraphIndex < 0 || n.paragraphIndex == paragraphIndex) &&
         (n.text.trim() == clean || n.text.contains(clean) || clean.contains(n.text.trim())));
     _notesMap[bookId] = notes;
     await _saveNotes(bookId, notes);

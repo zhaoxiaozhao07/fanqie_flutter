@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -113,6 +112,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
   PageController _pageHorizontalController = PageController();
   int _currentHorizontalPageIndex = 0;
   List<ReadingNote> _cachedNotes = [];
+  String? _lastPaginateKey;
+  List<String> _cachedPaginatedPages = const [];
 
   // 沉浸式自动滚屏阅读
   bool _isAutoScrolling = false;
@@ -1814,9 +1815,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
           spans.add(
             TextSpan(
               text: sentence,
-              recognizer: isUnderlined
-                  ? (TapGestureRecognizer()..onTap = () => _showCancelUnderlineDialog(sentence, validChapIdx, paraIndex))
-                  : null,
               style: TextStyle(
                 fontSize: _fontSize,
                 height: _lineHeight,
@@ -1828,8 +1826,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 // 纯正虚线下划线，字体基线平整，绝无文字抬高！
                 decoration: isUnderlined ? TextDecoration.underline : null,
                 decorationStyle: TextDecorationStyle.dashed,
-                decorationColor: theme.textColor.withValues(alpha: 0.8),
-                decorationThickness: 1.4,
+                decorationColor: theme.textColor.withValues(alpha: 0.85),
+                decorationThickness: 1.5,
               ),
             ),
           );
@@ -1894,29 +1892,33 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
-    // 高性能原生绘制，长按呼出多选项句级选词面板（可自由选句划线，绝非固定整段）
-    return GestureDetector(
-      onLongPress: () {
-        _showSentenceSelectionSheet(
-          paragraph: textToShow,
-          chapterIndex: validChapIdx,
-          paraIndex: paraIndex,
-          theme: theme,
-        );
-      },
-      child: Container(
-        key: pKey,
-        padding: isLocateTarget ? const EdgeInsets.symmetric(vertical: 2, horizontal: 4) : EdgeInsets.zero,
-        decoration: isLocateTarget
-            ? BoxDecoration(
-                color: theme.highlightColor.withValues(alpha: 0.85),
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: Theme.of(context).primaryColor, width: 1.2),
-              )
-            : null,
-        child: Text.rich(
-          TextSpan(children: inlineSpans),
-        ),
+    // 支持自由长按选词并弹出暗色气泡工具条，点按正文空白处继续响应菜单呼出
+    return Container(
+      key: pKey,
+      padding: isLocateTarget ? const EdgeInsets.symmetric(vertical: 2, horizontal: 4) : EdgeInsets.zero,
+      decoration: isLocateTarget
+          ? BoxDecoration(
+              color: theme.highlightColor.withValues(alpha: 0.85),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: Theme.of(context).primaryColor, width: 1.2),
+            )
+          : null,
+      child: SelectableText.rich(
+        TextSpan(children: inlineSpans),
+        onTap: _toggleControls,
+        contextMenuBuilder: (context, editableTextState) {
+          final textVal = editableTextState.textEditingValue;
+          final selected = textVal.selection.textInside(textVal.text);
+          if (selected.trim().isEmpty) return const SizedBox.shrink();
+          return _buildDarkBubbleMenu(
+            context: context,
+            anchors: editableTextState.contextMenuAnchors,
+            selectedText: selected,
+            onDismiss: () => editableTextState.hideToolbar(),
+            chapterIndex: validChapIdx,
+            paraIndex: paraIndex,
+          );
+        },
       ),
     );
   }
@@ -2462,6 +2464,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
               itemBuilder: (context, pageIdx) {
                 final pageText = pages[pageIdx];
                 final pageParagraphs = pageText.split('\n\n');
+                final chapterParas = content.split('\n\n');
 
                 return Container(
                   width: constraints.maxWidth,
@@ -2489,7 +2492,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
                             for (int i = 0; i < pageParagraphs.length; i++) ...[
-                              _buildParagraphWithUnderlines(pageParagraphs[i], theme, chapter, i),
+                              _buildParagraphWithUnderlines(pageParagraphs[i], theme, chapter, i, chapterParas),
                               SizedBox(height: _paragraphSpacing.clamp(4.0, 14.0)),
                             ],
                           ],
@@ -2570,8 +2573,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  /// 单屏段落构建（带纯正虚线下划线，支持段评气泡与点击取消划线）
-  Widget _buildParagraphWithUnderlines(String paragraph, ReaderTheme theme, Chapter chapter, int pIdx) {
+  /// 单屏段落构建（带自由长按选词、纯正虚线下划线，支持段评气泡与点击取消划线）
+  Widget _buildParagraphWithUnderlines(
+    String paragraph,
+    ReaderTheme theme,
+    Chapter chapter,
+    int pIdx,
+    List<String> chapterParas,
+  ) {
     final trimmed = paragraph.trim();
     if (trimmed.isEmpty) return const SizedBox.shrink();
 
@@ -2586,17 +2595,30 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
     final chapterIdx = widget.chapters.indexWhere((c) => c.itemId == chapter.itemId);
     final validChapIdx = chapterIdx != -1 ? chapterIdx : _currentActiveIndex;
+
+    // 智能在全章中精确匹配该段落真实序号，保证划线跨页面、跨模式 100% 精确持久化
+    final rawTrimmed = trimmed.startsWith('\u3000\u3000') ? trimmed.substring(2) : trimmed;
+    int realIdx = -1;
+    for (int c = 0; c < chapterParas.length; c++) {
+      final cTrimmed = chapterParas[c].trim();
+      if (cTrimmed == trimmed || cTrimmed == rawTrimmed || cTrimmed.contains(rawTrimmed) || rawTrimmed.contains(cTrimmed)) {
+        realIdx = c;
+        break;
+      }
+    }
+    final effectiveParaIdx = realIdx != -1 ? realIdx : pIdx;
+
     final paraUnderlines = _cachedNotes
-        .where((n) => n.chapterIndex == validChapIdx && n.paragraphIndex == pIdx && n.text.trim().isNotEmpty)
+        .where((n) => n.chapterIndex == validChapIdx && (n.paragraphIndex == effectiveParaIdx || n.paragraphIndex < 0) && n.text.trim().isNotEmpty)
         .map((n) => n.text.trim())
         .toSet()
         .toList();
 
-    final spans = _buildSpansWithUnderline(textToShow, paraUnderlines, theme, validChapIdx, pIdx);
+    final spans = _buildSpansWithUnderline(textToShow, paraUnderlines, theme, validChapIdx, effectiveParaIdx);
 
     // 翻页模式下也同步展示官方段评气泡
     final stats = _chapterCommentStats[chapter.itemId];
-    final commentCount = stats?.getCount(pIdx) ?? 0;
+    final commentCount = stats?.getCount(effectiveParaIdx) ?? 0;
     final showBubble = _showCommentBubbles && commentCount > 0;
     final isDark = theme.backgroundColor == const Color(0xFF000000) || theme.backgroundColor == const Color(0xFF18181A);
 
@@ -2609,7 +2631,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
             child: GestureDetector(
               onTap: () => _openParagraphComments(
                 chapter: chapter,
-                paraIndex: pIdx,
+                paraIndex: effectiveParaIdx,
                 paraText: trimmed,
               ),
               child: Container(
@@ -2651,29 +2673,32 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
-    return GestureDetector(
-      onLongPress: () {
-        _showSentenceSelectionSheet(
-          paragraph: textToShow,
+    return SelectableText.rich(
+      TextSpan(children: spans),
+      style: TextStyle(
+        fontSize: _fontSize,
+        height: _lineHeight,
+        color: theme.textColor,
+        letterSpacing: _letterSpacing,
+        fontFamily: _resolveFontFamily(_fontFamily),
+      ),
+      contextMenuBuilder: (context, editableTextState) {
+        final textVal = editableTextState.textEditingValue;
+        final selected = textVal.selection.textInside(textVal.text);
+        if (selected.trim().isEmpty) return const SizedBox.shrink();
+        return _buildDarkBubbleMenu(
+          context: context,
+          anchors: editableTextState.contextMenuAnchors,
+          selectedText: selected,
+          onDismiss: () => editableTextState.hideToolbar(),
           chapterIndex: validChapIdx,
-          paraIndex: pIdx,
-          theme: theme,
+          paraIndex: effectiveParaIdx,
         );
       },
-      child: Text.rich(
-        TextSpan(children: spans),
-        style: TextStyle(
-          fontSize: _fontSize,
-          height: _lineHeight,
-          color: theme.textColor,
-          letterSpacing: _letterSpacing,
-          fontFamily: _resolveFontFamily(_fontFamily),
-        ),
-      ),
     );
   }
 
-  /// 纯正虚线下划线构建（字体平整不跳起，仅在文字下方展示优雅虚线，点击可取消划线）
+  /// 纯正虚线下划线构建（字体平整不跳起，仅在文字下方展示优雅虚线）
   List<InlineSpan> _buildSpansWithUnderline(
     String text,
     List<String> underlinedPhrases,
@@ -2751,8 +2776,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
         spans.add(
           TextSpan(
             text: matchedPhrase,
-            recognizer: TapGestureRecognizer()
-              ..onTap = () => _showCancelUnderlineDialog(matchedPhrase!, chapterIndex, paraIndex),
             style: TextStyle(
               fontSize: _fontSize,
               height: _lineHeight,
@@ -2761,8 +2784,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
               color: theme.textColor,
               decoration: TextDecoration.underline,
               decorationStyle: TextDecorationStyle.dashed,
-              decorationColor: theme.textColor.withValues(alpha: 0.8),
-              decorationThickness: 1.4,
+              decorationColor: theme.textColor.withValues(alpha: 0.85),
+              decorationThickness: 1.5,
             ),
           ),
         );
@@ -2787,57 +2810,127 @@ class _ReaderScreenState extends State<ReaderScreen> {
     return spans;
   }
 
-  /// 智能章节单屏饱满填充分页算法（软跨页自然折行，彻底消除页面下半截空白）
+  /// 智能章节单屏饱满填充分页算法（像素级 TextPainter 精准测算，充分利用整屏空间，绝无大片空白）
   List<String> _paginateContent(String content, Size size) {
     if (content.isEmpty) return [''];
-    final availWidth = (size.width - _horizontalPadding * 2).clamp(100.0, 2000.0);
-    // 预留顶部大标题与底部单屏页码空间
-    final availHeight = (size.height - 70.0).clamp(200.0, 3000.0);
+    final availWidth = (size.width - _horizontalPadding * 2).clamp(100.0, 3000.0);
+    // 预留顶部/底部内边距(8*2=16)与底部页码高度(~20)共约 36px
+    const reservedVertical = 36.0;
+    final normalAvailHeight = (size.height - reservedVertical).clamp(100.0, 4000.0);
 
-    final charWidth = _fontSize + _letterSpacing;
-    final charsPerLine = (availWidth / charWidth).floor().clamp(10, 80);
-    final lineHeightPx = _fontSize * _lineHeight;
-    // 真实行数容量：充分利用下半部分空间，让页面排满整屏
-    final linesPerPage = (availHeight / (lineHeightPx + 1.5)).floor().clamp(15, 80);
+    // 第一页预留章节大标题空间
+    final currentChapter = widget.chapters[_currentActiveIndex];
+    final titleStyle = TextStyle(
+      fontSize: _fontSize + 4,
+      fontWeight: FontWeight.bold,
+      height: 1.4,
+      fontFamily: _resolveFontFamily(_fontFamily),
+    );
+    final titlePainter = TextPainter(
+      text: TextSpan(text: currentChapter.title, style: titleStyle),
+      textDirection: TextDirection.ltr,
+    )..layout(maxWidth: availWidth);
+    final firstPageTitleOccupied = titlePainter.height + 10.0;
+    final firstPageAvailHeight = (normalAvailHeight - firstPageTitleOccupied).clamp(100.0, 4000.0);
+
+    final paginateKey = '\${_currentActiveIndex}_\${size.width}_\${size.height}_\${_fontSize}_\${_lineHeight}_\${_letterSpacing}_\${_fontFamily}_\${_indentTwoChars}_\${_paragraphSpacing}_\${_horizontalPadding}_\${content.length}';
+    if (paginateKey == _lastPaginateKey && _cachedPaginatedPages.isNotEmpty) {
+      return _cachedPaginatedPages;
+    }
+
+    final textStyle = TextStyle(
+      fontSize: _fontSize,
+      height: _lineHeight,
+      letterSpacing: _letterSpacing,
+      fontFamily: _resolveFontFamily(_fontFamily),
+    );
+    final painter = TextPainter(textDirection: TextDirection.ltr);
+    final paraSpacing = _paragraphSpacing.clamp(4.0, 14.0);
+
+    double measureHeight(String text) {
+      if (text.isEmpty) return 0.0;
+      painter.text = TextSpan(text: text, style: textStyle);
+      painter.layout(maxWidth: availWidth);
+      return painter.height;
+    }
+
+    final singleLineHeight = measureHeight('测');
 
     final paragraphs = content.split('\n\n');
     final pages = <String>[];
     final currentParas = <String>[];
-    int currentLines = 0;
+    double currentHeight = 0.0;
 
     for (var para in paragraphs) {
       var trimmed = para.trim();
       if (trimmed.isEmpty) continue;
       var text = _indentTwoChars
-          ? (trimmed.startsWith('\u3000\u3000') ? trimmed : '\u3000\u3000$trimmed')
+          ? (trimmed.startsWith('\u3000\u3000') ? trimmed : '\u3000\u3000\$trimmed')
           : trimmed;
 
       while (text.isNotEmpty) {
-        final remainingLines = linesPerPage - currentLines;
-        if (remainingLines <= 0) {
-          pages.add(currentParas.join('\n\n'));
-          currentParas.clear();
-          currentLines = 0;
-          continue;
-        }
+        final currentAvailHeight = pages.isEmpty ? firstPageAvailHeight : normalAvailHeight;
+        final fullParaHeight = measureHeight(text);
 
-        final paraLines = (text.length / charsPerLine).ceil();
-
-        if (paraLines <= remainingLines) {
-          currentParas.add(text);
-          currentLines += paraLines;
-          if (currentLines < linesPerPage) currentLines += 1;
-          break;
-        } else {
-          // 当前页放不下整段：精确截取刚好填满剩余空间的文字，后半段顺延至下一页
-          final takeChars = (remainingLines * charsPerLine).clamp(0, text.length);
-          if (takeChars > 0) {
-            currentParas.add(text.substring(0, takeChars));
-            text = text.substring(takeChars);
+        if (currentHeight == 0.0) {
+          // 当前页为空白新页
+          if (fullParaHeight <= currentAvailHeight) {
+            currentParas.add(text);
+            currentHeight += fullParaHeight + paraSpacing;
+            break;
+          } else {
+            // 单段超过整页容量：二分查找刚好填满该页的字数
+            int low = 1, high = text.length, best = 1;
+            while (low <= high) {
+              final mid = (low + high) ~/ 2;
+              final h = measureHeight(text.substring(0, mid));
+              if (h <= currentAvailHeight) {
+                best = mid;
+                low = mid + 1;
+              } else {
+                high = mid - 1;
+              }
+            }
+            best = best.clamp(1, text.length);
+            currentParas.add(text.substring(0, best));
+            text = text.substring(best);
+            if (text.startsWith('\n')) text = text.trimLeft();
+            pages.add(currentParas.join('\n\n'));
+            currentParas.clear();
+            currentHeight = 0.0;
           }
-          pages.add(currentParas.join('\n\n'));
-          currentParas.clear();
-          currentLines = 0;
+        } else {
+          // 当前页已有段落
+          final neededHeight = fullParaHeight + paraSpacing;
+          if (currentHeight + neededHeight <= currentAvailHeight) {
+            currentParas.add(text);
+            currentHeight += neededHeight;
+            break;
+          } else {
+            // 当前页放不下整段：看剩余高度是否还能放下至少一行
+            final spaceLeft = currentAvailHeight - currentHeight - paraSpacing;
+            if (spaceLeft >= singleLineHeight) {
+              int low = 1, high = text.length, best = 0;
+              while (low <= high) {
+                final mid = (low + high) ~/ 2;
+                final h = measureHeight(text.substring(0, mid));
+                if (h <= spaceLeft) {
+                  best = mid;
+                  low = mid + 1;
+                } else {
+                  high = mid - 1;
+                }
+              }
+              if (best > 0) {
+                currentParas.add(text.substring(0, best));
+                text = text.substring(best);
+                if (text.startsWith('\n')) text = text.trimLeft();
+              }
+            }
+            pages.add(currentParas.join('\n\n'));
+            currentParas.clear();
+            currentHeight = 0.0;
+          }
         }
       }
     }
@@ -2846,212 +2939,131 @@ class _ReaderScreenState extends State<ReaderScreen> {
       pages.add(currentParas.join('\n\n'));
     }
 
-    return pages.isEmpty ? [content] : pages;
+    final result = pages.isEmpty ? [content] : pages;
+    _lastPaginateKey = paginateKey;
+    _cachedPaginatedPages = result;
+    return result;
   }
 
-  /// 长按段落呼出语句精细化划线面板（支持自由选句或整段划线，绝非固定只能整段）
-  void _showSentenceSelectionSheet({
-    required String paragraph,
+  /// 专属暗色半透明圆角气泡浮动菜单（支持自由选择文字、复制、划线/取消划线，紧贴选区）
+  Widget _buildDarkBubbleMenu({
+    required BuildContext context,
+    required TextSelectionToolbarAnchors anchors,
+    required String selectedText,
+    required VoidCallback onDismiss,
     required int chapterIndex,
     required int paraIndex,
-    required ReaderTheme theme,
   }) {
-    final clean = paragraph.replaceAll('\u3000', '').trim();
-    if (clean.isEmpty) return;
+    final cleanSelected = selectedText.trim();
+    if (cleanSelected.isEmpty) return const SizedBox.shrink();
 
-    // 按自然标点拆分句子
-    final rawSentences = clean.split(RegExp(r'(?<=[。！？；!?;])')).map((s) => s.trim()).where((s) => s.isNotEmpty).toList();
-    final sentences = rawSentences.isNotEmpty ? rawSentences : [clean];
+    // 智能判断选中文本是否已在划线中
+    final isAlreadyUnderlined = _cachedNotes.any((n) {
+      if (n.chapterIndex != chapterIndex) return false;
+      if (paraIndex >= 0 && n.paragraphIndex >= 0 && n.paragraphIndex != paraIndex) return false;
+      final noteText = n.text.trim();
+      if (noteText.isEmpty) return false;
+      return noteText == cleanSelected ||
+          noteText.contains(cleanSelected) ||
+          cleanSelected.contains(noteText);
+    });
+
     final messenger = ScaffoldMessenger.of(context);
 
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: theme.backgroundColor,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
-      ),
-      builder: (ctx) {
-        return SafeArea(
-          child: Container(
-            constraints: BoxConstraints(maxHeight: MediaQuery.of(context).size.height * 0.55),
-            padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Icon(Icons.edit_note_rounded, size: 20, color: Theme.of(context).primaryColor),
-                    const SizedBox(width: 8),
-                    Text(
-                      '段落语句划线（点击句子划线）',
-                      style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: theme.textColor),
-                    ),
-                    const Spacer(),
-                    TextButton(
-                      onPressed: () {
-                        Navigator.pop(ctx);
-                        Clipboard.setData(ClipboardData(text: clean));
-                        ScaffoldMessenger.of(context).showSnackBar(
-                          const SnackBar(content: Text('已复制整段文本'), duration: Duration(seconds: 1)),
-                        );
-                      },
-                      child: const Text('复制整段', style: TextStyle(fontSize: 12)),
-                    ),
-                  ],
-                ),
-                const Divider(height: 12),
-                Expanded(
-                  child: ListView.separated(
-                    itemCount: sentences.length,
-                    separatorBuilder: (context, index) => const Divider(height: 8),
-                    itemBuilder: (context, idx) {
-                      final sent = sentences[idx];
-                      return ListTile(
-                        dense: true,
-                        contentPadding: EdgeInsets.zero,
-                        title: Text(
-                          sent,
-                          style: TextStyle(fontSize: 13, color: theme.textColor, height: 1.4),
-                        ),
-                        trailing: ElevatedButton.icon(
-                          style: ElevatedButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                            visualDensity: VisualDensity.compact,
-                          ),
-                          icon: const Icon(Icons.edit_outlined, size: 14),
-                          label: const Text('划线', style: TextStyle(fontSize: 11)),
-                          onPressed: () async {
-                            Navigator.pop(ctx);
-                            await _bookmarkService.addNote(
-                              bookId: widget.book.bookId,
-                              chapterIndex: chapterIndex,
-                              chapterTitle: widget.chapters[chapterIndex].title,
-                              paragraphIndex: paraIndex,
-                              text: sent,
-                              note: '',
-                            );
-                            await _loadNotes();
-                            if (mounted) {
-                              messenger.showSnackBar(
-                                const SnackBar(content: Text('已添加语句虚线划线'), duration: Duration(seconds: 1)),
-                              );
-                            }
-                          },
-                        ),
-                      );
-                    },
-                  ),
-                ),
-                if (sentences.length > 1) ...[
-                  const SizedBox(height: 8),
-                  SizedBox(
-                    width: double.infinity,
-                    child: OutlinedButton.icon(
-                      icon: const Icon(Icons.format_paint_outlined, size: 16),
-                      label: const Text('划线整段话'),
-                      onPressed: () async {
-                        Navigator.pop(ctx);
-                        await _bookmarkService.addNote(
-                          bookId: widget.book.bookId,
-                          chapterIndex: chapterIndex,
-                          chapterTitle: widget.chapters[chapterIndex].title,
-                          paragraphIndex: paraIndex,
-                          text: clean,
-                          note: '',
-                        );
-                        await _loadNotes();
-                        if (mounted) {
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(content: Text('已添加整段虚线划线'), duration: Duration(seconds: 1)),
-                          );
-                        }
-                      },
-                    ),
-                  ),
-                ],
-              ],
-            ),
+    return TextSelectionToolbar(
+      anchorAbove: anchors.primaryAnchor,
+      anchorBelow: anchors.secondaryAnchor ?? anchors.primaryAnchor,
+      children: [
+        Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFF232326),
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.45),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
+              ),
+            ],
           ),
-        );
-      },
-    );
-  }
-
-  /// 点击已划线短语弹出快捷取消划线确认框
-  void _showCancelUnderlineDialog(String phrase, int chapterIndex, int paraIndex) {
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: _themes[_themeIndex].backgroundColor,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) => SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
-          child: Column(
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: Row(
             mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(
-                '已划线内容',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: _themes[_themeIndex].secondaryColor,
-                  fontWeight: FontWeight.bold,
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                  visualDensity: VisualDensity.compact,
                 ),
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: cleanSelected));
+                  onDismiss();
+                  messenger.showSnackBar(
+                    const SnackBar(content: Text('已复制文本'), duration: Duration(seconds: 1)),
+                  );
+                },
+                icon: const Icon(Icons.copy_rounded, size: 15, color: Colors.white),
+                label: const Text('复制', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
               ),
-              const SizedBox(height: 8),
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: _themes[_themeIndex].secondaryColor.withValues(alpha: 0.1),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Text(
-                  phrase,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: _themes[_themeIndex].textColor,
-                    decoration: TextDecoration.underline,
-                    decorationStyle: TextDecorationStyle.dashed,
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton.icon(
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: Colors.redAccent.shade700,
+              Container(width: 1, height: 16, color: Colors.white24),
+              if (isAlreadyUnderlined)
+                TextButton.icon(
+                  style: TextButton.styleFrom(
                     foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    visualDensity: VisualDensity.compact,
                   ),
-                  icon: const Icon(Icons.delete_outline, size: 18),
-                  label: const Text('取消此划线', style: TextStyle(fontWeight: FontWeight.bold)),
                   onPressed: () async {
-                    Navigator.pop(ctx);
+                    onDismiss();
                     await _bookmarkService.removeNoteByParagraph(
                       bookId: widget.book.bookId,
                       chapterIndex: chapterIndex,
                       paragraphIndex: paraIndex,
-                      text: phrase,
+                      text: cleanSelected,
                     );
+                    await _bookmarkService.removeNoteByText(cleanSelected, widget.book.bookId);
                     await _loadNotes();
                     if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
+                      messenger.showSnackBar(
                         const SnackBar(content: Text('已取消划线'), duration: Duration(seconds: 1)),
                       );
                     }
                   },
+                  icon: const Icon(Icons.format_clear_rounded, size: 15, color: Colors.white),
+                  label: const Text('取消划线', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
+                )
+              else
+                TextButton.icon(
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                    visualDensity: VisualDensity.compact,
+                  ),
+                  onPressed: () async {
+                    onDismiss();
+                    await _bookmarkService.addNote(
+                      bookId: widget.book.bookId,
+                      chapterIndex: chapterIndex,
+                      chapterTitle: widget.chapters[chapterIndex].title,
+                      paragraphIndex: paraIndex >= 0 ? paraIndex : 0,
+                      text: cleanSelected,
+                      note: '',
+                    );
+                    await _loadNotes();
+                    if (mounted) {
+                      messenger.showSnackBar(
+                        const SnackBar(content: Text('已添加虚线划线'), duration: Duration(seconds: 1)),
+                      );
+                    }
+                  },
+                  icon: const Icon(Icons.edit_outlined, size: 15, color: Colors.white),
+                  label: const Text('划线', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
                 ),
-              ),
             ],
           ),
         ),
-      ),
+      ],
     );
   }
 
