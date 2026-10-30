@@ -264,10 +264,11 @@ class ApiService {
   }
 
   /// 获取指定段落评论列表（支持离线缓存回退）
+  /// 当 paraIndex 为 null 时获取全章综合段评
   Future<CommentPageData?> getParagraphComments(
     String bookId,
     String itemId,
-    int paraIndex, {
+    int? paraIndex, {
     int sort = 1,
     String cursor = '',
     int count = 20,
@@ -308,14 +309,15 @@ class ApiService {
   void _saveParagraphCommentsToDisk(
     String bookId,
     String itemId,
-    int paraIndex,
+    int? paraIndex,
     int sort,
     CommentPageData page,
   ) async {
     try {
       final jsonStr = jsonEncode(page.toJson());
       final dir = await _getCommentCacheDir(bookId: bookId);
-      final file = File('${dir.path}/para_${itemId}_${paraIndex}_s$sort.json');
+      final tag = paraIndex != null ? '$paraIndex' : 'all';
+      final file = File('${dir.path}/para_${itemId}_${tag}_s$sort.json');
       await file.writeAsString(jsonStr);
     } catch (_) {}
   }
@@ -323,12 +325,13 @@ class ApiService {
   Future<CommentPageData?> _loadParagraphCommentsFromDisk(
     String bookId,
     String itemId,
-    int paraIndex,
+    int? paraIndex,
     int sort,
   ) async {
     try {
       final dir = await _getCommentCacheDir(bookId: bookId);
-      final file = File('${dir.path}/para_${itemId}_${paraIndex}_s$sort.json');
+      final tag = paraIndex != null ? '$paraIndex' : 'all';
+      final file = File('${dir.path}/para_${itemId}_${tag}_s$sort.json');
       if (await file.exists()) {
         final content = await file.readAsString();
         return CommentPageData.fromJson(jsonDecode(content));

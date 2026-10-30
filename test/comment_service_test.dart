@@ -163,6 +163,18 @@ void main() {
         expect(stats.chapterId, equals(testItemId));
       }
 
+      // 测试全章段评获取 (paraIndex 为 null)
+      final allComments = await apiService.getParagraphComments(
+        '7202445625546736180',
+        '7202445625546736180',
+        null,
+        count: 5,
+      );
+      if (allComments != null && allComments.comments.isNotEmpty) {
+        expect(allComments.comments.first.id, isNotEmpty);
+        expect(allComments.comments.first.text, isNotEmpty);
+      }
+
       // 测试正常书籍的书评拉取 (部族荣光)
       final reviews = await apiService.getBookReviews('7069948840148732967', count: 5);
       if (reviews != null && reviews.comments.isNotEmpty) {

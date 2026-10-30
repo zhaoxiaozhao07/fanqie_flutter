@@ -590,10 +590,11 @@ class FanqieMobileGateway {
   }
 
   /// 2. 获取指定段落的评论列表 (comment/list)
+  /// 当 paraIndex 为 null 时，拉取整章所有段落的热门/最新评论汇总
   Future<CommentPageData?> fetchParagraphComments(
     String bookId,
     String itemId,
-    int paraIndex, {
+    int? paraIndex, {
     int sort = 1, // 1=最热, 3=最新
     String cursor = '',
     int count = 20,
@@ -616,7 +617,7 @@ class FanqieMobileGateway {
       'business_param': {
         'book_id': cleanBookId,
         'item_version': '0',
-        'para_index': paraIndex,
+        if (paraIndex != null) 'para_index': paraIndex,
       },
     };
 
@@ -651,7 +652,7 @@ class FanqieMobileGateway {
                 item,
                 bookId: cleanBookId,
                 chapterId: cleanItemId,
-                defaultParaIndex: paraIndex,
+                defaultParaIndex: paraIndex ?? 0,
               );
               if (parsed != null) {
                 comments.add(parsed);

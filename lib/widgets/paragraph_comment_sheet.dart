@@ -6,7 +6,7 @@ import '../services/api_service.dart';
 class ParagraphCommentSheet extends StatefulWidget {
   final String bookId;
   final String chapterId;
-  final int paraIndex;
+  final int? paraIndex;
   final String paraText;
   final String chapterTitle;
   final bool isBookReview;
@@ -20,7 +20,7 @@ class ParagraphCommentSheet extends StatefulWidget {
     super.key,
     required this.bookId,
     required this.chapterId,
-    required this.paraIndex,
+    this.paraIndex,
     required this.paraText,
     required this.chapterTitle,
     this.isBookReview = false,
@@ -35,7 +35,7 @@ class ParagraphCommentSheet extends StatefulWidget {
     required BuildContext context,
     required String bookId,
     required String chapterId,
-    required int paraIndex,
+    int? paraIndex,
     required String paraText,
     required String chapterTitle,
     bool isBookReview = false,
@@ -386,7 +386,7 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
                   Text(
                     widget.isBookReview
                         ? '书籍评价'
-                        : (widget.paraIndex == 0 ? '本章评论' : '第 ${widget.paraIndex + 1} 段评论'),
+                        : (widget.paraIndex == null ? '本章段评' : '第 ${widget.paraIndex! + 1} 段评论'),
                     style: TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.bold,

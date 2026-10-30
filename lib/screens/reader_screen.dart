@@ -1580,7 +1580,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       context: context,
       bookId: widget.book.bookId,
       chapterId: chapter.itemId,
-      paraIndex: 0,
+      paraIndex: null, // 为 null 时拉取本章所有段落的热门评论
       paraText: '',
       chapterTitle: chapter.title,
       backgroundColor: theme.backgroundColor,
