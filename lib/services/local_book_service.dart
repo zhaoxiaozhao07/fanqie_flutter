@@ -93,25 +93,18 @@ class LocalBookService {
         await File('${bookDir.path}/$itemId.txt').writeAsString(body);
       }
     } else {
-      // 未匹配到明显章节标识，智能按长度分块（每 3500 字一块）
-      final lines = rawContent.split(RegExp(r'\r?\n'));
-      final sb = StringBuffer();
+      // 未匹配到明显章节标识，智能按长度分块（每 3000 字一块）
+      const chunkSize = 3000;
       int partIndex = 1;
-
-      for (final line in lines) {
-        sb.writeln(line);
-        if (sb.length >= 3500) {
+      for (int i = 0; i < rawContent.length; i += chunkSize) {
+        final end = (i + chunkSize < rawContent.length) ? i + chunkSize : rawContent.length;
+        final chunk = rawContent.substring(i, end).trim();
+        if (chunk.isNotEmpty) {
           final itemId = '1000000000000$partIndex';
           chapters.add(Chapter(itemId: itemId, title: '第 $partIndex 部分', order: partIndex));
-          await File('${bookDir.path}/$itemId.txt').writeAsString(sb.toString().trim());
-          sb.clear();
+          await File('${bookDir.path}/$itemId.txt').writeAsString(chunk);
           partIndex++;
         }
-      }
-      if (sb.isNotEmpty) {
-        final itemId = '1000000000000$partIndex';
-        chapters.add(Chapter(itemId: itemId, title: '第 $partIndex 部分', order: partIndex));
-        await File('${bookDir.path}/$itemId.txt').writeAsString(sb.toString().trim());
       }
     }
 

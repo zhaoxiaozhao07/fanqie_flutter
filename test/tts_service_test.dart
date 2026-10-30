@@ -47,5 +47,23 @@ void main() {
       expect(tts.openAiVoice, equals('nova'));
       expect(tts.speechRate, equals(1.2));
     });
+
+    test('TtsService stopAfterCurrentChapter toggle and flag management', () {
+      final tts = TtsService();
+      expect(tts.stopAfterCurrentChapter, false);
+
+      tts.setStopAfterCurrentChapter(true);
+      expect(tts.stopAfterCurrentChapter, true);
+
+      tts.toggleStopAfterCurrentChapter();
+      expect(tts.stopAfterCurrentChapter, false);
+
+      tts.setStopAfterCurrentChapter(true);
+      expect(tts.stopAfterCurrentChapter, true);
+
+      // 停止播放时应安全重置该开关
+      tts.stop();
+      expect(tts.stopAfterCurrentChapter, false);
+    });
   });
 }
