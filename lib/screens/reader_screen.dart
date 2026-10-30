@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -1107,7 +1108,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final currentTheme = _themes[_themeIndex];
     showModalBottomSheet(
       context: context,
-      isScrollControlled: false,
+      isScrollControlled: true,
       barrierColor: Colors.black.withValues(alpha: 0.12),
       backgroundColor: currentTheme.backgroundColor.withValues(alpha: 0.98),
       shape: const RoundedRectangleBorder(
@@ -1117,9 +1118,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
         return StatefulBuilder(
           builder: (context, setModalState) {
             return Container(
-              height: 380,
-              padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
+              height: 420,
+              padding: const EdgeInsets.fromLTRB(20, 14, 20, 16),
               child: SingleChildScrollView(
+                physics: const BouncingScrollPhysics(),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   crossAxisAlignment: CrossAxisAlignment.start,
@@ -1134,12 +1136,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         ),
                       ),
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 16),
 
                     // 1. 翻页模式
                     Row(
                       children: [
-                        Text('翻页模式', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.w600)),
+                        Text('翻页模式', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.bold)),
                         const Spacer(),
                         SegmentedButton<bool>(
                           segments: const [
@@ -1160,12 +1162,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 16),
 
                     // 2. 字号与首行缩进
                     Row(
                       children: [
-                        Text('字号大小', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.w600)),
+                        Text('字号大小', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.bold)),
                         const SizedBox(width: 14),
                         OutlinedButton(
                           onPressed: _fontSize > 13
@@ -1211,12 +1213,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 16),
 
                     // 3. 行间距
                     Row(
                       children: [
-                        Text('行间距', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.w600)),
+                        Text('行间距', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.bold)),
                         const Spacer(),
                         SegmentedButton<double>(
                           segments: const [
@@ -1234,12 +1236,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 16),
 
                     // 4. 字间距
                     Row(
                       children: [
-                        Text('字间距', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.w600)),
+                        Text('字间距', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.bold)),
                         const Spacer(),
                         SegmentedButton<double>(
                           segments: const [
@@ -1257,12 +1259,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 16),
 
                     // 5. 正文字体
                     Row(
                       children: [
-                        Text('正文字体', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.w600)),
+                        Text('正文字体', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.bold)),
                         const Spacer(),
                         SegmentedButton<String>(
                           segments: const [
@@ -1281,12 +1283,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 14),
+                    const SizedBox(height: 16),
 
                     // 6. 阅读背景主题
                     Row(
                       children: [
-                        Text('阅读背景', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.w600)),
+                        Text('阅读背景', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.bold)),
                         const SizedBox(width: 16),
                         Expanded(
                           child: Row(
@@ -1339,7 +1341,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 8),
+                    const SizedBox(height: 12),
                   ],
                 ),
               ),
@@ -1763,7 +1765,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final isLocateTarget = _highlightedParagraphKey == paraKeyStr;
     final showBubble = _showCommentBubbles && commentCount > 0;
 
-    // 当前章节用户划线的所有文本
     final chapterIdx = widget.chapters.indexWhere((c) => c.itemId == chapter.itemId);
     final validChapIdx = chapterIdx != -1 ? chapterIdx : _currentActiveIndex;
     final chapterNotes = _cachedNotes
@@ -1773,7 +1774,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
     final inlineSpans = <InlineSpan>[];
     if (currentTtsText.isEmpty) {
-      inlineSpans.addAll(_buildSpansWithUnderline(textToShow, chapterNotes, theme));
+      inlineSpans.addAll(_buildSpansWithUnderline(textToShow, chapterNotes, theme, validChapIdx));
     } else {
       final cleanTts = currentTtsText.replaceAll(RegExp(r'[\s\r\n]'), '');
       final cleanParagraph = trimmed.replaceAll(RegExp(r'[\s\r\n]'), '');
@@ -1783,7 +1784,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       final matches = sentencePattern.allMatches(textToShow);
 
       if (matches.isEmpty) {
-        inlineSpans.addAll(_buildSpansWithUnderline(textToShow, chapterNotes, theme));
+        inlineSpans.addAll(_buildSpansWithUnderline(textToShow, chapterNotes, theme, validChapIdx));
       } else {
         final spans = <TextSpan>[];
         final highlightMarkerBg = theme.highlightColor;
@@ -1804,6 +1805,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
           spans.add(
             TextSpan(
               text: sentence,
+              recognizer: isUnderlined
+                  ? (TapGestureRecognizer()..onTap = () => _showCancelUnderlineDialog(sentence, validChapIdx))
+                  : null,
               style: TextStyle(
                 fontSize: _fontSize,
                 height: _lineHeight,
@@ -1812,17 +1816,18 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 fontWeight: isSentHighlighted ? FontWeight.w500 : FontWeight.normal,
                 letterSpacing: _letterSpacing,
                 fontFamily: _resolveFontFamily(_fontFamily),
+                // 纯正虚线下划线，文字基线平整绝不抬高！
                 decoration: isUnderlined ? TextDecoration.underline : null,
-                decorationStyle: TextDecorationStyle.solid,
-                decorationColor: theme.textColor.withValues(alpha: 0.85),
-                decorationThickness: 2.0,
+                decorationStyle: TextDecorationStyle.dashed,
+                decorationColor: theme.textColor.withValues(alpha: 0.8),
+                decorationThickness: 1.5,
               ),
             ),
           );
         }
 
         if (!hasAnyHighlight) {
-          inlineSpans.addAll(_buildSpansWithUnderline(textToShow, chapterNotes, theme));
+          inlineSpans.addAll(_buildSpansWithUnderline(textToShow, chapterNotes, theme, validChapIdx));
         } else {
           inlineSpans.addAll(spans);
         }
@@ -1863,7 +1868,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     ),
                     const SizedBox(width: 2.5),
                     Text(
-                      commentCount > 999 ? '999+' : '$commentCount',
+                      commentCount > 999 ? '999+' : '\$commentCount',
                       style: TextStyle(
                         fontSize: 9.5,
                         fontWeight: FontWeight.bold,
@@ -1880,33 +1885,30 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
-    // 支持自由长按选词并弹出暗色气泡工具条，点按正文空白处继续响应菜单呼出
-    return Container(
-      key: pKey,
-      padding: isLocateTarget ? const EdgeInsets.symmetric(vertical: 2, horizontal: 4) : EdgeInsets.zero,
-      decoration: isLocateTarget
-          ? BoxDecoration(
-              color: theme.highlightColor.withValues(alpha: 0.85),
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: Theme.of(context).primaryColor, width: 1.2),
-            )
-          : null,
-      child: SelectableText.rich(
-        TextSpan(children: inlineSpans),
-        onTap: _toggleControls,
-        contextMenuBuilder: (context, editableTextState) {
-          final textVal = editableTextState.textEditingValue;
-          final selected = textVal.selection.textInside(textVal.text);
-          if (selected.trim().isEmpty) return const SizedBox.shrink();
-          return _buildDarkBubbleMenu(
-            context: context,
-            anchors: editableTextState.contextMenuAnchors,
-            selectedText: selected,
-            onDismiss: () => editableTextState.hideToolbar(),
-            chapterIndex: validChapIdx,
-            paraIndex: paraIndex,
-          );
-        },
+    // 采用原生高性能纯 Text.rich（无任何 FocusNode / EditableText 性能包袱，滑动画质满帧丝滑）
+    return GestureDetector(
+      onLongPressStart: (details) {
+        _showDarkBubbleMenu(
+          context: context,
+          anchor: details.globalPosition,
+          selectedText: textToShow.trim(),
+          chapterIndex: validChapIdx,
+          paraIndex: paraIndex,
+        );
+      },
+      child: Container(
+        key: pKey,
+        padding: isLocateTarget ? const EdgeInsets.symmetric(vertical: 2, horizontal: 4) : EdgeInsets.zero,
+        decoration: isLocateTarget
+            ? BoxDecoration(
+                color: theme.highlightColor.withValues(alpha: 0.85),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: Theme.of(context).primaryColor, width: 1.2),
+              )
+            : null,
+        child: Text.rich(
+          TextSpan(children: inlineSpans),
+        ),
       ),
     );
   }
@@ -2439,7 +2441,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
         return Stack(
           children: [
-            // 纯单屏内容区域 (绝无垂直滚动条，上下滑动彻底锁定)
+            // 纯单屏内容区域 (绝无垂直滚动条，每一页从头到脚饱满填满整屏)
             PageView.builder(
               controller: _pageHorizontalController,
               itemCount: pages.length,
@@ -2473,6 +2475,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         ),
                         const SizedBox(height: 12),
                       ],
+                      // 填满整屏的文字排版
                       Expanded(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
@@ -2484,23 +2487,18 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           ],
                         ),
                       ),
-                      // 底部单屏进度微型指示
+                      // 纯净居中展示页码（去除重复的章节名）
                       Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 4),
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                          children: [
-                            Text(
-                              chapter.title,
-                              style: TextStyle(fontSize: 10, color: theme.secondaryColor),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
+                        padding: const EdgeInsets.only(top: 4, bottom: 2),
+                        child: Center(
+                          child: Text(
+                            '第 ${pageIdx + 1} / ${pages.length} 页',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: theme.secondaryColor.withValues(alpha: 0.65),
+                              letterSpacing: 1.0,
                             ),
-                            Text(
-                              '第 ${pageIdx + 1}/${pages.length} 页',
-                              style: TextStyle(fontSize: 10, color: theme.secondaryColor),
-                            ),
-                          ],
+                          ),
                         ),
                       ),
                     ],
@@ -2564,7 +2562,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  /// 单屏段落构建（带自由选词与纯正下划线标注）
+  /// 单屏段落构建（带纯正虚线下划线，文字基线绝对平齐不跳起）
   Widget _buildParagraphWithUnderlines(String paragraph, ReaderTheme theme, Chapter chapter) {
     final trimmed = paragraph.trim();
     if (trimmed.isEmpty) return const SizedBox.shrink();
@@ -2585,39 +2583,37 @@ class _ReaderScreenState extends State<ReaderScreen> {
         .map((n) => n.text.trim())
         .toList();
 
-    final spans = _buildSpansWithUnderline(textToShow, chapterNotes, theme);
+    final spans = _buildSpansWithUnderline(textToShow, chapterNotes, theme, validChapIdx);
 
-    return SelectableText.rich(
-      TextSpan(children: spans),
-      onTap: _toggleControls,
-      style: TextStyle(
-        fontSize: _fontSize,
-        height: _lineHeight,
-        color: theme.textColor,
-        letterSpacing: _letterSpacing,
-        fontFamily: _resolveFontFamily(_fontFamily),
-      ),
-      contextMenuBuilder: (context, editableTextState) {
-        final textVal = editableTextState.textEditingValue;
-        final selected = textVal.selection.textInside(textVal.text);
-        if (selected.trim().isEmpty) return const SizedBox.shrink();
-        return _buildDarkBubbleMenu(
+    return GestureDetector(
+      onLongPressStart: (details) {
+        _showDarkBubbleMenu(
           context: context,
-          anchors: editableTextState.contextMenuAnchors,
-          selectedText: selected,
-          onDismiss: () => editableTextState.hideToolbar(),
+          anchor: details.globalPosition,
+          selectedText: textToShow.trim(),
           chapterIndex: validChapIdx,
           paraIndex: 0,
         );
       },
+      child: Text.rich(
+        TextSpan(children: spans),
+        style: TextStyle(
+          fontSize: _fontSize,
+          height: _lineHeight,
+          color: theme.textColor,
+          letterSpacing: _letterSpacing,
+          fontFamily: _resolveFontFamily(_fontFamily),
+        ),
+      ),
     );
   }
 
-  /// 纯正下划线 Spans 构建（无任何大面积荧光背景色高亮）
+  /// 纯正虚线下划线 Spans 构建（文字基线绝对平整，无高亮底色，点击可取消划线）
   List<InlineSpan> _buildSpansWithUnderline(
     String text,
     List<String> underlinedPhrases,
     ReaderTheme theme,
+    int chapterIndex,
   ) {
     if (underlinedPhrases.isEmpty) {
       return [
@@ -2685,24 +2681,20 @@ class _ReaderScreenState extends State<ReaderScreen> {
             ),
           );
         }
-        // 虚线下划线（通过文字透明度+Shadow上浮拉开 3px 呼吸间距，绝不挨着下方笔画，绝无背景底色）
+        // 虚线下划线：文字基线绝对齐平不抬高，纯正虚线，点击可快捷取消划线
         spans.add(
           TextSpan(
             text: matchedPhrase,
+            recognizer: TapGestureRecognizer()
+              ..onTap = () => _showCancelUnderlineDialog(matchedPhrase!, chapterIndex),
             style: TextStyle(
               fontSize: _fontSize,
               height: _lineHeight,
               fontFamily: _resolveFontFamily(_fontFamily),
               letterSpacing: _letterSpacing,
-              color: Colors.transparent,
-              shadows: [
-                Shadow(
-                  offset: const Offset(0, -3),
-                  color: theme.textColor,
-                ),
-              ],
+              color: theme.textColor,
               decoration: TextDecoration.underline,
-              decorationStyle: TextDecorationStyle.dashed, // 优雅虚线
+              decorationStyle: TextDecorationStyle.dashed,
               decorationColor: theme.textColor.withValues(alpha: 0.8),
               decorationThickness: 1.5,
             ),
@@ -2729,138 +2721,236 @@ class _ReaderScreenState extends State<ReaderScreen> {
     return spans;
   }
 
+  /// 智能章节单屏饱满填充分页算法（软跨页自然折行，彻底消除页面下半截空白）
   List<String> _paginateContent(String content, Size size) {
     if (content.isEmpty) return [''];
     final availWidth = (size.width - _horizontalPadding * 2).clamp(100.0, 2000.0);
-    final availHeight = (size.height - 110.0).clamp(200.0, 3000.0);
+    // 预留顶部大标题(首页)与底部单屏页码空间
+    final availHeight = (size.height - 85.0).clamp(200.0, 3000.0);
 
     final charWidth = _fontSize + _letterSpacing;
     final charsPerLine = (availWidth / charWidth).floor().clamp(10, 80);
     final lineHeightPx = _fontSize * _lineHeight;
-    final linesPerPage = (availHeight / (lineHeightPx + 4)).floor().clamp(6, 60);
+    // 增加单页容量行数，让文字饱满填满至屏幕底部
+    final linesPerPage = (availHeight / (lineHeightPx + 2)).floor().clamp(12, 70);
 
     final paragraphs = content.split('\n\n');
     final pages = <String>[];
-    final currentLines = <String>[];
-    int currentLineCount = 0;
+    final currentParas = <String>[];
+    int currentLines = 0;
 
     for (var para in paragraphs) {
-      final trimmed = para.trim();
+      var trimmed = para.trim();
       if (trimmed.isEmpty) continue;
-      final text = _indentTwoChars
+      var text = _indentTwoChars
           ? (trimmed.startsWith('\u3000\u3000') ? trimmed : '\u3000\u3000$trimmed')
           : trimmed;
 
-      int paraLines = (text.length / charsPerLine).ceil();
-      if (paraLines == 0) paraLines = 1;
-
-      if (currentLineCount + paraLines > linesPerPage && currentLines.isNotEmpty) {
-        pages.add(currentLines.join('\n\n'));
-        currentLines.clear();
-        currentLineCount = 0;
-      }
-
-      if (paraLines > linesPerPage) {
-        int charOffset = 0;
-        final maxCharsPerPage = linesPerPage * charsPerLine;
-        while (charOffset < text.length) {
-          final end = (charOffset + maxCharsPerPage < text.length)
-              ? charOffset + maxCharsPerPage
-              : text.length;
-          pages.add(text.substring(charOffset, end));
-          charOffset = end;
+      while (text.isNotEmpty) {
+        final remainingLines = linesPerPage - currentLines;
+        if (remainingLines <= 2) {
+          // 当前页已基本填满整屏，封页
+          pages.add(currentParas.join('\n\n'));
+          currentParas.clear();
+          currentLines = 0;
+          continue;
         }
-      } else {
-        currentLines.add(text);
-        currentLineCount += paraLines + 1;
+
+        final paraLines = (text.length / charsPerLine).ceil();
+
+        if (paraLines <= remainingLines) {
+          currentParas.add(text);
+          currentLines += paraLines + 1;
+          break; // 段落排完
+        } else {
+          // 当前页放不下整段：将刚好填满剩余行数的文字留在当前页，后半段顺延至下一页
+          final takeChars = (remainingLines * charsPerLine).clamp(0, text.length);
+          if (takeChars > 0) {
+            currentParas.add(text.substring(0, takeChars));
+            text = text.substring(takeChars);
+          }
+          pages.add(currentParas.join('\n\n'));
+          currentParas.clear();
+          currentLines = 0;
+        }
       }
     }
 
-    if (currentLines.isNotEmpty) {
-      pages.add(currentLines.join('\n\n'));
+    if (currentParas.isNotEmpty) {
+      pages.add(currentParas.join('\n\n'));
     }
 
     return pages.isEmpty ? [content] : pages;
   }
 
-  /// 专属暗色半透明圆角气泡浮动菜单（绝不出现白底白字，清晰加粗+图标）
-  Widget _buildDarkBubbleMenu({
+  /// 暗色悬浮气泡菜单（仅保留复制与划线两大核心功能，彻底去除“想法”）
+  void _showDarkBubbleMenu({
     required BuildContext context,
-    required TextSelectionToolbarAnchors anchors,
+    required Offset anchor,
     required String selectedText,
-    required VoidCallback onDismiss,
     required int chapterIndex,
     required int paraIndex,
   }) {
-    return TextSelectionToolbar(
-      anchorAbove: anchors.primaryAnchor,
-      anchorBelow: anchors.secondaryAnchor == null ? anchors.primaryAnchor : anchors.secondaryAnchor!,
-      children: [
-        Container(
-          decoration: BoxDecoration(
-            color: const Color(0xFF232326),
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.35),
-                blurRadius: 10,
-                offset: const Offset(0, 3),
+    if (selectedText.isEmpty) return;
+    final overlay = Overlay.of(context);
+    late OverlayEntry entry;
+
+    entry = OverlayEntry(
+      builder: (ctx) {
+        return Stack(
+          children: [
+            // 点击外部任意位置关闭气泡
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () => entry.remove(),
               ),
-            ],
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-          child: Row(
+            ),
+            Positioned(
+              left: (anchor.dx - 80).clamp(20.0, MediaQuery.of(context).size.width - 160.0),
+              top: (anchor.dy - 55).clamp(40.0, MediaQuery.of(context).size.height - 80.0),
+              child: Material(
+                color: Colors.transparent,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF232326),
+                    borderRadius: BorderRadius.circular(20),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withValues(alpha: 0.4),
+                        blurRadius: 10,
+                        offset: const Offset(0, 3),
+                      ),
+                    ],
+                  ),
+                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      TextButton.icon(
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        onPressed: () {
+                          entry.remove();
+                          Clipboard.setData(ClipboardData(text: selectedText));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('已复制文本'), duration: Duration(seconds: 1)),
+                          );
+                        },
+                        icon: const Icon(Icons.copy_rounded, size: 15, color: Colors.white),
+                        label: const Text('复制', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
+                      ),
+                      Container(width: 1, height: 16, color: Colors.white24),
+                      TextButton.icon(
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          visualDensity: VisualDensity.compact,
+                        ),
+                        onPressed: () async {
+                          entry.remove();
+                          await _bookmarkService.addNote(
+                            bookId: widget.book.bookId,
+                            chapterIndex: chapterIndex,
+                            chapterTitle: widget.chapters[chapterIndex].title,
+                            paragraphIndex: paraIndex,
+                            text: selectedText,
+                            note: '',
+                          );
+                          await _loadNotes();
+                          if (context.mounted) {
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('已添加划线'), duration: Duration(seconds: 1)),
+                            );
+                          }
+                        },
+                        icon: const Icon(Icons.edit_outlined, size: 15, color: Colors.white),
+                        label: const Text('划线', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ],
+        );
+      },
+    );
+
+    overlay.insert(entry);
+  }
+
+  /// 点击已划线短语弹出快捷取消划线确认框
+  void _showCancelUnderlineDialog(String phrase, int chapterIndex) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: _themes[_themeIndex].backgroundColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
+          child: Column(
             mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              TextButton.icon(
-                style: TextButton.styleFrom(
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  visualDensity: VisualDensity.compact,
+              Text(
+                '已划线内容',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: _themes[_themeIndex].secondaryColor,
+                  fontWeight: FontWeight.bold,
                 ),
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: selectedText));
-                  onDismiss();
-                  ScaffoldMessenger.of(context).showSnackBar(
-                    const SnackBar(content: Text('已复制文本'), duration: Duration(seconds: 1)),
-                  );
-                },
-                icon: const Icon(Icons.copy_rounded, size: 15, color: Colors.white),
-                label: const Text('复制', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
               ),
-              Container(width: 1, height: 16, color: Colors.white24),
-              TextButton.icon(
-                style: TextButton.styleFrom(
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                  visualDensity: VisualDensity.compact,
+              const SizedBox(height: 8),
+              Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: _themes[_themeIndex].secondaryColor.withValues(alpha: 0.1),
+                  borderRadius: BorderRadius.circular(8),
                 ),
-                onPressed: () async {
-                  onDismiss();
-                  if (selectedText.trim().isNotEmpty) {
-                    await _bookmarkService.addNote(
-                      bookId: widget.book.bookId,
-                      chapterIndex: chapterIndex,
-                      chapterTitle: widget.chapters[chapterIndex].title,
-                      paragraphIndex: paraIndex,
-                      text: selectedText.trim(),
-                      note: '',
-                    );
+                child: Text(
+                  phrase,
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: _themes[_themeIndex].textColor,
+                    decoration: TextDecoration.underline,
+                    decorationStyle: TextDecorationStyle.dashed,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
+              SizedBox(
+                width: double.infinity,
+                child: ElevatedButton.icon(
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.redAccent.shade700,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                  ),
+                  icon: const Icon(Icons.delete_outline, size: 18),
+                  label: const Text('取消此划线', style: TextStyle(fontWeight: FontWeight.bold)),
+                  onPressed: () async {
+                    Navigator.pop(ctx);
+                    await _bookmarkService.removeNoteByText(phrase, widget.book.bookId);
                     await _loadNotes();
-                    if (context.mounted) {
+                    if (mounted) {
                       ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(content: Text('已添加划线'), duration: Duration(seconds: 1)),
+                        const SnackBar(content: Text('已取消划线'), duration: Duration(seconds: 1)),
                       );
                     }
-                  }
-                },
-                icon: const Icon(Icons.edit_outlined, size: 15, color: Colors.white),
-                label: const Text('划线', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
+                  },
+                ),
               ),
             ],
           ),
         ),
-      ],
+      ),
     );
   }
 

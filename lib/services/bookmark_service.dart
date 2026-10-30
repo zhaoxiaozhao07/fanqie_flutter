@@ -159,6 +159,14 @@ class BookmarkService {
     changeNotifier.value++;
   }
 
+  Future<void> removeNoteByText(String text, String bookId) async {
+    final notes = List<ReadingNote>.from(await getNotes(bookId));
+    notes.removeWhere((n) => n.text.trim() == text.trim());
+    _notesMap[bookId] = notes;
+    await _saveNotes(bookId, notes);
+    changeNotifier.value++;
+  }
+
   Future<void> _saveNotes(String bookId, List<ReadingNote> list) async {
     final prefs = await _getPrefs();
     final raw = json.encode(list.map((e) => e.toJson()).toList());
