@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/book.dart';
 import '../models/bookshelf_book.dart';
+import 'api_service.dart';
 
 /// 书架服务 - 本地收藏、进度缓存与批量管理
 class BookshelfService {
@@ -88,6 +89,7 @@ class BookshelfService {
     Book book, {
     int? chapterIndex,
     String? chapterTitle,
+    int totalChapters = 0,
   }) async {
     await initialize();
     if (isInBookshelf(book.bookId)) {
@@ -107,6 +109,7 @@ class BookshelfService {
         chapterIndex: chapterIndex,
         chapterTitle: chapterTitle,
         readTime: chapterIndex != null ? DateTime.now() : null,
+        totalChapters: totalChapters,
       ),
     );
     await _save();
@@ -136,10 +139,14 @@ class BookshelfService {
     await initialize();
     final index = _books.indexWhere((b) => b.bookId == bookId);
     if (index != -1) {
+      final b = _books[index];
+      final isLatest = b.latestRemoteChapters != null && (chapterIndex + 1) >= b.latestRemoteChapters!;
       _books[index] = _books[index].copyWith(
         lastReadChapterIndex: chapterIndex,
         lastReadChapterTitle: chapterTitle,
         lastReadTime: DateTime.now(),
+        hasUpdate: isLatest ? false : b.hasUpdate,
+        totalChapters: isLatest ? (b.latestRemoteChapters ?? b.totalChapters) : b.totalChapters,
       );
       await _save();
     }
@@ -161,6 +168,65 @@ class BookshelfService {
       return _books.firstWhere((b) => b.bookId == bookId);
     } catch (_) {
       return null;
+    }
+  }
+
+  /// 检查连载书籍更新 (Update Watcher)
+  Future<Map<String, int>> checkBookshelfUpdates({bool force = false}) async {
+    await initialize();
+    final apiService = ApiService();
+    final updatesFound = <String, int>{};
+
+    for (int i = 0; i < _books.length; i++) {
+      final book = _books[i];
+      // 已完结的书籍如果不是 force 则跳过
+      if (!force && book.creationStatus == '已完结') continue;
+
+      try {
+        final chapters = await apiService.getBookDirectory(book.bookId);
+        if (chapters.isNotEmpty) {
+          final remoteCount = chapters.length;
+          final localBaseCount = book.totalChapters > 0
+              ? book.totalChapters
+              : (book.lastReadChapterIndex != null ? (book.lastReadChapterIndex! + 1) : 0);
+
+          if (remoteCount > localBaseCount && localBaseCount > 0) {
+            final diff = remoteCount - localBaseCount;
+            updatesFound[book.bookId] = diff;
+            _books[i] = book.copyWith(
+              latestRemoteChapters: remoteCount,
+              hasUpdate: true,
+              lastCheckedTime: DateTime.now(),
+            );
+          } else {
+            _books[i] = book.copyWith(
+              totalChapters: remoteCount,
+              latestRemoteChapters: remoteCount,
+              hasUpdate: false,
+              lastCheckedTime: DateTime.now(),
+            );
+          }
+        }
+      } catch (_) {}
+    }
+
+    if (updatesFound.isNotEmpty) {
+      await _save();
+    }
+    return updatesFound;
+  }
+
+  /// 消除某本书的更新红点徽标
+  Future<void> clearBookUpdateBadge(String bookId) async {
+    await initialize();
+    final index = _books.indexWhere((b) => b.bookId == bookId);
+    if (index != -1 && _books[index].hasUpdate) {
+      final b = _books[index];
+      _books[index] = b.copyWith(
+        hasUpdate: false,
+        totalChapters: b.latestRemoteChapters ?? b.totalChapters,
+      );
+      await _save();
     }
   }
 }

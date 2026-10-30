@@ -14,6 +14,10 @@ class BookshelfBook {
   final int? lastReadChapterIndex;
   final DateTime? lastReadTime;
   final DateTime addedTime;
+  final int totalChapters;
+  final int? latestRemoteChapters;
+  final bool hasUpdate;
+  final DateTime? lastCheckedTime;
 
   BookshelfBook({
     required this.bookId,
@@ -28,6 +32,10 @@ class BookshelfBook {
     this.lastReadChapterIndex,
     this.lastReadTime,
     DateTime? addedTime,
+    this.totalChapters = 0,
+    this.latestRemoteChapters,
+    this.hasUpdate = false,
+    this.lastCheckedTime,
   }) : addedTime = addedTime ?? DateTime.now();
 
   factory BookshelfBook.fromBook(
@@ -35,6 +43,7 @@ class BookshelfBook {
     int? chapterIndex,
     String? chapterTitle,
     DateTime? readTime,
+    int totalChapters = 0,
   }) {
     return BookshelfBook(
       bookId: book.bookId,
@@ -49,6 +58,8 @@ class BookshelfBook {
       lastReadChapterTitle: chapterTitle,
       lastReadTime: readTime,
       addedTime: DateTime.now(),
+      totalChapters: totalChapters,
+      hasUpdate: false,
     );
   }
 
@@ -69,6 +80,10 @@ class BookshelfBook {
     String? lastReadChapterTitle,
     int? lastReadChapterIndex,
     DateTime? lastReadTime,
+    int? totalChapters,
+    int? latestRemoteChapters,
+    bool? hasUpdate,
+    DateTime? lastCheckedTime,
   }) {
     return BookshelfBook(
       bookId: bookId,
@@ -83,6 +98,10 @@ class BookshelfBook {
       lastReadChapterIndex: lastReadChapterIndex ?? this.lastReadChapterIndex,
       lastReadTime: lastReadTime ?? this.lastReadTime,
       addedTime: addedTime,
+      totalChapters: totalChapters ?? this.totalChapters,
+      latestRemoteChapters: latestRemoteChapters ?? this.latestRemoteChapters,
+      hasUpdate: hasUpdate ?? this.hasUpdate,
+      lastCheckedTime: lastCheckedTime ?? this.lastCheckedTime,
     );
   }
 
@@ -100,6 +119,10 @@ class BookshelfBook {
       lastReadChapterIndex: lastReadChapterIndex,
       lastReadTime: lastReadTime,
       addedTime: addedTime,
+      totalChapters: totalChapters,
+      latestRemoteChapters: latestRemoteChapters,
+      hasUpdate: hasUpdate,
+      lastCheckedTime: lastCheckedTime,
     );
   }
 
@@ -117,6 +140,10 @@ class BookshelfBook {
       'last_read_chapter_index': lastReadChapterIndex,
       'last_read_time': lastReadTime?.toIso8601String(),
       'added_time': addedTime.toIso8601String(),
+      'total_chapters': totalChapters,
+      'latest_remote_chapters': latestRemoteChapters,
+      'has_update': hasUpdate,
+      'last_checked_time': lastCheckedTime?.toIso8601String(),
     };
   }
 
@@ -140,6 +167,16 @@ class BookshelfBook {
       addedTime: json['added_time'] != null
           ? DateTime.tryParse(json['added_time'].toString()) ?? DateTime.now()
           : DateTime.now(),
+      totalChapters: json['total_chapters'] is int
+          ? json['total_chapters'] as int
+          : int.tryParse(json['total_chapters']?.toString() ?? '0') ?? 0,
+      latestRemoteChapters: json['latest_remote_chapters'] is int
+          ? json['latest_remote_chapters'] as int
+          : int.tryParse(json['latest_remote_chapters']?.toString() ?? ''),
+      hasUpdate: json['has_update'] == true,
+      lastCheckedTime: json['last_checked_time'] != null
+          ? DateTime.tryParse(json['last_checked_time'].toString())
+          : null,
     );
   }
 }

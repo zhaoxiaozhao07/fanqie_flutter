@@ -164,6 +164,9 @@ class BookshelfScreenState extends State<BookshelfScreen> {
 
     // 2. 针对依然没有有效封面的早期历史数据，静默后台搜索补全并持久化
     _autoFetchMissingCovers(shelfList, downloads);
+
+    // 3. 静默检测连载追更更新
+    _bookshelfService.checkBookshelfUpdates();
   }
 
   /// 安全的 URL 清洗（升级协议为 https，保留完整有效链接）
@@ -329,6 +332,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
   /// 阅读书架中的书籍
   Future<void> _continueReading(BookshelfBook shelfBook) async {
     final book = shelfBook.toBook();
+    _bookshelfService.clearBookUpdateBadge(shelfBook.bookId);
 
     showDialog(
       context: context,
@@ -371,6 +375,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
 
   /// 跳转到书籍详情页
   void _openBookDetail(Book book) {
+    _bookshelfService.clearBookUpdateBadge(book.bookId);
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => BookDetailScreen(book: book)),
@@ -677,7 +682,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     }
 
     return RefreshIndicator(
-      onRefresh: () => _loadData(silent: false),
+      onRefresh: () async {
+        await _bookshelfService.checkBookshelfUpdates(force: true);
+        await _loadData(silent: true);
+      },
       child: _viewMode == BookshelfViewMode.grid3
           ? _buildFavoritesGrid()
           : _buildFavoritesList(),
@@ -728,18 +736,45 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                       _continueReading(shelfBook);
                     }
                   },
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: SizedBox(
-                      width: 52,
-                      height: 74,
-                      child: BookCoverWidget(
-                        bookId: shelfBook.bookId,
-                        bookName: shelfBook.bookName,
-                        thumbUrl: shelfBook.thumbUrl,
-                        iconSize: 22,
+                  child: Stack(
+                    children: [
+                      ClipRRect(
+                        borderRadius: BorderRadius.circular(6),
+                        child: SizedBox(
+                          width: 52,
+                          height: 74,
+                          child: BookCoverWidget(
+                            bookId: shelfBook.bookId,
+                            bookName: shelfBook.bookName,
+                            thumbUrl: shelfBook.thumbUrl,
+                            iconSize: 22,
+                          ),
+                        ),
                       ),
-                    ),
+                      if (shelfBook.hasUpdate)
+                        Positioned(
+                          top: 0,
+                          right: 0,
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                            decoration: const BoxDecoration(
+                              color: Colors.redAccent,
+                              borderRadius: BorderRadius.only(
+                                topRight: Radius.circular(6),
+                                bottomLeft: Radius.circular(6),
+                              ),
+                            ),
+                            child: const Text(
+                              '更新',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 9,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
                   ),
                 ),
               ],
@@ -933,6 +968,30 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                                 isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
                                 size: 24,
                                 color: isSelected ? AppTheme.primaryColor : Colors.grey,
+                              ),
+                            ),
+                          ),
+                        // 追更红点徽标
+                        if (!_isSelectionMode && shelfBook.hasUpdate)
+                          Positioned(
+                            top: 4,
+                            right: 4,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: Colors.redAccent,
+                                borderRadius: BorderRadius.circular(6),
+                                boxShadow: [
+                                  BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 4),
+                                ],
+                              ),
+                              child: const Text(
+                                '更新',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.bold,
+                                ),
                               ),
                             ),
                           ),
