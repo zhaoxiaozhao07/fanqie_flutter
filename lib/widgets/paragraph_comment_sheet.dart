@@ -10,6 +10,7 @@ class ParagraphCommentSheet extends StatefulWidget {
   final String paraText;
   final String chapterTitle;
   final bool isBookReview;
+  final bool isChapterComment;
   final Color backgroundColor;
   final Color textColor;
   final Color secondaryColor;
@@ -24,6 +25,7 @@ class ParagraphCommentSheet extends StatefulWidget {
     required this.paraText,
     required this.chapterTitle,
     this.isBookReview = false,
+    this.isChapterComment = false,
     required this.backgroundColor,
     required this.textColor,
     required this.secondaryColor,
@@ -39,6 +41,7 @@ class ParagraphCommentSheet extends StatefulWidget {
     required String paraText,
     required String chapterTitle,
     bool isBookReview = false,
+    bool isChapterComment = false,
     required Color backgroundColor,
     required Color textColor,
     required Color secondaryColor,
@@ -56,6 +59,7 @@ class ParagraphCommentSheet extends StatefulWidget {
         paraText: paraText,
         chapterTitle: chapterTitle,
         isBookReview: isBookReview,
+        isChapterComment: isChapterComment,
         backgroundColor: backgroundColor,
         textColor: textColor,
         secondaryColor: secondaryColor,
@@ -125,6 +129,12 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
           widget.bookId,
           sort: _currentSort,
         );
+      } else if (widget.isChapterComment) {
+        result = await _apiService.getChapterComments(
+          widget.bookId,
+          widget.chapterId,
+          offset: 0,
+        );
       } else {
         result = await _apiService.getParagraphComments(
           widget.bookId,
@@ -143,7 +153,7 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             _hasMore = result.hasMore;
             _totalCount = result.total;
           } else {
-            _errorMessage = '暂无段评内容或网络连接不可用';
+            _errorMessage = widget.isChapterComment ? '本章暂无评论' : '暂无评论内容或网络不可用';
           }
         });
       }
@@ -171,6 +181,12 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
           widget.bookId,
           sort: _currentSort,
           cursor: _cursor,
+        );
+      } else if (widget.isChapterComment) {
+        result = await _apiService.getChapterComments(
+          widget.bookId,
+          widget.chapterId,
+          offset: int.tryParse(_cursor) ?? _comments.length,
         );
       } else {
         result = await _apiService.getParagraphComments(
@@ -386,7 +402,9 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
                   Text(
                     widget.isBookReview
                         ? '书籍评价'
-                        : (widget.paraIndex == null ? '本章段评' : '第 ${widget.paraIndex! + 1} 段评论'),
+                        : (widget.isChapterComment
+                            ? '本章评论'
+                            : (widget.paraIndex == null ? '本章段评' : '第 ${widget.paraIndex! + 1} 段评论')),
                     style: TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.bold,

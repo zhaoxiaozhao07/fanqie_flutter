@@ -589,6 +589,101 @@ class FanqieMobileGateway {
     return null;
   }
 
+  /// 1.1 获取本章评论（章节维度评论 / 章评，来自 /reading/ugc/novel_comment/item/v/）
+  Future<CommentPageData?> fetchChapterComments(
+    String bookId,
+    String itemId, {
+    int offset = 0,
+    int count = 20,
+  }) async {
+    final cleanItemId = itemId.trim();
+    final cleanBookId = bookId.trim();
+    if (cleanItemId.isEmpty) return null;
+
+    final queryParams = _buildCommonParams(extra: {
+      'item_id': cleanItemId,
+      'book_id': cleanBookId,
+      'count': count.clamp(1, 50).toString(),
+      'offset': offset.toString(),
+    });
+
+    final uri = Uri.https('reading.snssdk.com', '/reading/ugc/novel_comment/item/v/', queryParams);
+    final sigHeaders = signRequest(uri.toString());
+
+    try {
+      final req = await _client.getUrl(uri).timeout(const Duration(seconds: 10));
+      req.headers.set('User-Agent', userAgent);
+      for (final e in sigHeaders.entries) {
+        req.headers.set(e.key, e.value);
+      }
+
+      final res = await req.close().timeout(const Duration(seconds: 10));
+      if (res.statusCode == 200) {
+        final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
+        final jsonStr = utf8.decode(respBytes, allowMalformed: true);
+        if (jsonStr.isNotEmpty) {
+          final j = jsonDecode(jsonStr);
+          if (j is Map && (j['code'] == 0 || j['status_code'] == 0) && j['data'] is Map) {
+            final d = j['data'] as Map;
+            final commentList = d['comment'] as List<dynamic>? ?? const [];
+            final total = int.tryParse(d['comment_cnt']?.toString() ?? '') ??
+                int.tryParse(d['show_comment_cnt']?.toString() ?? '') ??
+                commentList.length;
+            final hasMore = d['has_more'] == true;
+            final nextOffset = d['next_offset']?.toString() ?? '';
+
+            final comments = <CommentItem>[];
+            for (final c in commentList) {
+              if (c is! Map) continue;
+              final cid = c['comment_id']?.toString() ?? '';
+              if (cid.isEmpty) continue;
+
+              final userInfo = c['user_info'] is Map ? c['user_info'] as Map : const {};
+              final userTag = userInfo['user_tag'] is Map ? userInfo['user_tag'] as Map : const {};
+              final rawImages = c['image_data_list'] ?? c['image_data'] ?? c['images'];
+              final images = extractCommentImages(rawImages);
+              final titles = extractUserTitles(userTag);
+              final rawAvatar = userInfo['user_avatar']?.toString() ?? '';
+              final avatar = cleanCommentImageUrl(rawAvatar, targetWidth: 144);
+
+              comments.add(
+                CommentItem(
+                  id: cid,
+                  bookId: cleanBookId,
+                  chapterId: cleanItemId,
+                  paraIndex: 0,
+                  userName: userInfo['user_name']?.toString() ?? '书友',
+                  userId: userInfo['user_id']?.toString() ?? '',
+                  avatar: avatar,
+                  isAuthor: userTag['is_author'] == true,
+                  isVip: userTag['is_vip'] == true || userTag['is_blue_vip'] == true,
+                  titles: titles,
+                  text: c['text']?.toString() ?? '',
+                  images: images,
+                  createTime: int.tryParse(c['create_timestamp']?.toString() ?? '') ?? 0,
+                  diggCount: int.tryParse(c['digg_count']?.toString() ?? '') ?? 0,
+                  replyCount: int.tryParse(c['reply_count']?.toString() ?? '') ?? 0,
+                ),
+              );
+            }
+
+            return CommentPageData(
+              comments: comments,
+              cursor: nextOffset,
+              hasMore: hasMore,
+              total: total,
+            );
+          }
+        }
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('FanqieMobileGateway fetchChapterComments error: $e');
+      }
+    }
+    return null;
+  }
+
   /// 2. 获取指定段落的评论列表 (comment/list)
   /// 当 paraIndex 为 null 时，拉取整章所有段落的热门/最新评论汇总
   Future<CommentPageData?> fetchParagraphComments(

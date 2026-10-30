@@ -175,6 +175,18 @@ void main() {
         expect(allComments.comments.first.text, isNotEmpty);
       }
 
+      // 测试真实本章评论接口 (章评，非段评)
+      final chapterComments = await apiService.getChapterComments(
+        '7069948840148732967',
+        '7202445625546736180',
+        count: 5,
+      );
+      if (chapterComments != null && chapterComments.comments.isNotEmpty) {
+        expect(chapterComments.comments.first.id, isNotEmpty);
+        expect(chapterComments.comments.first.text, isNotEmpty);
+        expect(chapterComments.total, greaterThanOrEqualTo(1));
+      }
+
       // 测试正常书籍的书评拉取 (部族荣光)
       final reviews = await apiService.getBookReviews('7069948840148732967', count: 5);
       if (reviews != null && reviews.comments.isNotEmpty) {

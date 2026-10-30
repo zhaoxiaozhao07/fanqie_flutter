@@ -263,6 +263,64 @@ class ApiService {
     return null;
   }
 
+  /// 获取本章评论（章节末尾的独立章评 / 章节讨论）
+  Future<CommentPageData?> getChapterComments(
+    String bookId,
+    String itemId, {
+    int offset = 0,
+    int count = 20,
+  }) async {
+    final cleanItemId = itemId.trim();
+    final cleanBookId = bookId.trim();
+
+    // 1. 尝试在线获取
+    try {
+      final page = await _mobileGateway.fetchChapterComments(
+        cleanBookId,
+        cleanItemId,
+        offset: offset,
+        count: count,
+      );
+      if (page != null) {
+        if (offset == 0) {
+          _saveChapterCommentsToDisk(cleanBookId, cleanItemId, page);
+        }
+        return page;
+      }
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('获取本章评论失败，尝试离线缓存: $e');
+      }
+    }
+
+    // 2. 离线回退
+    if (offset == 0) {
+      return _loadChapterCommentsFromDisk(cleanBookId, cleanItemId);
+    }
+    return null;
+  }
+
+  void _saveChapterCommentsToDisk(String bookId, String itemId, CommentPageData page) async {
+    try {
+      final jsonStr = jsonEncode(page.toJson());
+      final dir = await _getCommentCacheDir(bookId: bookId);
+      final file = File('${dir.path}/chapter_${itemId}_comments.json');
+      await file.writeAsString(jsonStr);
+    } catch (_) {}
+  }
+
+  Future<CommentPageData?> _loadChapterCommentsFromDisk(String bookId, String itemId) async {
+    try {
+      final dir = await _getCommentCacheDir(bookId: bookId);
+      final file = File('${dir.path}/chapter_${itemId}_comments.json');
+      if (await file.exists()) {
+        final content = await file.readAsString();
+        return CommentPageData.fromJson(jsonDecode(content));
+      }
+    } catch (_) {}
+    return null;
+  }
+
   /// 获取指定段落评论列表（支持离线缓存回退）
   /// 当 paraIndex 为 null 时获取全章综合段评
   Future<CommentPageData?> getParagraphComments(

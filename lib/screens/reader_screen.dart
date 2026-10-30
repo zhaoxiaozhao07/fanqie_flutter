@@ -66,6 +66,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
   // 章节段评统计缓存 (itemId -> stats)
   final Map<String, ChapterCommentStats> _chapterCommentStats = {};
+  // 真实本章评论总数 (itemId -> count)
+  final Map<String, int> _chapterCommentsCount = {};
   // 定位原文时高亮提示的目标段落 key
   String? _highlightedParagraphKey;
   Timer? _highlightTimer;
@@ -517,6 +519,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _chapterCache[index] = _formatContent(content, chapterTitle: chapter.title);
       _chapterIsOffline[index] = true;
       _fetchCommentStats(chapter.itemId);
+      _fetchChapterCommentsCount(chapter.itemId);
     }
   }
 
@@ -531,6 +534,23 @@ class _ReaderScreenState extends State<ReaderScreen> {
       if (stats != null && mounted) {
         setState(() {
           _chapterCommentStats[itemId] = stats;
+        });
+      }
+    } catch (_) {}
+  }
+
+  /// 异步拉取真实章节评论数量 (章评，非段落评论)
+  void _fetchChapterCommentsCount(String itemId) async {
+    if (_chapterCommentsCount.containsKey(itemId)) return;
+    try {
+      final data = await _apiService.getChapterComments(
+        widget.book.bookId,
+        itemId,
+        count: 1,
+      );
+      if (data != null && mounted) {
+        setState(() {
+          _chapterCommentsCount[itemId] = data.total;
         });
       }
     } catch (_) {}
@@ -1575,26 +1595,23 @@ class _ReaderScreenState extends State<ReaderScreen> {
   /// 显示本章段评概览
   void _openChapterComments(Chapter chapter) {
     final theme = _themes[_themeIndex];
-    final chapterIdx = widget.chapters.indexOf(chapter);
     ParagraphCommentSheet.show(
       context: context,
       bookId: widget.book.bookId,
       chapterId: chapter.itemId,
-      paraIndex: null, // 为 null 时拉取本章所有段落的热门评论
+      isChapterComment: true, // 明确为真实本章评论
       paraText: '',
       chapterTitle: chapter.title,
       backgroundColor: theme.backgroundColor,
       textColor: theme.textColor,
       secondaryColor: theme.secondaryColor,
       highlightColor: theme.highlightColor,
-      onLocateParagraph: chapterIdx >= 0 ? () => _startFromChapter(chapterIdx) : null,
     );
   }
 
-  /// 构建章节末尾的“本章完”分割与段评入口
+  /// 构建章节末尾的“本章完”分割与真实本章评论入口
   Widget _buildChapterEndComments(Chapter chapter, ReaderTheme theme) {
-    final stats = _chapterCommentStats[chapter.itemId];
-    final total = stats?.totalCount ?? 0;
+    final total = _chapterCommentsCount[chapter.itemId] ?? 0;
     final isDark = theme.backgroundColor.computeLuminance() < 0.2;
 
     return Column(
@@ -1629,7 +1646,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         ),
         const SizedBox(height: 16),
 
-        // 本章段评快捷入口卡片
+        // 真实本章评论入口卡片
         Center(
           child: InkWell(
             onTap: () => _openChapterComments(chapter),
@@ -1656,7 +1673,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   ),
                   const SizedBox(width: 8),
                   Text(
-                    total > 0 ? '本章段评 ($total条讨论)' : '本章段评',
+                    total > 0 ? '本章评论 ($total条讨论)' : '本章评论',
                     style: TextStyle(
                       fontSize: 13,
                       fontWeight: FontWeight.w600,
