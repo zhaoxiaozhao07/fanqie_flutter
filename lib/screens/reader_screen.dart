@@ -2833,7 +2833,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final firstPageTitleOccupied = titlePainter.height + 10.0;
     final firstPageAvailHeight = (normalAvailHeight - firstPageTitleOccupied).clamp(100.0, 4000.0);
 
-    final paginateKey = '\${_currentActiveIndex}_\${size.width}_\${size.height}_\${_fontSize}_\${_lineHeight}_\${_letterSpacing}_\${_fontFamily}_\${_indentTwoChars}_\${_paragraphSpacing}_\${_horizontalPadding}_\${content.length}';
+    final paginateKey = '${_currentActiveIndex}_${size.width}_${size.height}_${_fontSize}_${_lineHeight}_${_letterSpacing}_${_fontFamily}_${_indentTwoChars}_${_paragraphSpacing}_${_horizontalPadding}_${content.length}';
     if (paginateKey == _lastPaginateKey && _cachedPaginatedPages.isNotEmpty) {
       return _cachedPaginatedPages;
     }
@@ -2865,7 +2865,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       var trimmed = para.trim();
       if (trimmed.isEmpty) continue;
       var text = _indentTwoChars
-          ? (trimmed.startsWith('\u3000\u3000') ? trimmed : '\u3000\u3000\$trimmed')
+          ? (trimmed.startsWith('\u3000\u3000') ? trimmed : '\u3000\u3000$trimmed')
           : trimmed;
 
       while (text.isNotEmpty) {

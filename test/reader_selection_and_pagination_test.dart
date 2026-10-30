@@ -261,6 +261,8 @@ void main() {
       expect(pages.length >= 3, isTrue);
 
       for (int p = 0; p < pages.length - 1; p++) {
+        expect(pages[p].contains(r'$trimmed'), isFalse);
+        expect(pages[p].contains('夜幕降临'), isTrue);
         final paras = pages[p].split('\n\n');
         double h = 0.0;
         for (int i = 0; i < paras.length; i++) {
