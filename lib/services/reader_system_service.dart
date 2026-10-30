@@ -2,6 +2,8 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+import '../services/tts_service.dart';
+
 /// 阅读器系统级辅助服务（屏幕常亮、电量获取）
 class ReaderSystemService {
   static const MethodChannel _channel = MethodChannel('com.fanqie.fanqie_flutter/download');
@@ -20,6 +22,14 @@ class ReaderSystemService {
         _volumeKeyCallback?.call(dir);
       } else if (call.method.startsWith('onTts') || call.method.startsWith('onAudio')) {
         _ttsCallback?.call(call.method, call.arguments);
+      } else if (call.method == 'onMediaPlay') {
+        TtsService().resume();
+      } else if (call.method == 'onMediaPause') {
+        TtsService().pause();
+      } else if (call.method == 'onMediaNext') {
+        TtsService().nextChunk();
+      } else if (call.method == 'onMediaPrev') {
+        TtsService().previousChunk();
       }
     });
   }
@@ -65,5 +75,20 @@ class ReaderSystemService {
     } catch (e) {
       return -1;
     }
+  }
+
+  /// 更新系统锁屏媒体中心播控信息与状态通知
+  static Future<void> updateMediaPlaybackState({
+    required String title,
+    required String subtitle,
+    required bool isPlaying,
+  }) async {
+    try {
+      await _channel.invokeMethod('updateMediaPlaybackState', {
+        'title': title,
+        'subtitle': subtitle,
+        'isPlaying': isPlaying,
+      });
+    } catch (_) {}
   }
 }

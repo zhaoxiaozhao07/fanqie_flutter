@@ -86,9 +86,20 @@ class TtsPlayerPanel extends StatelessWidget {
                     // 定时按钮
                     IconButton(
                       icon: Badge(
-                        isLabelVisible: ttsService.timerRemainingMinutes > 0,
-                        label: Text('${ttsService.timerRemainingMinutes}m', style: const TextStyle(fontSize: 9)),
-                        child: const Icon(Icons.timer_outlined, size: 22, color: AppTheme.textSecondary),
+                        isLabelVisible: ttsService.timerRemainingMinutes > 0 || ttsService.stopAfterCurrentChapter,
+                        label: Text(
+                          ttsService.stopAfterCurrentChapter
+                              ? '本章止'
+                              : '${ttsService.timerRemainingMinutes}m',
+                          style: const TextStyle(fontSize: 8),
+                        ),
+                        child: Icon(
+                          Icons.timer_outlined,
+                          size: 22,
+                          color: ttsService.stopAfterCurrentChapter || ttsService.timerRemainingMinutes > 0
+                              ? AppTheme.primaryColor
+                              : AppTheme.textSecondary,
+                        ),
                       ),
                       tooltip: '定时停止',
                       onPressed: () => _showSleepTimerDialog(context, ttsService),
@@ -149,12 +160,30 @@ class TtsPlayerPanel extends StatelessWidget {
           SimpleDialogOption(
             onPressed: () {
               tts.setSleepTimer(0);
+              tts.setStopAfterCurrentChapter(false);
               Navigator.pop(ctx);
             },
             child: const Text('不开启定时'),
           ),
           SimpleDialogOption(
             onPressed: () {
+              tts.setSleepTimer(0);
+              tts.setStopAfterCurrentChapter(true);
+              Navigator.pop(ctx);
+            },
+            child: Row(
+              children: [
+                const Text('读完本章后停止'),
+                if (tts.stopAfterCurrentChapter) ...[
+                  const Spacer(),
+                  const Icon(Icons.check, size: 18, color: AppTheme.primaryColor),
+                ],
+              ],
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () {
+              tts.setStopAfterCurrentChapter(false);
               tts.setSleepTimer(15);
               Navigator.pop(ctx);
             },
@@ -162,6 +191,7 @@ class TtsPlayerPanel extends StatelessWidget {
           ),
           SimpleDialogOption(
             onPressed: () {
+              tts.setStopAfterCurrentChapter(false);
               tts.setSleepTimer(30);
               Navigator.pop(ctx);
             },
@@ -169,6 +199,7 @@ class TtsPlayerPanel extends StatelessWidget {
           ),
           SimpleDialogOption(
             onPressed: () {
+              tts.setStopAfterCurrentChapter(false);
               tts.setSleepTimer(60);
               Navigator.pop(ctx);
             },

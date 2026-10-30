@@ -86,6 +86,26 @@ class TtsService extends ChangeNotifier {
   Timer? _stopTimer;
   int _timerRemainingMinutes = 0;
   int get timerRemainingMinutes => _timerRemainingMinutes;
+  bool _stopAfterCurrentChapter = false;
+  bool get stopAfterCurrentChapter => _stopAfterCurrentChapter;
+
+  void setStopAfterCurrentChapter(bool value) {
+    _stopAfterCurrentChapter = value;
+    notifyListeners();
+  }
+
+  void toggleStopAfterCurrentChapter() {
+    _stopAfterCurrentChapter = !_stopAfterCurrentChapter;
+    notifyListeners();
+  }
+
+  void _syncMediaState(bool isPlaying) {
+    ReaderSystemService.updateMediaPlaybackState(
+      title: _currentChapterTitle.isNotEmpty ? _currentChapterTitle : '听书朗读',
+      subtitle: currentText,
+      isPlaying: isPlaying,
+    );
+  }
 
   // 播放看门狗超时定时器（防止极端异常下漏掉回调导致播放停滞）
   Timer? _watchdogTimer;
@@ -222,6 +242,12 @@ class TtsService extends ChangeNotifier {
       _state = TtsPlayState.stopped;
       _watchdogTimer?.cancel();
       notifyListeners();
+      _syncMediaState(false);
+      if (_stopAfterCurrentChapter) {
+        _stopAfterCurrentChapter = false;
+        stop();
+        return;
+      }
       onChapterComplete?.call(_currentIndex);
       return;
     }
@@ -256,11 +282,13 @@ class TtsService extends ChangeNotifier {
       if (audioPath != null && File(audioPath).existsSync()) {
         _state = TtsPlayState.playing;
         notifyListeners();
+        _syncMediaState(true);
         await _channel.invokeMethod('playAudioFile', {'filePath': audioPath});
       } else {
         // OpenAI TTS 获取失败，自动容错降级使用原生发音
         _state = TtsPlayState.playing;
         notifyListeners();
+        _syncMediaState(true);
         await _channel.invokeMethod('speakNativeTts', {
           'text': chunk.text,
           'rate': _speechRate,
@@ -271,6 +299,7 @@ class TtsService extends ChangeNotifier {
       // 2. 原生系统 TTS 播放
       _state = TtsPlayState.playing;
       notifyListeners();
+        _syncMediaState(true);
       await _channel.invokeMethod('speakNativeTts', {
         'text': chunk.text,
         'rate': _speechRate,
@@ -354,6 +383,12 @@ class TtsService extends ChangeNotifier {
     } else {
       _state = TtsPlayState.stopped;
       notifyListeners();
+      _syncMediaState(false);
+      if (_stopAfterCurrentChapter) {
+        _stopAfterCurrentChapter = false;
+        stop();
+        return;
+      }
       onChapterComplete?.call(_currentIndex);
     }
   }
@@ -364,6 +399,7 @@ class TtsService extends ChangeNotifier {
     if (_state != TtsPlayState.playing) return;
     _state = TtsPlayState.paused;
     notifyListeners();
+    _syncMediaState(false);
 
     if (_engineType == TtsEngineType.openAi) {
       await _channel.invokeMethod('pauseAudio');
@@ -377,6 +413,7 @@ class TtsService extends ChangeNotifier {
     if (_state != TtsPlayState.paused) return;
     _state = TtsPlayState.playing;
     notifyListeners();
+    _syncMediaState(true);
 
     if (_engineType == TtsEngineType.openAi) {
       await _channel.invokeMethod('resumeAudio');
@@ -391,7 +428,10 @@ class TtsService extends ChangeNotifier {
     _state = TtsPlayState.stopped;
     _stopTimer?.cancel();
     _timerRemainingMinutes = 0;
+    _stopAfterCurrentChapter = false;
     notifyListeners();
+    _syncMediaState(false);
+    _channel.invokeMethod('setAudioVolume', {'volume': 1.0}).catchError((_) {});
 
     await _channel.invokeMethod('stopNativeTts');
     await _channel.invokeMethod('stopAudio');
@@ -441,9 +481,14 @@ class TtsService extends ChangeNotifier {
         if (_timerRemainingMinutes <= 0) {
           timer.cancel();
           stop();
+        } else if (_timerRemainingMinutes == 1) {
+          // 最后一分钟平滑淡出音量
+          _channel.invokeMethod('setAudioVolume', {'volume': 0.5}).catchError((_) {});
         }
         notifyListeners();
       });
+    } else {
+      _channel.invokeMethod('setAudioVolume', {'volume': 1.0}).catchError((_) {});
     }
   }
 }
