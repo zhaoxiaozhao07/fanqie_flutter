@@ -6,6 +6,7 @@ import '../models/book.dart';
 import '../models/chapter.dart';
 import '../models/comment.dart';
 import '../models/bookmark.dart';
+import 'book_detail_screen.dart';
 import '../services/api_service.dart';
 import '../services/bookshelf_service.dart';
 import '../services/bookmark_service.dart';
@@ -108,6 +109,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
   String _fontFamily = 'system'; // 字体设置
   bool _isPageMode = false; // 双模式切换：水平翻页 vs 连续滚屏
   PageController? _pageController;
+  PageController _pageHorizontalController = PageController();
+  int _currentHorizontalPageIndex = 0;
+  List<ReadingNote> _cachedNotes = [];
+  String _currentSelectedText = '';
 
   // 沉浸式自动滚屏阅读
   bool _isAutoScrolling = false;
@@ -178,6 +183,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _checkBookshelfStatus();
     _checkBookmarkStatus();
     _bookmarkService.changeNotifier.addListener(_checkBookmarkStatus);
+    _loadNotes();
+    _bookmarkService.changeNotifier.addListener(_loadNotes);
     _loadPreferences().then((_) {
       _startFromChapter(_currentActiveIndex);
       ReaderSystemService.setVolumeKeyScrollEnabled(_volumeKeyScroll);
@@ -197,11 +204,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _ttsService.removeListener(_onTtsStateChanged);
     _ttsService.stop();
     _bookmarkService.changeNotifier.removeListener(_checkBookmarkStatus);
+    _bookmarkService.changeNotifier.removeListener(_loadNotes);
     _activeChapterNotifier.dispose();
     _statusTimer?.cancel();
     _highlightTimer?.cancel();
     _autoScrollTimer?.cancel();
     _pageController?.dispose();
+    _pageHorizontalController.dispose();
     ReaderSystemService.setKeepScreenOn(false);
     ReaderSystemService.setVolumeKeyScrollEnabled(false);
     ReaderSystemService.registerVolumeKeyListener(null);
@@ -294,6 +303,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
   }
 
+  Future<void> _loadNotes() async {
+    await _bookmarkService.initialize();
+    final notes = await _bookmarkService.getNotes(widget.book.bookId);
+    if (mounted) {
+      setState(() {
+        _cachedNotes = notes;
+      });
+    }
+  }
+
   Future<void> _toggleBookmark() async {
     final bookmarked = await _bookmarkService.isChapterBookmarked(
       widget.book.bookId,
@@ -326,141 +345,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
       }
     }
     _checkBookmarkStatus();
-  }
-
-  void _showParagraphActionSheet({
-    required Chapter chapter,
-    required int paraIndex,
-    required String text,
-  }) {
-    final theme = _themes[_themeIndex];
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: theme.backgroundColor,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) {
-        return SafeArea(
-          child: Padding(
-            padding: const EdgeInsets.symmetric(vertical: 12),
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
-                  child: Text(
-                    text.length > 60 ? '${text.substring(0, 60)}...' : text,
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: theme.secondaryColor,
-                      fontStyle: FontStyle.italic,
-                    ),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                const Divider(),
-                ListTile(
-                  leading: Icon(Icons.format_paint_outlined,
-                      color: Theme.of(context).primaryColor),
-                  title: Text('高亮划线', style: TextStyle(color: theme.textColor)),
-                  onTap: () async {
-                    Navigator.pop(ctx);
-                    await _bookmarkService.addNote(
-                      bookId: widget.book.bookId,
-                      chapterIndex: _currentActiveIndex,
-                      chapterTitle: chapter.title,
-                      paragraphIndex: paraIndex,
-                      text: text,
-                    );
-                    if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(
-                        const SnackBar(
-                            content: Text('已添加高亮划线'),
-                            duration: Duration(seconds: 1)),
-                      );
-                    }
-                  },
-                ),
-                ListTile(
-                  leading: Icon(Icons.edit_note, color: Theme.of(context).primaryColor),
-                  title: Text('写想法与笔记', style: TextStyle(color: theme.textColor)),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _showAddNoteDialog(
-                        chapter: chapter, paraIndex: paraIndex, text: text);
-                  },
-                ),
-                ListTile(
-                  leading: Icon(Icons.copy, color: theme.secondaryColor),
-                  title: Text('复制文本', style: TextStyle(color: theme.textColor)),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    Clipboard.setData(ClipboardData(text: text));
-                    ScaffoldMessenger.of(context).showSnackBar(
-                      const SnackBar(
-                          content: Text('已复制段落到剪贴板'),
-                          duration: Duration(seconds: 1)),
-                    );
-                  },
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
-  void _showAddNoteDialog({
-    required Chapter chapter,
-    required int paraIndex,
-    required String text,
-  }) {
-    final noteController = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('写阅读笔记'),
-        content: TextField(
-          controller: noteController,
-          maxLines: 4,
-          autofocus: true,
-          decoration: const InputDecoration(
-            hintText: '记录此刻的读后感悟或反思...',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              final note = noteController.text.trim();
-              Navigator.pop(ctx);
-              await _bookmarkService.addNote(
-                bookId: widget.book.bookId,
-                chapterIndex: _currentActiveIndex,
-                chapterTitle: chapter.title,
-                paragraphIndex: paraIndex,
-                text: text,
-                note: note,
-              );
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(
-                      content: Text('笔记保存成功'), duration: Duration(seconds: 1)),
-                );
-              }
-            },
-            child: const Text('保存'),
-          ),
-        ],
-      ),
-    );
   }
 
   Future<void> _loadPreferences() async {
@@ -543,11 +427,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   /// 从指定章节重新开始连续阅读（重置滚动列表）
-  Future<void> _startFromChapter(int index) async {
+  Future<void> _startFromChapter(int index, {bool toLastPage = false}) async {
     if (index < 0 || index >= widget.chapters.length) return;
 
     setState(() {
       _currentActiveIndex = index;
+      _currentHorizontalPageIndex = 0;
       _displayedChapters.clear();
       _isLoadingHead = true;
       _errorMessage = null;
@@ -1281,348 +1166,225 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final currentTheme = _themes[_themeIndex];
     showModalBottomSheet(
       context: context,
-      isScrollControlled: true,
-      backgroundColor: currentTheme.backgroundColor,
+      isScrollControlled: false,
+      barrierColor: Colors.black.withValues(alpha: 0.12),
+      backgroundColor: currentTheme.backgroundColor.withValues(alpha: 0.98),
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
       ),
       builder: (ctx) {
         return StatefulBuilder(
           builder: (context, setModalState) {
-            return Padding(
-              padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
+            return Container(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
               child: SingleChildScrollView(
                 child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Center(
-                    child: Container(
-                      width: 36,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: currentTheme.secondaryColor.withValues(alpha: 0.3),
-                        borderRadius: BorderRadius.circular(2),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Text(
-                    '阅读设置',
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: currentTheme.textColor,
-                    ),
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Text(
-                        '翻页模式',
-                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
-                      ),
-                      const Spacer(),
-                      SegmentedButton<bool>(
-                        segments: const [
-                          ButtonSegment(value: false, label: Text('连续滚屏')),
-                          ButtonSegment(value: true, label: Text('左右翻页')),
-                        ],
-                        selected: {_isPageMode},
-                        showSelectedIcon: false,
-                        onSelectionChanged: (val) {
-                          setState(() {
-                            _isPageMode = val.first;
-                            if (_isPageMode) {
-                              _pageController = PageController(initialPage: _currentActiveIndex);
-                            }
-                          });
-                          setModalState(() {});
-                          _savePreferences();
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Text(
-                        '正文字体',
-                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
-                      ),
-                      const Spacer(),
-                      SegmentedButton<String>(
-                        segments: const [
-                          ButtonSegment(value: 'system', label: Text('系统')),
-                          ButtonSegment(value: 'kaiti', label: Text('楷体')),
-                          ButtonSegment(value: 'serif', label: Text('宋体')),
-                          ButtonSegment(value: 'sans-serif', label: Text('黑体')),
-                        ],
-                        selected: {_fontFamily},
-                        showSelectedIcon: false,
-                        onSelectionChanged: (val) {
-                          setState(() => _fontFamily = val.first);
-                          setModalState(() {});
-                          _savePreferences();
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Text(
-                        '字号',
-                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
-                      ),
-                      const Spacer(),
-                      OutlinedButton(
-                        onPressed: _fontSize > 13
-                            ? () {
-                                setState(() => _fontSize -= 1.0);
-                                setModalState(() {});
-                                _savePreferences();
-                              }
-                            : null,
-                        child: const Text('A -'),
-                      ),
-                      Padding(
-                        padding: const EdgeInsets.symmetric(horizontal: 16),
-                        child: Text(
-                          '${_fontSize.toInt()}',
-                          style: TextStyle(
-                            fontSize: 16,
-                            fontWeight: FontWeight.bold,
-                            color: currentTheme.textColor,
-                          ),
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Center(
+                      child: Container(
+                        width: 32,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: currentTheme.secondaryColor.withValues(alpha: 0.3),
+                          borderRadius: BorderRadius.circular(2),
                         ),
                       ),
-                      OutlinedButton(
-                        onPressed: _fontSize < 28
-                            ? () {
-                                setState(() => _fontSize += 1.0);
-                                setModalState(() {});
+                    ),
+                    const SizedBox(height: 12),
+                    // 1. 翻页模式与首行缩进
+                    Row(
+                      children: [
+                        Text('翻页', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: SegmentedButton<bool>(
+                            segments: const [
+                              ButtonSegment(value: false, label: Text('上下滚动', style: TextStyle(fontSize: 12))),
+                              ButtonSegment(value: true, label: Text('左右翻页', style: TextStyle(fontSize: 12))),
+                            ],
+                            selected: {_isPageMode},
+                            showSelectedIcon: false,
+                            onSelectionChanged: (val) {
+                              setState(() {
+                                _isPageMode = val.first;
+                                _currentHorizontalPageIndex = 0;
+                                _pageHorizontalController = PageController();
                                 _savePreferences();
-                              }
-                            : null,
-                        child: const Text('A +'),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Text(
-                        '行距',
-                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
-                      ),
-                      const Spacer(),
-                      SegmentedButton<double>(
-                        segments: const [
-                          ButtonSegment(value: 1.5, label: Text('紧凑')),
-                          ButtonSegment(value: 1.8, label: Text('适中')),
-                          ButtonSegment(value: 2.2, label: Text('宽松')),
-                        ],
-                        selected: {_lineHeight},
-                        showSelectedIcon: false,
-                        onSelectionChanged: (val) {
-                          setState(() => _lineHeight = val.first);
-                          setModalState(() {});
-                          _savePreferences();
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Text(
-                        '字间距',
-                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
-                      ),
-                      const Spacer(),
-                      SegmentedButton<double>(
-                        segments: const [
-                          ButtonSegment(value: 0.0, label: Text('紧凑')),
-                          ButtonSegment(value: 0.5, label: Text('适中')),
-                          ButtonSegment(value: 1.2, label: Text('宽松')),
-                        ],
-                        selected: {_letterSpacing},
-                        showSelectedIcon: false,
-                        onSelectionChanged: (val) {
-                          setState(() => _letterSpacing = val.first);
-                          setModalState(() {});
-                          _savePreferences();
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Text(
-                        '段落间距',
-                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
-                      ),
-                      const Spacer(),
-                      SegmentedButton<double>(
-                        segments: const [
-                          ButtonSegment(value: 8.0, label: Text('小')),
-                          ButtonSegment(value: 14.0, label: Text('中')),
-                          ButtonSegment(value: 22.0, label: Text('大')),
-                        ],
-                        selected: {_paragraphSpacing},
-                        showSelectedIcon: false,
-                        onSelectionChanged: (val) {
-                          setState(() => _paragraphSpacing = val.first);
-                          setModalState(() {});
-                          _savePreferences();
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Text(
-                        '首行缩进(2字符)',
-                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
-                      ),
-                      const Spacer(),
-                      Switch.adaptive(
-                        value: _indentTwoChars,
-                        activeTrackColor: Theme.of(context).primaryColor,
-                        onChanged: (val) {
-                          setState(() => _indentTwoChars = val);
-                          setModalState(() {});
-                          _savePreferences();
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Text(
-                        '页边距',
-                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
-                      ),
-                      const Spacer(),
-                      SegmentedButton<double>(
-                        segments: const [
-                          ButtonSegment(value: 14.0, label: Text('窄边')),
-                          ButtonSegment(value: 20.0, label: Text('适中')),
-                          ButtonSegment(value: 28.0, label: Text('宽边')),
-                        ],
-                        selected: {_horizontalPadding},
-                        showSelectedIcon: false,
-                        onSelectionChanged: (val) {
-                          setState(() => _horizontalPadding = val.first);
-                          setModalState(() {});
-                          _savePreferences();
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Text(
-                        '音量键翻页滚动',
-                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
-                      ),
-                      const Spacer(),
-                      Switch.adaptive(
-                        value: _volumeKeyScroll,
-                        activeTrackColor: Theme.of(context).primaryColor,
-                        onChanged: (val) {
-                          setState(() => _volumeKeyScroll = val);
-                          setModalState(() {});
-                          _savePreferences();
-                          ReaderSystemService.setVolumeKeyScrollEnabled(val);
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  Row(
-                    children: [
-                      Text(
-                        '段评气泡',
-                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
-                      ),
-                      const Spacer(),
-                      Switch.adaptive(
-                        value: _showCommentBubbles,
-                        activeTrackColor: Theme.of(context).primaryColor,
-                        onChanged: (val) {
-                          setState(() => _showCommentBubbles = val);
-                          setModalState(() {});
-                          _savePreferences();
-                        },
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      Text(
-                        '背景',
-                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
-                      ),
-                      const SizedBox(width: 16),
-                      Expanded(
-                        child: Row(
-                          mainAxisAlignment: MainAxisAlignment.spaceAround,
-                          children: List.generate(_themes.length, (idx) {
-                            final th = _themes[idx];
-                            final isSelected = _themeIndex == idx;
-                            return GestureDetector(
-                              onTap: () {
-                                setState(() => _themeIndex = idx);
-                                setModalState(() {});
-                                _savePreferences();
-                              },
-                              child: Container(
-                                width: 44,
-                                height: 44,
-                                decoration: BoxDecoration(
-                                  color: th.backgroundColor,
-                                  shape: BoxShape.circle,
-                                  border: Border.all(
-                                    color: isSelected
-                                        ? Theme.of(context).primaryColor
-                                        : Colors.grey.shade400,
-                                    width: isSelected ? 2.5 : 1.0,
+                              });
+                              setModalState(() {});
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 12),
+                        Text('缩进', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
+                        Switch.adaptive(
+                          value: _indentTwoChars,
+                          activeTrackColor: Theme.of(context).primaryColor,
+                          onChanged: (val) {
+                            setState(() => _indentTwoChars = val);
+                            setModalState(() {});
+                            _savePreferences();
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    // 2. 字号与字间距
+                    Row(
+                      children: [
+                        Text('字号', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          onPressed: _fontSize > 13
+                              ? () {
+                                  setState(() => _fontSize -= 1.0);
+                                  setModalState(() {});
+                                  _savePreferences();
+                                }
+                              : null,
+                          child: const Text('A -'),
+                        ),
+                        Padding(
+                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          child: Text(
+                            '${_fontSize.toInt()}',
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.bold,
+                              color: currentTheme.textColor,
+                            ),
+                          ),
+                        ),
+                        OutlinedButton(
+                          onPressed: _fontSize < 28
+                              ? () {
+                                  setState(() => _fontSize += 1.0);
+                                  setModalState(() {});
+                                  _savePreferences();
+                                }
+                              : null,
+                          child: const Text('A +'),
+                        ),
+                        const Spacer(),
+                        Text('字距', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
+                        const SizedBox(width: 6),
+                        SegmentedButton<double>(
+                          segments: const [
+                            ButtonSegment(value: 0.0, label: Text('小', style: TextStyle(fontSize: 11))),
+                            ButtonSegment(value: 0.5, label: Text('中', style: TextStyle(fontSize: 11))),
+                            ButtonSegment(value: 1.2, label: Text('大', style: TextStyle(fontSize: 11))),
+                          ],
+                          selected: {_letterSpacing},
+                          showSelectedIcon: false,
+                          onSelectionChanged: (val) {
+                            setState(() => _letterSpacing = val.first);
+                            setModalState(() {});
+                            _savePreferences();
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 10),
+                    // 3. 字体与行距
+                    Row(
+                      children: [
+                        Text('字体', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: SegmentedButton<String>(
+                            segments: const [
+                              ButtonSegment(value: 'system', label: Text('默认', style: TextStyle(fontSize: 11))),
+                              ButtonSegment(value: 'kaiti', label: Text('楷体', style: TextStyle(fontSize: 11))),
+                              ButtonSegment(value: 'serif', label: Text('宋体', style: TextStyle(fontSize: 11))),
+                              ButtonSegment(value: 'sans-serif', label: Text('黑体', style: TextStyle(fontSize: 11))),
+                            ],
+                            selected: {_fontFamily},
+                            showSelectedIcon: false,
+                            onSelectionChanged: (val) {
+                              setState(() => _fontFamily = val.first);
+                              setModalState(() {});
+                              _savePreferences();
+                            },
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text('行距', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
+                        const SizedBox(width: 6),
+                        SegmentedButton<double>(
+                          segments: const [
+                            ButtonSegment(value: 1.5, label: Text('紧', style: TextStyle(fontSize: 11))),
+                            ButtonSegment(value: 1.8, label: Text('中', style: TextStyle(fontSize: 11))),
+                            ButtonSegment(value: 2.2, label: Text('松', style: TextStyle(fontSize: 11))),
+                          ],
+                          selected: {_lineHeight},
+                          showSelectedIcon: false,
+                          onSelectionChanged: (val) {
+                            setState(() => _lineHeight = val.first);
+                            setModalState(() {});
+                            _savePreferences();
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    // 4. 背景主题
+                    Row(
+                      children: [
+                        Text('背景', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceAround,
+                            children: List.generate(_themes.length, (idx) {
+                              final th = _themes[idx];
+                              final isSelected = _themeIndex == idx;
+                              return GestureDetector(
+                                onTap: () {
+                                  setState(() => _themeIndex = idx);
+                                  setModalState(() {});
+                                  _savePreferences();
+                                },
+                                child: Container(
+                                  width: 34,
+                                  height: 34,
+                                  decoration: BoxDecoration(
+                                    color: th.backgroundColor,
+                                    shape: BoxShape.circle,
+                                    border: Border.all(
+                                      color: isSelected
+                                          ? Theme.of(context).primaryColor
+                                          : Colors.grey.shade400,
+                                      width: isSelected ? 2.5 : 1.0,
+                                    ),
+                                    boxShadow: isSelected
+                                        ? [
+                                            BoxShadow(
+                                              color: Colors.black.withValues(alpha: 0.15),
+                                              blurRadius: 4,
+                                              offset: const Offset(0, 2),
+                                            )
+                                          ]
+                                        : null,
                                   ),
-                                  boxShadow: isSelected
-                                      ? [
-                                          BoxShadow(
-                                            color: Colors.black.withValues(alpha: 0.15),
-                                            blurRadius: 4,
-                                            offset: const Offset(0, 2),
-                                          )
-                                        ]
-                                      : null,
-                                ),
-                                child: Center(
-                                  child: Text(
-                                    th.name.substring(0, 1),
-                                    style: TextStyle(
-                                      color: th.textColor,
-                                      fontWeight: FontWeight.bold,
-                                      fontSize: 13,
+                                  child: Center(
+                                    child: Text(
+                                      th.name.substring(0, 1),
+                                      style: TextStyle(
+                                        color: th.textColor,
+                                        fontWeight: FontWeight.bold,
+                                        fontSize: 12,
+                                      ),
                                     ),
                                   ),
                                 ),
-                              ),
-                            );
-                          }),
+                              );
+                            }),
+                          ),
                         ),
-                      ),
-                    ],
-                  ),
-                ],
+                      ],
+                    ),
+                  ],
                 ),
               ),
             );
@@ -1792,104 +1554,112 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
-    // 双模式切换：左右翻页模式
+    // 双模式切换：左右单屏翻页模式 (完全无任何垂直滑动冲突)
     if (_isPageMode) {
       return _buildPageModeBody(theme);
     }
 
-    return Scrollbar(
-      controller: _scrollController,
-      child: SingleChildScrollView(
+    return SelectionArea(
+      onSelectionChanged: (content) {
+        _currentSelectedText = content?.plainText ?? '';
+      },
+      contextMenuBuilder: (context, selectableRegionState) {
+        return _buildSelectionBubbleMenu(context, selectableRegionState, theme);
+      },
+      child: Scrollbar(
         controller: _scrollController,
-        padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 12),
-        physics: const BouncingScrollPhysics(),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            // 顶部上一章指示器/触发器
-            if (_displayedChapters.isNotEmpty && _displayedChapters.first > 0)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 16),
-                child: Center(
-                  child: TextButton.icon(
-                    onPressed: _isLoadingPrev ? null : _autoPrependPreviousChapter,
-                    icon: _isLoadingPrev
-                        ? SizedBox(
-                            width: 14,
-                            height: 14,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor: AlwaysStoppedAnimation<Color>(
-                                theme.secondaryColor.withValues(alpha: 0.6),
+        child: SingleChildScrollView(
+          controller: _scrollController,
+          padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 12),
+          physics: const BouncingScrollPhysics(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 顶部上一章指示器/触发器
+              if (_displayedChapters.isNotEmpty && _displayedChapters.first > 0)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  child: Center(
+                    child: TextButton.icon(
+                      onPressed: _isLoadingPrev ? null : _autoPrependPreviousChapter,
+                      icon: _isLoadingPrev
+                          ? SizedBox(
+                              width: 14,
+                              height: 14,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor: AlwaysStoppedAnimation<Color>(
+                                  theme.secondaryColor.withValues(alpha: 0.6),
+                                ),
                               ),
-                            ),
-                          )
-                        : Icon(Icons.arrow_upward_rounded, size: 16, color: theme.secondaryColor),
-                    label: Text(
-                      _isLoadingPrev
-                          ? '正在加载上一章...'
-                          : '上滑或点击加载：${widget.chapters[_displayedChapters.first - 1].title}',
-                      style: TextStyle(fontSize: 12, color: theme.secondaryColor),
+                            )
+                          : Icon(Icons.arrow_upward_rounded, size: 16, color: theme.secondaryColor),
+                      label: Text(
+                        _isLoadingPrev
+                            ? '正在加载上一章...'
+                            : '上滑或点击加载：${widget.chapters[_displayedChapters.first - 1].title}',
+                        style: TextStyle(fontSize: 12, color: theme.secondaryColor),
+                      ),
+                    ),
+                  ),
+                )
+              else if (_displayedChapters.isNotEmpty && _displayedChapters.first == 0)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 20),
+                  child: Center(
+                    child: Text(
+                      '— 已是第一章 —',
+                      style: TextStyle(fontSize: 12, color: theme.secondaryColor.withValues(alpha: 0.6)),
                     ),
                   ),
                 ),
-              )
-            else if (_displayedChapters.isNotEmpty && _displayedChapters.first == 0)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 20),
-                child: Center(
-                  child: Text(
-                    '— 已是第一章 —',
-                    style: TextStyle(fontSize: 12, color: theme.secondaryColor.withValues(alpha: 0.6)),
-                  ),
-                ),
-              ),
 
-            // 渲染所有已加载的章节
-            for (int i = 0; i < _displayedChapters.length; i++)
-              _buildChapterBlock(_displayedChapters[i], theme, isFirst: i == 0),
+              // 渲染所有已加载的章节
+              for (int i = 0; i < _displayedChapters.length; i++)
+                _buildChapterBlock(_displayedChapters[i], theme, isFirst: i == 0),
 
-            // 下拉预加载指示器
-            if (_displayedChapters.isNotEmpty &&
-                _displayedChapters.last < widget.chapters.length - 1)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 32),
-                child: Center(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation<Color>(
-                            theme.secondaryColor.withValues(alpha: 0.6),
+              // 下拉预加载指示器
+              if (_displayedChapters.isNotEmpty &&
+                  _displayedChapters.last < widget.chapters.length - 1)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 32),
+                  child: Center(
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(
+                            strokeWidth: 2,
+                            valueColor: AlwaysStoppedAnimation<Color>(
+                              theme.secondaryColor.withValues(alpha: 0.7),
+                            ),
                           ),
                         ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        '下拉自动加载下一章...',
-                        style: TextStyle(fontSize: 13, color: theme.secondaryColor),
-                      ),
-                    ],
+                        const SizedBox(width: 10),
+                        Text(
+                          '正在加载下一章...',
+                          style: TextStyle(color: theme.secondaryColor, fontSize: 13),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              else if (_displayedChapters.isNotEmpty &&
+                  _displayedChapters.last >= widget.chapters.length - 1)
+                Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 48),
+                  child: Center(
+                    child: Text(
+                      '— 全书已完结 —',
+                      style: TextStyle(fontSize: 13, color: theme.secondaryColor),
+                    ),
                   ),
                 ),
-              )
-            else if (_displayedChapters.isNotEmpty &&
-                _displayedChapters.last >= widget.chapters.length - 1)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 48),
-                child: Center(
-                  child: Text(
-                    '— 全书已完结 —',
-                    style: TextStyle(fontSize: 13, color: theme.secondaryColor),
-                  ),
-                ),
-              ),
-            const SizedBox(height: 32),
-          ],
+              const SizedBox(height: 32),
+            ],
+          ),
         ),
       ),
     );
@@ -2031,44 +1801,25 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final isLocateTarget = _highlightedParagraphKey == paraKeyStr;
     final showBubble = _showCommentBubbles && commentCount > 0;
 
+    // 当前章节用户划线的所有文本
+    final chapterNotes = _cachedNotes
+        .where((n) => n.chapterIndex == _currentActiveIndex && n.text.trim().isNotEmpty)
+        .map((n) => n.text.trim())
+        .toList();
+
     final inlineSpans = <InlineSpan>[];
     if (currentTtsText.isEmpty) {
-      inlineSpans.add(
-        TextSpan(
-          text: textToShow,
-          style: TextStyle(
-            fontSize: _fontSize,
-            height: _lineHeight,
-            color: theme.textColor,
-            letterSpacing: _letterSpacing,
-            fontFamily: _resolveFontFamily(_fontFamily),
-          ),
-        ),
-      );
+      inlineSpans.addAll(_buildSpansWithUnderline(textToShow, chapterNotes, theme));
     } else {
-      // 提取当前朗读块中的核心语句
       final cleanTts = currentTtsText.replaceAll(RegExp(r'[\s\r\n]'), '');
       final cleanParagraph = trimmed.replaceAll(RegExp(r'[\s\r\n]'), '');
-
       final isFullMatch = cleanTts.contains(cleanParagraph) || cleanParagraph.contains(cleanTts);
 
-      // 按自然句切分进行富文本高亮（Word 荧光笔标记风格，无外围多余边框）
       final sentencePattern = RegExp(r'[^。！？；!?;]+[。！？；!?;]?');
       final matches = sentencePattern.allMatches(textToShow);
 
       if (matches.isEmpty) {
-        inlineSpans.add(
-          TextSpan(
-            text: textToShow,
-            style: TextStyle(
-              fontSize: _fontSize,
-              height: _lineHeight,
-              color: theme.textColor,
-              letterSpacing: _letterSpacing,
-              fontFamily: _resolveFontFamily(_fontFamily),
-            ),
-          ),
-        );
+        inlineSpans.addAll(_buildSpansWithUnderline(textToShow, chapterNotes, theme));
       } else {
         final spans = <TextSpan>[];
         final highlightMarkerBg = theme.highlightColor;
@@ -2084,6 +1835,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   isFullMatch);
 
           if (isSentHighlighted) hasAnyHighlight = true;
+          final isUnderlined = chapterNotes.any((p) => sentence.contains(p) || p.contains(sentence));
 
           spans.add(
             TextSpan(
@@ -2096,31 +1848,23 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 fontWeight: isSentHighlighted ? FontWeight.w500 : FontWeight.normal,
                 letterSpacing: _letterSpacing,
                 fontFamily: _resolveFontFamily(_fontFamily),
+                decoration: isUnderlined ? TextDecoration.underline : null,
+                decorationStyle: TextDecorationStyle.solid,
+                decorationColor: Theme.of(context).primaryColor,
+                decorationThickness: 2.0,
               ),
             ),
           );
         }
 
         if (!hasAnyHighlight) {
-          inlineSpans.add(
-            TextSpan(
-              text: textToShow,
-              style: TextStyle(
-                fontSize: _fontSize,
-                height: _lineHeight,
-                color: theme.textColor,
-                letterSpacing: _letterSpacing,
-                fontFamily: _resolveFontFamily(_fontFamily),
-              ),
-            ),
-          );
+          inlineSpans.addAll(_buildSpansWithUnderline(textToShow, chapterNotes, theme));
         } else {
           inlineSpans.addAll(spans);
         }
       }
     }
 
-    // 紧跟在段落最后几个字/标点符号后面的内联气泡角标，不单独另起一行
     if (showBubble) {
       inlineSpans.add(
         WidgetSpan(
@@ -2172,25 +1916,18 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
-    return GestureDetector(
-      onLongPress: () => _showParagraphActionSheet(
-        chapter: chapter,
-        paraIndex: paraIndex,
-        text: textToShow,
-      ),
-      child: Container(
-        key: pKey,
-        padding: isLocateTarget ? const EdgeInsets.symmetric(vertical: 2, horizontal: 4) : EdgeInsets.zero,
-        decoration: isLocateTarget
-            ? BoxDecoration(
-                color: theme.highlightColor.withValues(alpha: 0.85),
-                borderRadius: BorderRadius.circular(6),
-                border: Border.all(color: Theme.of(context).primaryColor, width: 1.2),
-              )
-            : null,
-        child: Text.rich(
-          TextSpan(children: inlineSpans),
-        ),
+    return Container(
+      key: pKey,
+      padding: isLocateTarget ? const EdgeInsets.symmetric(vertical: 2, horizontal: 4) : EdgeInsets.zero,
+      decoration: isLocateTarget
+          ? BoxDecoration(
+              color: theme.highlightColor.withValues(alpha: 0.85),
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: Theme.of(context).primaryColor, width: 1.2),
+            )
+          : null,
+      child: Text.rich(
+        TextSpan(children: inlineSpans),
       ),
     );
   }
@@ -2382,43 +2119,102 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
-              // 加入书架 / 已在书架按钮
+              // 听书快捷入口
               IconButton(
                 icon: Icon(
-                  _isInBookshelf ? Icons.bookmark_added : Icons.bookmark_add_outlined,
-                  color: _isInBookshelf ? Theme.of(context).primaryColor : theme.textColor,
-                ),
-                tooltip: _isInBookshelf ? '已在书架' : '加入书架',
-                onPressed: _toggleBookshelf,
-              ),
-              // 书签切换按钮
-              IconButton(
-                icon: Icon(
-                  _isCurrentChapterBookmarked ? Icons.bookmark : Icons.bookmark_border,
-                  color: _isCurrentChapterBookmarked ? Theme.of(context).primaryColor : theme.textColor,
+                  _ttsService.isActive ? Icons.headphones : Icons.headphones_outlined,
                   size: 22,
+                  color: _ttsService.isActive ? Theme.of(context).primaryColor : theme.textColor,
                 ),
-                tooltip: _isCurrentChapterBookmarked ? '取消书签' : '添加书签',
-                onPressed: _toggleBookmark,
-              ),
-              IconButton(
-                icon: Icon(Icons.list_rounded, size: 24, color: theme.textColor),
-                tooltip: '目录',
-                onPressed: _showDirectoryDrawer,
-              ),
-              IconButton(
-                icon: Icon(Icons.headphones_rounded, size: 22, color: theme.textColor),
                 tooltip: '听书',
                 onPressed: _startTtsReading,
               ),
-              IconButton(
-                icon: Icon(Icons.download_for_offline_outlined, size: 22, color: theme.textColor),
-                tooltip: '批量离线',
-                onPressed: _showQuickCacheModal,
+              // 右上角折叠更多选项 (PopupMenuButton)
+              PopupMenuButton<String>(
+                icon: Icon(Icons.more_vert_rounded, size: 22, color: theme.textColor),
+                tooltip: '更多选项',
+                color: theme.backgroundColor,
+                onSelected: (val) {
+                  switch (val) {
+                    case 'bookshelf':
+                      _toggleBookshelf();
+                      break;
+                    case 'bookmark':
+                      _toggleBookmark();
+                      break;
+                    case 'cache':
+                      _showQuickCacheModal();
+                      break;
+                    case 'detail':
+                      _openBookDetail();
+                      break;
+                  }
+                },
+                itemBuilder: (context) => [
+                  PopupMenuItem(
+                    value: 'bookshelf',
+                    child: Row(
+                      children: [
+                        Icon(
+                          _isInBookshelf ? Icons.bookmark_added : Icons.bookmark_add_outlined,
+                          size: 18,
+                          color: _isInBookshelf ? Theme.of(context).primaryColor : theme.textColor,
+                        ),
+                        const SizedBox(width: 12),
+                        Text(_isInBookshelf ? '移出书架' : '加入书架',
+                            style: TextStyle(color: theme.textColor)),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'bookmark',
+                    child: Row(
+                      children: [
+                        Icon(
+                          _isCurrentChapterBookmarked ? Icons.bookmark : Icons.bookmark_border,
+                          size: 18,
+                          color: _isCurrentChapterBookmarked ? Theme.of(context).primaryColor : theme.textColor,
+                        ),
+                        const SizedBox(width: 12),
+                        Text(_isCurrentChapterBookmarked ? '取消书签' : '添加书签',
+                            style: TextStyle(color: theme.textColor)),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'cache',
+                    child: Row(
+                      children: [
+                        Icon(Icons.download_for_offline_outlined, size: 18, color: theme.textColor),
+                        const SizedBox(width: 12),
+                        Text('批量离线', style: TextStyle(color: theme.textColor)),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'detail',
+                    child: Row(
+                      children: [
+                        Icon(Icons.info_outline, size: 18, color: theme.textColor),
+                        const SizedBox(width: 12),
+                        Text('书籍详情', style: TextStyle(color: theme.textColor)),
+                      ],
+                    ),
+                  ),
+                ],
               ),
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  void _openBookDetail() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => BookDetailScreen(book: widget.book),
       ),
     );
   }
@@ -2606,11 +2402,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 label: Text('目录', style: TextStyle(color: theme.textColor)),
               ),
               TextButton.icon(
-                onPressed: _startTtsReading,
-                icon: Icon(Icons.headphones_outlined, color: theme.textColor, size: 20),
-                label: Text('听书', style: TextStyle(color: theme.textColor)),
-              ),
-              TextButton.icon(
                 onPressed: () {
                   setState(() {
                     _showControls = false;
@@ -2642,95 +2433,467 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   Widget _buildPageModeBody(ReaderTheme theme) {
-    _pageController ??= PageController(initialPage: _currentActiveIndex);
+    final content = _chapterCache[_currentActiveIndex] ?? '';
+    final chapter = widget.chapters[_currentActiveIndex];
+
+    if (content.isEmpty) {
+      _fetchChapterContent(_currentActiveIndex);
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(
+              valueColor: AlwaysStoppedAnimation<Color>(theme.secondaryColor),
+            ),
+            const SizedBox(height: 12),
+            Text('正在加载 ${chapter.title}...',
+                style: TextStyle(color: theme.secondaryColor, fontSize: 13)),
+          ],
+        ),
+      );
+    }
+
     return LayoutBuilder(
       builder: (context, constraints) {
-        return GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTapUp: (details) {
-            final dx = details.localPosition.dx;
-            final width = constraints.maxWidth;
-            if (dx < width * 0.28) {
-              // 点击屏幕左侧 28% 向前翻页
-              if (_pageController?.hasClients == true && _currentActiveIndex > 0) {
-                _pageController?.previousPage(
-                  duration: const Duration(milliseconds: 250),
-                  curve: Curves.easeInOut,
-                );
-              }
-            } else if (dx > width * 0.72) {
-              // 点击屏幕右侧 28% 向后翻页
-              if (_pageController?.hasClients == true && _currentActiveIndex < widget.chapters.length - 1) {
-                _pageController?.nextPage(
-                  duration: const Duration(milliseconds: 250),
-                  curve: Curves.easeInOut,
-                );
-              }
-            } else {
-              _toggleControls();
-            }
-          },
-          child: PageView.builder(
-            controller: _pageController,
-            itemCount: widget.chapters.length,
-            onPageChanged: (pageIndex) {
-              _currentActiveIndex = pageIndex;
-              _activeChapterNotifier.value = pageIndex;
-              _persistReadingProgress(pageIndex);
-              _fetchChapterContent(pageIndex);
-              _triggerSilentPrefetch(pageIndex);
-              setState(() {});
-            },
-            itemBuilder: (context, pageIndex) {
-              final chapter = widget.chapters[pageIndex];
-              final content = _chapterCache[pageIndex];
-              if (content == null || content.isEmpty) {
-                _fetchChapterContent(pageIndex);
-                return Center(
+        final pages = _paginateContent(content, constraints.biggest);
+        _currentHorizontalPageIndex = _currentHorizontalPageIndex.clamp(0, pages.length - 1);
+
+        return Stack(
+          children: [
+            // 纯单屏内容区域 (绝无垂直滚动条，上下滑动彻底锁定)
+            PageView.builder(
+              controller: _pageHorizontalController,
+              itemCount: pages.length,
+              physics: const BouncingScrollPhysics(),
+              onPageChanged: (page) {
+                setState(() {
+                  _currentHorizontalPageIndex = page;
+                });
+              },
+              itemBuilder: (context, pageIdx) {
+                final pageText = pages[pageIdx];
+                final pageParagraphs = pageText.split('\n\n');
+
+                return Container(
+                  width: constraints.maxWidth,
+                  height: constraints.maxHeight,
+                  padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 8),
                   child: Column(
-                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      CircularProgressIndicator(
-                        valueColor: AlwaysStoppedAnimation<Color>(theme.secondaryColor),
+                      if (pageIdx == 0) ...[
+                        Text(
+                          chapter.title,
+                          style: TextStyle(
+                            fontSize: _fontSize + 4,
+                            fontWeight: FontWeight.bold,
+                            color: theme.textColor,
+                            height: 1.4,
+                            fontFamily: _resolveFontFamily(_fontFamily),
+                          ),
+                        ),
+                        const SizedBox(height: 12),
+                      ],
+                      Expanded(
+                        child: SelectionArea(
+                          onSelectionChanged: (content) {
+                            _currentSelectedText = content?.plainText ?? '';
+                          },
+                          contextMenuBuilder: (context, selectableRegionState) {
+                            return _buildSelectionBubbleMenu(context, selectableRegionState, theme);
+                          },
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              for (final para in pageParagraphs) ...[
+                                _buildParagraphWithUnderlines(para, theme, chapter),
+                                SizedBox(height: _paragraphSpacing.clamp(6.0, 16.0)),
+                              ],
+                            ],
+                          ),
+                        ),
                       ),
-                      const SizedBox(height: 12),
-                      Text('正在加载 ${chapter.title}...',
-                          style: TextStyle(color: theme.secondaryColor, fontSize: 13)),
+                      // 底部单屏进度微型指示
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 4),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                          children: [
+                            Text(
+                              chapter.title,
+                              style: TextStyle(fontSize: 10, color: theme.secondaryColor),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            Text(
+                              '第 ${pageIdx + 1}/${pages.length} 页',
+                              style: TextStyle(fontSize: 10, color: theme.secondaryColor),
+                            ),
+                          ],
+                        ),
+                      ),
                     ],
                   ),
                 );
-              }
-              final isTtsThisChapter =
-                  _ttsService.isActive && _ttsService.currentChapterTitle == chapter.title;
-              final currentTtsText = isTtsThisChapter ? _ttsService.currentText.trim() : '';
+              },
+            ),
 
-              return SingleChildScrollView(
-                padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 12),
-                physics: const BouncingScrollPhysics(),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      chapter.title,
-                      style: TextStyle(
-                        fontSize: _fontSize + 4,
-                        fontWeight: FontWeight.bold,
-                        color: theme.textColor,
-                        height: 1.4,
-                      ),
+            // 屏幕左右点击热区与中间呼出菜单
+            Positioned.fill(
+              child: Row(
+                children: [
+                  // 左侧 28% 点击向前翻页
+                  Expanded(
+                    flex: 28,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      onTap: () {
+                        if (_currentHorizontalPageIndex > 0) {
+                          _pageHorizontalController.previousPage(
+                            duration: const Duration(milliseconds: 200),
+                            curve: Curves.easeInOut,
+                          );
+                        } else if (_currentActiveIndex > 0) {
+                          _startFromChapter(_currentActiveIndex - 1, toLastPage: true);
+                        }
+                      },
                     ),
-                    const SizedBox(height: 16),
-                    _buildChapterParagraphs(pageIndex, content, theme, currentTtsText),
-                    const SizedBox(height: 24),
-                    _buildChapterEndComments(chapter, theme),
-                    const SizedBox(height: 36),
-                  ],
-                ),
-              );
-            },
-          ),
+                  ),
+                  // 中间 44% 点击切换控制栏
+                  Expanded(
+                    flex: 44,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      onTap: _toggleControls,
+                    ),
+                  ),
+                  // 右侧 28% 点击向后翻页
+                  Expanded(
+                    flex: 28,
+                    child: GestureDetector(
+                      behavior: HitTestBehavior.translucent,
+                      onTap: () {
+                        if (_currentHorizontalPageIndex < pages.length - 1) {
+                          _pageHorizontalController.nextPage(
+                            duration: const Duration(milliseconds: 200),
+                            curve: Curves.easeInOut,
+                          );
+                        } else if (_currentActiveIndex < widget.chapters.length - 1) {
+                          _startFromChapter(_currentActiveIndex + 1);
+                        }
+                      },
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
         );
       },
+    );
+  }
+
+  /// 单屏段落构建（带纯正下划线标注）
+  Widget _buildParagraphWithUnderlines(String paragraph, ReaderTheme theme, Chapter chapter) {
+    final trimmed = paragraph.trim();
+    if (trimmed.isEmpty) return const SizedBox.shrink();
+
+    var textToShow = paragraph;
+    if (_indentTwoChars) {
+      if (!textToShow.startsWith('\u3000\u3000') && !textToShow.startsWith('    ')) {
+        textToShow = '\u3000\u3000$trimmed';
+      }
+    } else {
+      textToShow = trimmed;
+    }
+
+    final chapterNotes = _cachedNotes
+        .where((n) => n.chapterIndex == _currentActiveIndex && n.text.trim().isNotEmpty)
+        .map((n) => n.text.trim())
+        .toList();
+
+    final spans = _buildSpansWithUnderline(textToShow, chapterNotes, theme);
+
+    return Text.rich(
+      TextSpan(children: spans),
+      style: TextStyle(
+        fontSize: _fontSize,
+        height: _lineHeight,
+        color: theme.textColor,
+        letterSpacing: _letterSpacing,
+        fontFamily: _resolveFontFamily(_fontFamily),
+      ),
+    );
+  }
+
+  /// 纯正下划线 Spans 构建（无任何大面积荧光背景色高亮）
+  List<InlineSpan> _buildSpansWithUnderline(
+    String text,
+    List<String> underlinedPhrases,
+    ReaderTheme theme,
+  ) {
+    if (underlinedPhrases.isEmpty) {
+      return [
+        TextSpan(
+          text: text,
+          style: TextStyle(
+            fontSize: _fontSize,
+            height: _lineHeight,
+            color: theme.textColor,
+            letterSpacing: _letterSpacing,
+            fontFamily: _resolveFontFamily(_fontFamily),
+          ),
+        ),
+      ];
+    }
+
+    final spans = <InlineSpan>[];
+    int currentPos = 0;
+
+    while (currentPos < text.length) {
+      int nextMatchStart = -1;
+      String? matchedPhrase;
+
+      for (final phrase in underlinedPhrases) {
+        final idx = text.indexOf(phrase, currentPos);
+        if (idx != -1 && (nextMatchStart == -1 || idx < nextMatchStart)) {
+          nextMatchStart = idx;
+          matchedPhrase = phrase;
+        }
+      }
+
+      if (nextMatchStart != -1 && matchedPhrase != null) {
+        if (nextMatchStart > currentPos) {
+          spans.add(
+            TextSpan(
+              text: text.substring(currentPos, nextMatchStart),
+              style: TextStyle(
+                fontSize: _fontSize,
+                height: _lineHeight,
+                color: theme.textColor,
+                letterSpacing: _letterSpacing,
+                fontFamily: _resolveFontFamily(_fontFamily),
+              ),
+            ),
+          );
+        }
+        // 划线纯文字（下划线，绝不添加背景底色！）
+        spans.add(
+          TextSpan(
+            text: matchedPhrase,
+            style: TextStyle(
+              fontSize: _fontSize,
+              height: _lineHeight,
+              color: theme.textColor,
+              letterSpacing: _letterSpacing,
+              fontFamily: _resolveFontFamily(_fontFamily),
+              decoration: TextDecoration.underline,
+              decorationStyle: TextDecorationStyle.solid,
+              decorationColor: Theme.of(context).primaryColor,
+              decorationThickness: 2.0,
+            ),
+          ),
+        );
+        currentPos = nextMatchStart + matchedPhrase.length;
+      } else {
+        spans.add(
+          TextSpan(
+            text: text.substring(currentPos),
+            style: TextStyle(
+              fontSize: _fontSize,
+              height: _lineHeight,
+              color: theme.textColor,
+              letterSpacing: _letterSpacing,
+              fontFamily: _resolveFontFamily(_fontFamily),
+            ),
+          ),
+        );
+        break;
+      }
+    }
+
+    return spans;
+  }
+
+  /// 智能章节单屏分页算法
+  List<String> _paginateContent(String content, Size size) {
+    if (content.isEmpty) return [''];
+    final availWidth = (size.width - _horizontalPadding * 2).clamp(100.0, 2000.0);
+    final availHeight = (size.height - 110.0).clamp(200.0, 3000.0);
+
+    final charWidth = _fontSize + _letterSpacing;
+    final charsPerLine = (availWidth / charWidth).floor().clamp(10, 80);
+    final lineHeightPx = _fontSize * _lineHeight;
+    final linesPerPage = (availHeight / (lineHeightPx + 4)).floor().clamp(6, 60);
+
+    final paragraphs = content.split('\n\n');
+    final pages = <String>[];
+    final currentLines = <String>[];
+    int currentLineCount = 0;
+
+    for (var para in paragraphs) {
+      final trimmed = para.trim();
+      if (trimmed.isEmpty) continue;
+      final text = _indentTwoChars
+          ? (trimmed.startsWith('\u3000\u3000') ? trimmed : '\u3000\u3000$trimmed')
+          : trimmed;
+
+      int paraLines = (text.length / charsPerLine).ceil();
+      if (paraLines == 0) paraLines = 1;
+
+      if (currentLineCount + paraLines > linesPerPage && currentLines.isNotEmpty) {
+        pages.add(currentLines.join('\n\n'));
+        currentLines.clear();
+        currentLineCount = 0;
+      }
+
+      if (paraLines > linesPerPage) {
+        int charOffset = 0;
+        final maxCharsPerPage = linesPerPage * charsPerLine;
+        while (charOffset < text.length) {
+          final end = (charOffset + maxCharsPerPage < text.length)
+              ? charOffset + maxCharsPerPage
+              : text.length;
+          pages.add(text.substring(charOffset, end));
+          charOffset = end;
+        }
+      } else {
+        currentLines.add(text);
+        currentLineCount += paraLines + 1;
+      }
+    }
+
+    if (currentLines.isNotEmpty) {
+      pages.add(currentLines.join('\n\n'));
+    }
+
+    return pages.isEmpty ? [content] : pages;
+  }
+
+  /// 选中文本浮动暗色气泡菜单（紧贴选区上方，包含复制、划线、想法，不弹底部抽屉）
+  Widget _buildSelectionBubbleMenu(
+    BuildContext context,
+    SelectableRegionState selectableRegionState,
+    ReaderTheme theme,
+  ) {
+    return AdaptiveTextSelectionToolbar(
+      anchors: selectableRegionState.contextMenuAnchors,
+      children: [
+        InkWell(
+          onTap: () {
+            Clipboard.setData(ClipboardData(text: _currentSelectedText));
+            selectableRegionState.hideToolbar();
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('已复制文本'), duration: Duration(seconds: 1)),
+            );
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: const Text('复制', style: TextStyle(color: Colors.white, fontSize: 13)),
+          ),
+        ),
+        InkWell(
+          onTap: () async {
+            final text = _currentSelectedText.trim();
+            selectableRegionState.hideToolbar();
+            if (text.isNotEmpty) {
+              await _bookmarkService.addNote(
+                bookId: widget.book.bookId,
+                chapterIndex: _currentActiveIndex,
+                chapterTitle: widget.chapters[_currentActiveIndex].title,
+                text: text,
+                note: '',
+              );
+              await _loadNotes();
+              if (context.mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('已添加划线'), duration: Duration(seconds: 1)),
+                );
+              }
+            }
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: const Text('划线', style: TextStyle(color: Colors.white, fontSize: 13)),
+          ),
+        ),
+        InkWell(
+          onTap: () {
+            final text = _currentSelectedText.trim();
+            selectableRegionState.hideToolbar();
+            if (text.isNotEmpty) {
+              _showAddNoteDialogForText(text);
+            }
+          },
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+            child: const Text('想法', style: TextStyle(color: Colors.white, fontSize: 13)),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _showAddNoteDialogForText(String text) {
+    final noteController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('写想法与笔记'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: Colors.grey.withValues(alpha: 0.1),
+                borderRadius: BorderRadius.circular(6),
+              ),
+              child: Text(
+                text.length > 80 ? '${text.substring(0, 80)}...' : text,
+                style: const TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: noteController,
+              maxLines: 4,
+              autofocus: true,
+              decoration: const InputDecoration(
+                hintText: '记录此刻的读后感悟或想法...',
+                border: OutlineInputBorder(),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final note = noteController.text.trim();
+              Navigator.pop(ctx);
+              await _bookmarkService.addNote(
+                bookId: widget.book.bookId,
+                chapterIndex: _currentActiveIndex,
+                chapterTitle: widget.chapters[_currentActiveIndex].title,
+                text: text,
+                note: note,
+              );
+              await _loadNotes();
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(content: Text('想法保存成功'), duration: Duration(seconds: 1)),
+                );
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
     );
   }
 
