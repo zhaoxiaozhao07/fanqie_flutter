@@ -878,7 +878,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         segments: const [
                           ButtonSegment(value: 0, label: Text('目录')),
                           ButtonSegment(value: 1, label: Text('书签')),
-                          ButtonSegment(value: 2, label: Text('笔记')),
                         ],
                         selected: {activeTab},
                         showSelectedIcon: false,
@@ -1094,64 +1093,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           },
                         ),
                       ),
-                    ] else ...[
-                      const Divider(height: 1),
-                      Expanded(
-                        child: FutureBuilder<List<ReadingNote>>(
-                          future: _bookmarkService.getNotes(widget.book.bookId),
-                          builder: (context, snapshot) {
-                            final notes = snapshot.data ?? [];
-                            if (notes.isEmpty) {
-                              return Center(
-                                child: Text('暂无划线笔记，在阅读时长按正文段落即可添加',
-                                    style: TextStyle(color: currentTheme.secondaryColor)),
-                              );
-                            }
-                            return ListView.builder(
-                              controller: scrollController,
-                              itemCount: notes.length,
-                              itemBuilder: (context, idx) {
-                                final note = notes[idx];
-                                return ListTile(
-                                  dense: true,
-                                  leading: Icon(Icons.format_paint,
-                                      color: Theme.of(context).primaryColor, size: 20),
-                                  title: Text(note.text,
-                                      maxLines: 2,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                          color: currentTheme.textColor, fontSize: 13)),
-                                  subtitle: note.note.isNotEmpty
-                                      ? Text('笔记: ${note.note}',
-                                          style: TextStyle(
-                                              color: Theme.of(context).primaryColor,
-                                              fontSize: 12))
-                                      : Text(
-                                          '第 ${note.chapterIndex + 1} 章 · ${note.chapterTitle}',
-                                          style: TextStyle(
-                                              color: currentTheme.secondaryColor,
-                                              fontSize: 11)),
-                                  trailing: IconButton(
-                                    icon: Icon(Icons.delete_outline,
-                                        size: 18, color: currentTheme.secondaryColor),
-                                    onPressed: () async {
-                                      await _bookmarkService.removeNote(
-                                          note.id, widget.book.bookId);
-                                      setModalState(() {});
-                                    },
-                                  ),
-                                  onTap: () {
-                                    Navigator.pop(ctx);
-                                    _startFromChapter(note.chapterIndex);
-                                  },
-                                );
-                              },
-                            );
-                          },
-                        ),
-                      ),
-                    ],
-                  ],
+                    ]                  ],
                 );
               },
             );
@@ -1175,14 +1117,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
         return StatefulBuilder(
           builder: (context, setModalState) {
             return Container(
+              height: 380,
               padding: const EdgeInsets.fromLTRB(20, 12, 20, 16),
               child: SingleChildScrollView(
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Center(
                       child: Container(
-                        width: 32,
+                        width: 36,
                         height: 4,
                         decoration: BoxDecoration(
                           color: currentTheme.secondaryColor.withValues(alpha: 0.3),
@@ -1190,50 +1134,39 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         ),
                       ),
                     ),
-                    const SizedBox(height: 12),
-                    // 1. 翻页模式与首行缩进
+                    const SizedBox(height: 14),
+
+                    // 1. 翻页模式
                     Row(
                       children: [
-                        Text('翻页', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: SegmentedButton<bool>(
-                            segments: const [
-                              ButtonSegment(value: false, label: Text('上下滚动', style: TextStyle(fontSize: 12))),
-                              ButtonSegment(value: true, label: Text('左右翻页', style: TextStyle(fontSize: 12))),
-                            ],
-                            selected: {_isPageMode},
-                            showSelectedIcon: false,
-                            onSelectionChanged: (val) {
-                              setState(() {
-                                _isPageMode = val.first;
-                                _currentHorizontalPageIndex = 0;
-                                _pageHorizontalController = PageController();
-                                _savePreferences();
-                              });
-                              setModalState(() {});
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Text('缩进', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
-                        Switch.adaptive(
-                          value: _indentTwoChars,
-                          activeTrackColor: Theme.of(context).primaryColor,
-                          onChanged: (val) {
-                            setState(() => _indentTwoChars = val);
+                        Text('翻页模式', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.w600)),
+                        const Spacer(),
+                        SegmentedButton<bool>(
+                          segments: const [
+                            ButtonSegment(value: false, label: Text('上下滚动', style: TextStyle(fontSize: 12))),
+                            ButtonSegment(value: true, label: Text('左右翻页', style: TextStyle(fontSize: 12))),
+                          ],
+                          selected: {_isPageMode},
+                          showSelectedIcon: false,
+                          onSelectionChanged: (val) {
+                            setState(() {
+                              _isPageMode = val.first;
+                              _currentHorizontalPageIndex = 0;
+                              _pageHorizontalController = PageController();
+                              _savePreferences();
+                            });
                             setModalState(() {});
-                            _savePreferences();
                           },
                         ),
                       ],
                     ),
-                    const SizedBox(height: 10),
-                    // 2. 字号与字间距
+                    const SizedBox(height: 14),
+
+                    // 2. 字号与首行缩进
                     Row(
                       children: [
-                        Text('字号', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
-                        const SizedBox(width: 8),
+                        Text('字号大小', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.w600)),
+                        const SizedBox(width: 14),
                         OutlinedButton(
                           onPressed: _fontSize > 13
                               ? () {
@@ -1245,11 +1178,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           child: const Text('A -'),
                         ),
                         Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 10),
+                          padding: const EdgeInsets.symmetric(horizontal: 14),
                           child: Text(
                             '${_fontSize.toInt()}',
                             style: TextStyle(
-                              fontSize: 15,
+                              fontSize: 16,
                               fontWeight: FontWeight.bold,
                               color: currentTheme.textColor,
                             ),
@@ -1266,55 +1199,30 @@ class _ReaderScreenState extends State<ReaderScreen> {
                           child: const Text('A +'),
                         ),
                         const Spacer(),
-                        Text('字距', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
-                        const SizedBox(width: 6),
-                        SegmentedButton<double>(
-                          segments: const [
-                            ButtonSegment(value: 0.0, label: Text('小', style: TextStyle(fontSize: 11))),
-                            ButtonSegment(value: 0.5, label: Text('中', style: TextStyle(fontSize: 11))),
-                            ButtonSegment(value: 1.2, label: Text('大', style: TextStyle(fontSize: 11))),
-                          ],
-                          selected: {_letterSpacing},
-                          showSelectedIcon: false,
-                          onSelectionChanged: (val) {
-                            setState(() => _letterSpacing = val.first);
+                        Text('首行缩进', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
+                        Switch.adaptive(
+                          value: _indentTwoChars,
+                          activeTrackColor: Theme.of(context).primaryColor,
+                          onChanged: (val) {
+                            setState(() => _indentTwoChars = val);
                             setModalState(() {});
                             _savePreferences();
                           },
                         ),
                       ],
                     ),
-                    const SizedBox(height: 10),
-                    // 3. 字体与行距
+                    const SizedBox(height: 14),
+
+                    // 3. 行间距
                     Row(
                       children: [
-                        Text('字体', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: SegmentedButton<String>(
-                            segments: const [
-                              ButtonSegment(value: 'system', label: Text('默认', style: TextStyle(fontSize: 11))),
-                              ButtonSegment(value: 'kaiti', label: Text('楷体', style: TextStyle(fontSize: 11))),
-                              ButtonSegment(value: 'serif', label: Text('宋体', style: TextStyle(fontSize: 11))),
-                              ButtonSegment(value: 'sans-serif', label: Text('黑体', style: TextStyle(fontSize: 11))),
-                            ],
-                            selected: {_fontFamily},
-                            showSelectedIcon: false,
-                            onSelectionChanged: (val) {
-                              setState(() => _fontFamily = val.first);
-                              setModalState(() {});
-                              _savePreferences();
-                            },
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Text('行距', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
-                        const SizedBox(width: 6),
+                        Text('行间距', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.w600)),
+                        const Spacer(),
                         SegmentedButton<double>(
                           segments: const [
-                            ButtonSegment(value: 1.5, label: Text('紧', style: TextStyle(fontSize: 11))),
-                            ButtonSegment(value: 1.8, label: Text('中', style: TextStyle(fontSize: 11))),
-                            ButtonSegment(value: 2.2, label: Text('松', style: TextStyle(fontSize: 11))),
+                            ButtonSegment(value: 1.5, label: Text('紧凑 1.5', style: TextStyle(fontSize: 12))),
+                            ButtonSegment(value: 1.8, label: Text('适中 1.8', style: TextStyle(fontSize: 12))),
+                            ButtonSegment(value: 2.2, label: Text('宽松 2.2', style: TextStyle(fontSize: 12))),
                           ],
                           selected: {_lineHeight},
                           showSelectedIcon: false,
@@ -1326,11 +1234,59 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         ),
                       ],
                     ),
-                    const SizedBox(height: 12),
-                    // 4. 背景主题
+                    const SizedBox(height: 14),
+
+                    // 4. 字间距
                     Row(
                       children: [
-                        Text('背景', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13)),
+                        Text('字间距', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.w600)),
+                        const Spacer(),
+                        SegmentedButton<double>(
+                          segments: const [
+                            ButtonSegment(value: 0.0, label: Text('紧凑 0.0', style: TextStyle(fontSize: 12))),
+                            ButtonSegment(value: 0.5, label: Text('适中 0.5', style: TextStyle(fontSize: 12))),
+                            ButtonSegment(value: 1.2, label: Text('宽松 1.2', style: TextStyle(fontSize: 12))),
+                          ],
+                          selected: {_letterSpacing},
+                          showSelectedIcon: false,
+                          onSelectionChanged: (val) {
+                            setState(() => _letterSpacing = val.first);
+                            setModalState(() {});
+                            _savePreferences();
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+
+                    // 5. 正文字体
+                    Row(
+                      children: [
+                        Text('正文字体', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.w600)),
+                        const Spacer(),
+                        SegmentedButton<String>(
+                          segments: const [
+                            ButtonSegment(value: 'system', label: Text('默认', style: TextStyle(fontSize: 12))),
+                            ButtonSegment(value: 'kaiti', label: Text('楷体', style: TextStyle(fontSize: 12))),
+                            ButtonSegment(value: 'serif', label: Text('宋体', style: TextStyle(fontSize: 12))),
+                            ButtonSegment(value: 'sans-serif', label: Text('黑体', style: TextStyle(fontSize: 12))),
+                          ],
+                          selected: {_fontFamily},
+                          showSelectedIcon: false,
+                          onSelectionChanged: (val) {
+                            setState(() => _fontFamily = val.first);
+                            setModalState(() {});
+                            _savePreferences();
+                          },
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 14),
+
+                    // 6. 阅读背景主题
+                    Row(
+                      children: [
+                        Text('阅读背景', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.w600)),
                         const SizedBox(width: 16),
                         Expanded(
                           child: Row(
@@ -1345,8 +1301,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
                                   _savePreferences();
                                 },
                                 child: Container(
-                                  width: 34,
-                                  height: 34,
+                                  width: 36,
+                                  height: 36,
                                   decoration: BoxDecoration(
                                     color: th.backgroundColor,
                                     shape: BoxShape.circle,
@@ -1383,6 +1339,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         ),
                       ],
                     ),
+                    const SizedBox(height: 8),
                   ],
                 ),
               ),
@@ -1469,6 +1426,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
               ),
             ),
           ),
+
+          // 控制栏显示时，轻触中间透明区域瞬间 0 毫秒关闭控制栏
+          if (_showControls)
+            Positioned.fill(
+              child: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {
+                  setState(() {
+                    _showControls = false;
+                  });
+                },
+              ),
+            ),
 
           // 顶部操作栏
           if (_showControls)
@@ -1923,6 +1893,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
           : null,
       child: SelectableText.rich(
         TextSpan(children: inlineSpans),
+        onTap: _toggleControls,
         contextMenuBuilder: (context, editableTextState) {
           final textVal = editableTextState.textEditingValue;
           final selected = textVal.selection.textInside(textVal.text);
@@ -2618,6 +2589,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
     return SelectableText.rich(
       TextSpan(children: spans),
+      onTap: _toggleControls,
       style: TextStyle(
         fontSize: _fontSize,
         height: _lineHeight,
@@ -2683,7 +2655,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
 
     matchedPhrases.sort((a, b) => b.length.compareTo(a.length));
-
     final spans = <InlineSpan>[];
     int currentPos = 0;
 
@@ -2714,20 +2685,26 @@ class _ReaderScreenState extends State<ReaderScreen> {
             ),
           );
         }
-        // 划线纯文字（下划线，绝不添加背景底色！）
+        // 虚线下划线（通过文字透明度+Shadow上浮拉开 3px 呼吸间距，绝不挨着下方笔画，绝无背景底色）
         spans.add(
           TextSpan(
             text: matchedPhrase,
             style: TextStyle(
               fontSize: _fontSize,
               height: _lineHeight,
-              color: theme.textColor,
-              letterSpacing: _letterSpacing,
               fontFamily: _resolveFontFamily(_fontFamily),
+              letterSpacing: _letterSpacing,
+              color: Colors.transparent,
+              shadows: [
+                Shadow(
+                  offset: const Offset(0, -3),
+                  color: theme.textColor,
+                ),
+              ],
               decoration: TextDecoration.underline,
-              decorationStyle: TextDecorationStyle.solid,
-              decorationColor: theme.textColor.withValues(alpha: 0.85),
-              decorationThickness: 2.0,
+              decorationStyle: TextDecorationStyle.dashed, // 优雅虚线
+              decorationColor: theme.textColor.withValues(alpha: 0.8),
+              decorationThickness: 1.5,
             ),
           ),
         );
@@ -2752,7 +2729,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
     return spans;
   }
 
-  /// 智能章节单屏分页算法
   List<String> _paginateContent(String content, Size size) {
     if (content.isEmpty) return [''];
     final availWidth = (size.width - _horizontalPadding * 2).clamp(100.0, 2000.0);
@@ -2839,7 +2815,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
               TextButton.icon(
                 style: TextButton.styleFrom(
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   visualDensity: VisualDensity.compact,
                 ),
                 onPressed: () {
@@ -2856,7 +2832,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
               TextButton.icon(
                 style: TextButton.styleFrom(
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                   visualDensity: VisualDensity.compact,
                 ),
                 onPressed: () async {
@@ -2881,90 +2857,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 icon: const Icon(Icons.edit_outlined, size: 15, color: Colors.white),
                 label: const Text('划线', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
               ),
-              Container(width: 1, height: 16, color: Colors.white24),
-              TextButton.icon(
-                style: TextButton.styleFrom(
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  visualDensity: VisualDensity.compact,
-                ),
-                onPressed: () {
-                  onDismiss();
-                  if (selectedText.trim().isNotEmpty) {
-                    _showAddNoteDialogForText(selectedText.trim(), chapterIndex: chapterIndex, paraIndex: paraIndex);
-                  }
-                },
-                icon: const Icon(Icons.chat_bubble_outline_rounded, size: 15, color: Colors.white),
-                label: const Text('想法', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
-              ),
             ],
           ),
         ),
       ],
-    );
-  }
-
-  void _showAddNoteDialogForText(String text, {required int chapterIndex, int paraIndex = 0}) {
-    final noteController = TextEditingController();
-    showDialog(
-      context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text('写想法与笔记'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: Colors.grey.withValues(alpha: 0.1),
-                borderRadius: BorderRadius.circular(6),
-              ),
-              child: Text(
-                text.length > 80 ? '${text.substring(0, 80)}...' : text,
-                style: const TextStyle(fontSize: 12, fontStyle: FontStyle.italic),
-              ),
-            ),
-            const SizedBox(height: 12),
-            TextField(
-              controller: noteController,
-              maxLines: 4,
-              autofocus: true,
-              decoration: const InputDecoration(
-                hintText: '记录此刻的读后感悟或想法...',
-                border: OutlineInputBorder(),
-              ),
-            ),
-          ],
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx),
-            child: const Text('取消'),
-          ),
-          ElevatedButton(
-            onPressed: () async {
-              final note = noteController.text.trim();
-              Navigator.pop(ctx);
-              await _bookmarkService.addNote(
-                bookId: widget.book.bookId,
-                chapterIndex: chapterIndex,
-                chapterTitle: widget.chapters[chapterIndex].title,
-                paragraphIndex: paraIndex,
-                text: text,
-                note: note,
-              );
-              await _loadNotes();
-              if (mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('想法保存成功'), duration: Duration(seconds: 1)),
-                );
-              }
-            },
-            child: const Text('保存'),
-          ),
-        ],
-      ),
     );
   }
 
