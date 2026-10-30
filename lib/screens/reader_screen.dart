@@ -68,6 +68,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
   final Map<String, ChapterCommentStats> _chapterCommentStats = {};
   // 真实本章评论总数 (itemId -> count)
   final Map<String, int> _chapterCommentsCount = {};
+  // 已触发静默预加载的章节索引集合
+  final Set<int> _prefetchedIndices = {};
   // 定位原文时高亮提示的目标段落 key
   String? _highlightedParagraphKey;
   Timer? _highlightTimer;
@@ -340,8 +342,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
       _persistReadingProgress(index);
 
-      // 后台预加载后续 2 章，并提前在无限流中追加下一章
-      _preloadNextChapters(index + 1, count: 2);
+      // 后台静默预加载后续 3~5 章，并提前在无限流中追加下一章
+      _triggerSilentPrefetch(index);
       _autoAppendNextChapter();
     } else {
       setState(() {
@@ -408,6 +410,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _currentActiveIndex = active;
       _activeChapterNotifier.value = active; // 仅通知微型小部件刷新，不触发全屏 Widget 树 Rebuild
       _persistReadingProgress(active);
+      _triggerSilentPrefetch(active);
     }
   }
 
@@ -458,7 +461,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
       // 静默预加载更前面的章节
       if (prevIndex > 0) {
-        _preloadNextChapters(prevIndex - 1, count: 1);
+        _triggerSilentPrefetch(prevIndex - 1, count: 1);
       }
     } else {
       _isLoadingPrev = false;
@@ -491,8 +494,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
           _chapterKeys[nextIndex] = GlobalKey();
         }
       });
-      // 深度预加载后续章节
-      _preloadNextChapters(nextIndex + 1, count: 2);
+      // 深度静默预加载后续章节
+      _triggerSilentPrefetch(nextIndex);
     }
 
     _isLoadingMore = false;
@@ -556,21 +559,32 @@ class _ReaderScreenState extends State<ReaderScreen> {
     } catch (_) {}
   }
 
-  /// 后台静默预加载后续章节
-  void _preloadNextChapters(int startIndex, {int count = 2}) async {
-    for (int i = 0; i < count; i++) {
-      final targetIndex = startIndex + i;
-      if (targetIndex >= widget.chapters.length) break;
-      if (!_chapterCache.containsKey(targetIndex)) {
-        await _fetchChapterContent(targetIndex);
+  /// 静默预加载流水线：后台并发异步预取后续 3~5 章正文与段评，实现完全无缝零等待
+  void _triggerSilentPrefetch(int currentIndex, {int count = 4}) {
+    final targets = <int>[];
+    for (int offset = 1; offset <= count; offset++) {
+      final targetIdx = currentIndex + offset;
+      if (targetIdx < widget.chapters.length &&
+          !_chapterCache.containsKey(targetIdx) &&
+          !_prefetchedIndices.contains(targetIdx)) {
+        targets.add(targetIdx);
+        _prefetchedIndices.add(targetIdx);
       }
     }
-    // 适当预加载前一章
-    if (startIndex > 1) {
-      final prevIndex = startIndex - 2;
-      if (!_chapterCache.containsKey(prevIndex)) {
-        await _fetchChapterContent(prevIndex);
-      }
+    // 同时预热前 1 章
+    final prevIdx = currentIndex - 1;
+    if (prevIdx >= 0 &&
+        !_chapterCache.containsKey(prevIdx) &&
+        !_prefetchedIndices.contains(prevIdx)) {
+      targets.add(prevIdx);
+      _prefetchedIndices.add(prevIdx);
+    }
+
+    if (targets.isEmpty) return;
+
+    // 低优先级并发请求，静默缓存
+    for (final idx in targets) {
+      _fetchChapterContent(idx).catchError((_) {});
     }
   }
 
@@ -636,6 +650,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final currentTheme = _themes[_themeIndex];
     final searchController = TextEditingController();
     var isReverse = false;
+    var isVolumeMode = false;
 
     showModalBottomSheet(
       context: context,
@@ -658,6 +673,21 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     .where((c) => c.title.contains(filter))
                     .toList();
 
+            // 构造分卷分组
+            final volumeMap = <String, List<Chapter>>{};
+            String currentVol = '正文';
+            for (final chap in allChapters) {
+              if (chap.volumeTitle.isNotEmpty) {
+                currentVol = chap.volumeTitle;
+              } else if (chap.title.contains(RegExp(r'第.+卷'))) {
+                final match = RegExp(r'(第.+卷[^\s]*)').firstMatch(chap.title);
+                if (match != null) {
+                  currentVol = match.group(1)!;
+                }
+              }
+              volumeMap.putIfAbsent(currentVol, () => []).add(chap);
+            }
+
             return DraggableScrollableSheet(
               initialChildSize: 0.75,
               minChildSize: 0.4,
@@ -666,7 +696,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
               builder: (_, scrollController) {
                 // 打开目录时，自动平滑滚动定位到当前章节
                 WidgetsBinding.instance.addPostFrameCallback((_) {
-                  if (scrollController.hasClients && filter.isEmpty) {
+                  if (scrollController.hasClients && filter.isEmpty && !isVolumeMode) {
                     final targetIndex = isReverse
                         ? (allChapters.length - 1 - _currentActiveIndex)
                         : _currentActiveIndex;
@@ -694,6 +724,18 @@ class _ReaderScreenState extends State<ReaderScreen> {
                                 color: currentTheme.textColor,
                               ),
                             ),
+                          ),
+                          IconButton(
+                            icon: Icon(
+                              isVolumeMode ? Icons.view_headline : Icons.folder_outlined,
+                              color: currentTheme.secondaryColor,
+                            ),
+                            tooltip: isVolumeMode ? '列表平铺' : '按卷折叠',
+                            onPressed: () {
+                              setModalState(() {
+                                isVolumeMode = !isVolumeMode;
+                              });
+                            },
                           ),
                           IconButton(
                             icon: Icon(
@@ -732,7 +774,62 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     ),
                     const Divider(height: 1),
                     Expanded(
-                      child: ListView.builder(
+                      child: isVolumeMode && filter.isEmpty
+                          ? ListView(
+                              controller: scrollController,
+                              children: volumeMap.entries.map((entry) {
+                                final volTitle = entry.key;
+                                final volChapters = entry.value;
+                                final containsActive = volChapters.any(
+                                    (c) => widget.chapters.indexOf(c) == _currentActiveIndex);
+                                return ExpansionTile(
+                                  key: PageStorageKey('vol_$volTitle'),
+                                  initiallyExpanded: containsActive || volumeMap.length == 1,
+                                  iconColor: Theme.of(context).primaryColor,
+                                  collapsedIconColor: currentTheme.secondaryColor,
+                                  title: Text(
+                                    '$volTitle (${volChapters.length}章)',
+                                    style: TextStyle(
+                                      fontSize: 14,
+                                      fontWeight: FontWeight.bold,
+                                      color: containsActive
+                                          ? Theme.of(context).primaryColor
+                                          : currentTheme.textColor,
+                                    ),
+                                  ),
+                                  children: volChapters.map((chap) {
+                                    final originalIndex = widget.chapters.indexOf(chap);
+                                    final isCurrent = originalIndex == _currentActiveIndex;
+                                    return ListTile(
+                                      dense: true,
+                                      contentPadding: const EdgeInsets.symmetric(horizontal: 32),
+                                      title: Text(
+                                        chap.title,
+                                        style: TextStyle(
+                                          fontSize: 13,
+                                          color: isCurrent
+                                              ? Theme.of(context).primaryColor
+                                              : currentTheme.textColor,
+                                          fontWeight:
+                                              isCurrent ? FontWeight.bold : FontWeight.normal,
+                                        ),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                      trailing: isCurrent
+                                          ? Icon(Icons.bookmark,
+                                              size: 16, color: Theme.of(context).primaryColor)
+                                          : null,
+                                      onTap: () {
+                                        Navigator.pop(ctx);
+                                        _startFromChapter(originalIndex);
+                                      },
+                                    );
+                                  }).toList(),
+                                );
+                              }).toList(),
+                            )
+                          : ListView.builder(
                         controller: scrollController,
                         itemCount: displayChapters.length,
                         itemBuilder: (context, idx) {
