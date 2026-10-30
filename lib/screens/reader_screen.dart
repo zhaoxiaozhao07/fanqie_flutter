@@ -112,7 +112,6 @@ class _ReaderScreenState extends State<ReaderScreen> {
   PageController _pageHorizontalController = PageController();
   int _currentHorizontalPageIndex = 0;
   List<ReadingNote> _cachedNotes = [];
-  String _currentSelectedText = '';
 
   // 沉浸式自动滚屏阅读
   bool _isAutoScrolling = false;
@@ -1406,7 +1405,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
           // 阅读主要连续内容区域
           GestureDetector(
             onTap: _toggleControls,
-            behavior: HitTestBehavior.opaque,
+            behavior: HitTestBehavior.translucent,
             child: SafeArea(
               child: Column(
                 children: [
@@ -1554,112 +1553,105 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
-    // 双模式切换：左右单屏翻页模式 (完全无任何垂直滑动冲突)
+    // 双模式切换：左右单屏翻页模式 (无垂直滑动，仅水平翻页)
     if (_isPageMode) {
       return _buildPageModeBody(theme);
     }
 
-    return SelectionArea(
-      onSelectionChanged: (content) {
-        _currentSelectedText = content?.plainText ?? '';
-      },
-      contextMenuBuilder: (context, selectableRegionState) {
-        return _buildSelectionBubbleMenu(context, selectableRegionState, theme);
-      },
-      child: Scrollbar(
+    // 纯净满帧滚动容器（无全局 SelectionArea 拦截，滑动极致顺滑，点按秒级唤起菜单）
+    return Scrollbar(
+      controller: _scrollController,
+      child: SingleChildScrollView(
         controller: _scrollController,
-        child: SingleChildScrollView(
-          controller: _scrollController,
-          padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 12),
-          physics: const BouncingScrollPhysics(),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // 顶部上一章指示器/触发器
-              if (_displayedChapters.isNotEmpty && _displayedChapters.first > 0)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  child: Center(
-                    child: TextButton.icon(
-                      onPressed: _isLoadingPrev ? null : _autoPrependPreviousChapter,
-                      icon: _isLoadingPrev
-                          ? SizedBox(
-                              width: 14,
-                              height: 14,
-                              child: CircularProgressIndicator(
-                                strokeWidth: 2,
-                                valueColor: AlwaysStoppedAnimation<Color>(
-                                  theme.secondaryColor.withValues(alpha: 0.6),
-                                ),
+        padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 12),
+        physics: const BouncingScrollPhysics(),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            // 顶部上一章指示器/触发器
+            if (_displayedChapters.isNotEmpty && _displayedChapters.first > 0)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 16),
+                child: Center(
+                  child: TextButton.icon(
+                    onPressed: _isLoadingPrev ? null : _autoPrependPreviousChapter,
+                    icon: _isLoadingPrev
+                        ? SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor: AlwaysStoppedAnimation<Color>(
+                                theme.secondaryColor.withValues(alpha: 0.6),
                               ),
-                            )
-                          : Icon(Icons.arrow_upward_rounded, size: 16, color: theme.secondaryColor),
-                      label: Text(
-                        _isLoadingPrev
-                            ? '正在加载上一章...'
-                            : '上滑或点击加载：${widget.chapters[_displayedChapters.first - 1].title}',
-                        style: TextStyle(fontSize: 12, color: theme.secondaryColor),
-                      ),
-                    ),
-                  ),
-                )
-              else if (_displayedChapters.isNotEmpty && _displayedChapters.first == 0)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 20),
-                  child: Center(
-                    child: Text(
-                      '— 已是第一章 —',
-                      style: TextStyle(fontSize: 12, color: theme.secondaryColor.withValues(alpha: 0.6)),
+                            ),
+                          )
+                        : Icon(Icons.arrow_upward_rounded, size: 16, color: theme.secondaryColor),
+                    label: Text(
+                      _isLoadingPrev
+                          ? '正在加载上一章...'
+                          : '上滑或点击加载：${widget.chapters[_displayedChapters.first - 1].title}',
+                      style: TextStyle(fontSize: 12, color: theme.secondaryColor),
                     ),
                   ),
                 ),
+              )
+            else if (_displayedChapters.isNotEmpty && _displayedChapters.first == 0)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 20),
+                child: Center(
+                  child: Text(
+                    '— 已是第一章 —',
+                    style: TextStyle(fontSize: 12, color: theme.secondaryColor.withValues(alpha: 0.6)),
+                  ),
+                ),
+              ),
 
-              // 渲染所有已加载的章节
-              for (int i = 0; i < _displayedChapters.length; i++)
-                _buildChapterBlock(_displayedChapters[i], theme, isFirst: i == 0),
+            // 渲染所有已加载的章节
+            for (int i = 0; i < _displayedChapters.length; i++)
+              _buildChapterBlock(_displayedChapters[i], theme, isFirst: i == 0),
 
-              // 下拉预加载指示器
-              if (_displayedChapters.isNotEmpty &&
-                  _displayedChapters.last < widget.chapters.length - 1)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 32),
-                  child: Center(
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            valueColor: AlwaysStoppedAnimation<Color>(
-                              theme.secondaryColor.withValues(alpha: 0.7),
-                            ),
+            // 下拉预加载指示器
+            if (_displayedChapters.isNotEmpty &&
+                _displayedChapters.last < widget.chapters.length - 1)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 32),
+                child: Center(
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(
+                          strokeWidth: 2,
+                          valueColor: AlwaysStoppedAnimation<Color>(
+                            theme.secondaryColor.withValues(alpha: 0.7),
                           ),
                         ),
-                        const SizedBox(width: 10),
-                        Text(
-                          '正在加载下一章...',
-                          style: TextStyle(color: theme.secondaryColor, fontSize: 13),
-                        ),
-                      ],
-                    ),
-                  ),
-                )
-              else if (_displayedChapters.isNotEmpty &&
-                  _displayedChapters.last >= widget.chapters.length - 1)
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 48),
-                  child: Center(
-                    child: Text(
-                      '— 全书已完结 —',
-                      style: TextStyle(fontSize: 13, color: theme.secondaryColor),
-                    ),
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        '正在加载下一章...',
+                        style: TextStyle(color: theme.secondaryColor, fontSize: 13),
+                      ),
+                    ],
                   ),
                 ),
-              const SizedBox(height: 32),
-            ],
-          ),
+              )
+            else if (_displayedChapters.isNotEmpty &&
+                _displayedChapters.last >= widget.chapters.length - 1)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 48),
+                child: Center(
+                  child: Text(
+                    '— 全书已完结 —',
+                    style: TextStyle(fontSize: 13, color: theme.secondaryColor),
+                  ),
+                ),
+              ),
+            const SizedBox(height: 32),
+          ],
         ),
       ),
     );
@@ -1802,8 +1794,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final showBubble = _showCommentBubbles && commentCount > 0;
 
     // 当前章节用户划线的所有文本
+    final chapterIdx = widget.chapters.indexWhere((c) => c.itemId == chapter.itemId);
+    final validChapIdx = chapterIdx != -1 ? chapterIdx : _currentActiveIndex;
     final chapterNotes = _cachedNotes
-        .where((n) => n.chapterIndex == _currentActiveIndex && n.text.trim().isNotEmpty)
+        .where((n) => n.chapterIndex == validChapIdx && n.text.trim().isNotEmpty)
         .map((n) => n.text.trim())
         .toList();
 
@@ -1850,7 +1844,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 fontFamily: _resolveFontFamily(_fontFamily),
                 decoration: isUnderlined ? TextDecoration.underline : null,
                 decorationStyle: TextDecorationStyle.solid,
-                decorationColor: Theme.of(context).primaryColor,
+                decorationColor: theme.textColor.withValues(alpha: 0.85),
                 decorationThickness: 2.0,
               ),
             ),
@@ -1916,6 +1910,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
+    // 支持自由长按选词并弹出暗色气泡工具条，点按正文空白处继续响应菜单呼出
     return Container(
       key: pKey,
       padding: isLocateTarget ? const EdgeInsets.symmetric(vertical: 2, horizontal: 4) : EdgeInsets.zero,
@@ -1926,8 +1921,21 @@ class _ReaderScreenState extends State<ReaderScreen> {
               border: Border.all(color: Theme.of(context).primaryColor, width: 1.2),
             )
           : null,
-      child: Text.rich(
+      child: SelectableText.rich(
         TextSpan(children: inlineSpans),
+        contextMenuBuilder: (context, editableTextState) {
+          final textVal = editableTextState.textEditingValue;
+          final selected = textVal.selection.textInside(textVal.text);
+          if (selected.trim().isEmpty) return const SizedBox.shrink();
+          return _buildDarkBubbleMenu(
+            context: context,
+            anchors: editableTextState.contextMenuAnchors,
+            selectedText: selected,
+            onDismiss: () => editableTextState.hideToolbar(),
+            chapterIndex: validChapIdx,
+            paraIndex: paraIndex,
+          );
+        },
       ),
     );
   }
@@ -2495,22 +2503,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         const SizedBox(height: 12),
                       ],
                       Expanded(
-                        child: SelectionArea(
-                          onSelectionChanged: (content) {
-                            _currentSelectedText = content?.plainText ?? '';
-                          },
-                          contextMenuBuilder: (context, selectableRegionState) {
-                            return _buildSelectionBubbleMenu(context, selectableRegionState, theme);
-                          },
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              for (final para in pageParagraphs) ...[
-                                _buildParagraphWithUnderlines(para, theme, chapter),
-                                SizedBox(height: _paragraphSpacing.clamp(6.0, 16.0)),
-                              ],
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            for (final para in pageParagraphs) ...[
+                              _buildParagraphWithUnderlines(para, theme, chapter),
+                              SizedBox(height: _paragraphSpacing.clamp(6.0, 16.0)),
                             ],
-                          ),
+                          ],
                         ),
                       ),
                       // 底部单屏进度微型指示
@@ -2593,7 +2593,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  /// 单屏段落构建（带纯正下划线标注）
+  /// 单屏段落构建（带自由选词与纯正下划线标注）
   Widget _buildParagraphWithUnderlines(String paragraph, ReaderTheme theme, Chapter chapter) {
     final trimmed = paragraph.trim();
     if (trimmed.isEmpty) return const SizedBox.shrink();
@@ -2607,14 +2607,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
       textToShow = trimmed;
     }
 
+    final chapterIdx = widget.chapters.indexWhere((c) => c.itemId == chapter.itemId);
+    final validChapIdx = chapterIdx != -1 ? chapterIdx : _currentActiveIndex;
     final chapterNotes = _cachedNotes
-        .where((n) => n.chapterIndex == _currentActiveIndex && n.text.trim().isNotEmpty)
+        .where((n) => n.chapterIndex == validChapIdx && n.text.trim().isNotEmpty)
         .map((n) => n.text.trim())
         .toList();
 
     final spans = _buildSpansWithUnderline(textToShow, chapterNotes, theme);
 
-    return Text.rich(
+    return SelectableText.rich(
       TextSpan(children: spans),
       style: TextStyle(
         fontSize: _fontSize,
@@ -2623,6 +2625,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
         letterSpacing: _letterSpacing,
         fontFamily: _resolveFontFamily(_fontFamily),
       ),
+      contextMenuBuilder: (context, editableTextState) {
+        final textVal = editableTextState.textEditingValue;
+        final selected = textVal.selection.textInside(textVal.text);
+        if (selected.trim().isEmpty) return const SizedBox.shrink();
+        return _buildDarkBubbleMenu(
+          context: context,
+          anchors: editableTextState.contextMenuAnchors,
+          selectedText: selected,
+          onDismiss: () => editableTextState.hideToolbar(),
+          chapterIndex: validChapIdx,
+          paraIndex: 0,
+        );
+      },
     );
   }
 
@@ -2647,6 +2662,28 @@ class _ReaderScreenState extends State<ReaderScreen> {
       ];
     }
 
+    final matchedPhrases = underlinedPhrases
+        .map((p) => p.trim())
+        .where((p) => p.isNotEmpty && text.contains(p))
+        .toList();
+
+    if (matchedPhrases.isEmpty) {
+      return [
+        TextSpan(
+          text: text,
+          style: TextStyle(
+            fontSize: _fontSize,
+            height: _lineHeight,
+            color: theme.textColor,
+            letterSpacing: _letterSpacing,
+            fontFamily: _resolveFontFamily(_fontFamily),
+          ),
+        ),
+      ];
+    }
+
+    matchedPhrases.sort((a, b) => b.length.compareTo(a.length));
+
     final spans = <InlineSpan>[];
     int currentPos = 0;
 
@@ -2654,7 +2691,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       int nextMatchStart = -1;
       String? matchedPhrase;
 
-      for (final phrase in underlinedPhrases) {
+      for (final phrase in matchedPhrases) {
         final idx = text.indexOf(phrase, currentPos);
         if (idx != -1 && (nextMatchStart == -1 || idx < nextMatchStart)) {
           nextMatchStart = idx;
@@ -2689,7 +2726,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
               fontFamily: _resolveFontFamily(_fontFamily),
               decoration: TextDecoration.underline,
               decorationStyle: TextDecorationStyle.solid,
-              decorationColor: Theme.of(context).primaryColor,
+              decorationColor: theme.textColor.withValues(alpha: 0.85),
               decorationThickness: 2.0,
             ),
           ),
@@ -2770,71 +2807,104 @@ class _ReaderScreenState extends State<ReaderScreen> {
     return pages.isEmpty ? [content] : pages;
   }
 
-  /// 选中文本浮动暗色气泡菜单（紧贴选区上方，包含复制、划线、想法，不弹底部抽屉）
-  Widget _buildSelectionBubbleMenu(
-    BuildContext context,
-    SelectableRegionState selectableRegionState,
-    ReaderTheme theme,
-  ) {
-    return AdaptiveTextSelectionToolbar(
-      anchors: selectableRegionState.contextMenuAnchors,
+  /// 专属暗色半透明圆角气泡浮动菜单（绝不出现白底白字，清晰加粗+图标）
+  Widget _buildDarkBubbleMenu({
+    required BuildContext context,
+    required TextSelectionToolbarAnchors anchors,
+    required String selectedText,
+    required VoidCallback onDismiss,
+    required int chapterIndex,
+    required int paraIndex,
+  }) {
+    return TextSelectionToolbar(
+      anchorAbove: anchors.primaryAnchor,
+      anchorBelow: anchors.secondaryAnchor == null ? anchors.primaryAnchor : anchors.secondaryAnchor!,
       children: [
-        InkWell(
-          onTap: () {
-            Clipboard.setData(ClipboardData(text: _currentSelectedText));
-            selectableRegionState.hideToolbar();
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('已复制文本'), duration: Duration(seconds: 1)),
-            );
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: const Text('复制', style: TextStyle(color: Colors.white, fontSize: 13)),
+        Container(
+          decoration: BoxDecoration(
+            color: const Color(0xFF232326),
+            borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.35),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
+              ),
+            ],
           ),
-        ),
-        InkWell(
-          onTap: () async {
-            final text = _currentSelectedText.trim();
-            selectableRegionState.hideToolbar();
-            if (text.isNotEmpty) {
-              await _bookmarkService.addNote(
-                bookId: widget.book.bookId,
-                chapterIndex: _currentActiveIndex,
-                chapterTitle: widget.chapters[_currentActiveIndex].title,
-                text: text,
-                note: '',
-              );
-              await _loadNotes();
-              if (context.mounted) {
-                ScaffoldMessenger.of(context).showSnackBar(
-                  const SnackBar(content: Text('已添加划线'), duration: Duration(seconds: 1)),
-                );
-              }
-            }
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: const Text('划线', style: TextStyle(color: Colors.white, fontSize: 13)),
-          ),
-        ),
-        InkWell(
-          onTap: () {
-            final text = _currentSelectedText.trim();
-            selectableRegionState.hideToolbar();
-            if (text.isNotEmpty) {
-              _showAddNoteDialogForText(text);
-            }
-          },
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            child: const Text('想法', style: TextStyle(color: Colors.white, fontSize: 13)),
+          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  visualDensity: VisualDensity.compact,
+                ),
+                onPressed: () {
+                  Clipboard.setData(ClipboardData(text: selectedText));
+                  onDismiss();
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('已复制文本'), duration: Duration(seconds: 1)),
+                  );
+                },
+                icon: const Icon(Icons.copy_rounded, size: 15, color: Colors.white),
+                label: const Text('复制', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
+              ),
+              Container(width: 1, height: 16, color: Colors.white24),
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  visualDensity: VisualDensity.compact,
+                ),
+                onPressed: () async {
+                  onDismiss();
+                  if (selectedText.trim().isNotEmpty) {
+                    await _bookmarkService.addNote(
+                      bookId: widget.book.bookId,
+                      chapterIndex: chapterIndex,
+                      chapterTitle: widget.chapters[chapterIndex].title,
+                      paragraphIndex: paraIndex,
+                      text: selectedText.trim(),
+                      note: '',
+                    );
+                    await _loadNotes();
+                    if (context.mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(content: Text('已添加划线'), duration: Duration(seconds: 1)),
+                      );
+                    }
+                  }
+                },
+                icon: const Icon(Icons.edit_outlined, size: 15, color: Colors.white),
+                label: const Text('划线', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
+              ),
+              Container(width: 1, height: 16, color: Colors.white24),
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  visualDensity: VisualDensity.compact,
+                ),
+                onPressed: () {
+                  onDismiss();
+                  if (selectedText.trim().isNotEmpty) {
+                    _showAddNoteDialogForText(selectedText.trim(), chapterIndex: chapterIndex, paraIndex: paraIndex);
+                  }
+                },
+                icon: const Icon(Icons.chat_bubble_outline_rounded, size: 15, color: Colors.white),
+                label: const Text('想法', style: TextStyle(color: Colors.white, fontSize: 13, fontWeight: FontWeight.bold)),
+              ),
+            ],
           ),
         ),
       ],
     );
   }
 
-  void _showAddNoteDialogForText(String text) {
+  void _showAddNoteDialogForText(String text, {required int chapterIndex, int paraIndex = 0}) {
     final noteController = TextEditingController();
     showDialog(
       context: context,
@@ -2878,8 +2948,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
               Navigator.pop(ctx);
               await _bookmarkService.addNote(
                 bookId: widget.book.bookId,
-                chapterIndex: _currentActiveIndex,
-                chapterTitle: widget.chapters[_currentActiveIndex].title,
+                chapterIndex: chapterIndex,
+                chapterTitle: widget.chapters[chapterIndex].title,
+                paragraphIndex: paraIndex,
                 text: text,
                 note: note,
               );
