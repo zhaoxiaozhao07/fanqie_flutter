@@ -1644,53 +1644,55 @@ class _ReaderScreenState extends State<ReaderScreen> {
             ),
           ],
         ),
-        const SizedBox(height: 16),
 
-        // 真实本章评论入口卡片
-        Center(
-          child: InkWell(
-            onTap: () => _openChapterComments(chapter),
-            borderRadius: BorderRadius.circular(20),
-            child: Container(
-              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-              decoration: BoxDecoration(
-                color: isDark
-                    ? Colors.white.withValues(alpha: 0.08)
-                    : theme.highlightColor.withValues(alpha: 0.85),
-                borderRadius: BorderRadius.circular(20),
-                border: Border.all(
-                  color: theme.secondaryColor.withValues(alpha: 0.25),
-                  width: 0.8,
+        // 仅当本章真实有评论 (total > 0) 时才展示本章评论卡片；无评论时保持页面干净清爽
+        if (total > 0) ...[
+          const SizedBox(height: 16),
+          Center(
+            child: InkWell(
+              onTap: () => _openChapterComments(chapter),
+              borderRadius: BorderRadius.circular(20),
+              child: Container(
+                padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                decoration: BoxDecoration(
+                  color: isDark
+                      ? Colors.white.withValues(alpha: 0.08)
+                      : theme.highlightColor.withValues(alpha: 0.85),
+                  borderRadius: BorderRadius.circular(20),
+                  border: Border.all(
+                    color: theme.secondaryColor.withValues(alpha: 0.25),
+                    width: 0.8,
+                  ),
                 ),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Icon(
-                    Icons.chat_bubble_outline,
-                    size: 16,
-                    color: isDark ? Colors.white70 : theme.secondaryColor,
-                  ),
-                  const SizedBox(width: 8),
-                  Text(
-                    total > 0 ? '本章评论 ($total条讨论)' : '本章评论',
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: isDark ? Colors.white : theme.textColor,
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      Icons.chat_bubble_outline,
+                      size: 16,
+                      color: isDark ? Colors.white70 : theme.secondaryColor,
                     ),
-                  ),
-                  const SizedBox(width: 4),
-                  Icon(
-                    Icons.arrow_forward_ios,
-                    size: 11,
-                    color: isDark ? Colors.white54 : theme.secondaryColor,
-                  ),
-                ],
+                    const SizedBox(width: 8),
+                    Text(
+                      '本章评论 ($total条讨论)',
+                      style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: isDark ? Colors.white : theme.textColor,
+                      ),
+                    ),
+                    const SizedBox(width: 4),
+                    Icon(
+                      Icons.arrow_forward_ios,
+                      size: 11,
+                      color: isDark ? Colors.white54 : theme.secondaryColor,
+                    ),
+                  ],
+                ),
               ),
             ),
           ),
-        ),
+        ],
       ],
     );
   }
