@@ -1303,34 +1303,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (!isFirst) ...[
-            const SizedBox(height: 36),
-            // 章节间优雅分割条
-            Row(
-              children: [
-                Expanded(
-                  child: Divider(
-                    color: theme.secondaryColor.withValues(alpha: 0.3),
-                    thickness: 1,
-                  ),
-                ),
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  child: Text(
-                    '本章完',
-                    style: TextStyle(fontSize: 12, color: theme.secondaryColor),
-                  ),
-                ),
-                Expanded(
-                  child: Divider(
-                    color: theme.secondaryColor.withValues(alpha: 0.3),
-                    thickness: 1,
-                  ),
-                ),
-              ],
-            ),
-            const SizedBox(height: 36),
-          ],
+          if (!isFirst) const SizedBox(height: 24),
 
           // 章节大标题
           Text(
@@ -1346,6 +1319,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
           // 章节正文（段落级渲染 + TTS 正在播放语句实时高亮）
           _buildChapterParagraphs(chapterIndex, content, theme, currentTtsText),
+          const SizedBox(height: 28),
+
+          // 章节末尾段评入口与本章完
+          _buildChapterEndComments(chapter, theme),
+          const SizedBox(height: 36),
         ],
       ),
     );
@@ -1595,9 +1573,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   /// 显示本章段评概览
-  void _showChapterCommentsOverview() {
-    final chapter = widget.chapters[_currentActiveIndex];
+  void _openChapterComments(Chapter chapter) {
     final theme = _themes[_themeIndex];
+    final chapterIdx = widget.chapters.indexOf(chapter);
     ParagraphCommentSheet.show(
       context: context,
       bookId: widget.book.bookId,
@@ -1609,6 +1587,94 @@ class _ReaderScreenState extends State<ReaderScreen> {
       textColor: theme.textColor,
       secondaryColor: theme.secondaryColor,
       highlightColor: theme.highlightColor,
+      onLocateParagraph: chapterIdx >= 0 ? () => _startFromChapter(chapterIdx) : null,
+    );
+  }
+
+  /// 构建章节末尾的“本章完”分割与段评入口
+  Widget _buildChapterEndComments(Chapter chapter, ReaderTheme theme) {
+    final stats = _chapterCommentStats[chapter.itemId];
+    final total = stats?.totalCount ?? 0;
+    final isDark = theme.backgroundColor.computeLuminance() < 0.2;
+
+    return Column(
+      children: [
+        // 本章完装饰分割线
+        Row(
+          children: [
+            Expanded(
+              child: Divider(
+                color: theme.secondaryColor.withValues(alpha: 0.25),
+                thickness: 0.8,
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              child: Text(
+                '本章完',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: theme.secondaryColor.withValues(alpha: 0.75),
+                  letterSpacing: 2.0,
+                ),
+              ),
+            ),
+            Expanded(
+              child: Divider(
+                color: theme.secondaryColor.withValues(alpha: 0.25),
+                thickness: 0.8,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 16),
+
+        // 本章段评快捷入口卡片
+        Center(
+          child: InkWell(
+            onTap: () => _openChapterComments(chapter),
+            borderRadius: BorderRadius.circular(20),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              decoration: BoxDecoration(
+                color: isDark
+                    ? Colors.white.withValues(alpha: 0.08)
+                    : theme.highlightColor.withValues(alpha: 0.85),
+                borderRadius: BorderRadius.circular(20),
+                border: Border.all(
+                  color: theme.secondaryColor.withValues(alpha: 0.25),
+                  width: 0.8,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.chat_bubble_outline,
+                    size: 16,
+                    color: isDark ? Colors.white70 : theme.secondaryColor,
+                  ),
+                  const SizedBox(width: 8),
+                  Text(
+                    total > 0 ? '本章段评 ($total条讨论)' : '本章段评',
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: isDark ? Colors.white : theme.textColor,
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  Icon(
+                    Icons.arrow_forward_ios,
+                    size: 11,
+                    color: isDark ? Colors.white54 : theme.secondaryColor,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ],
     );
   }
 
@@ -1851,74 +1917,24 @@ class _ReaderScreenState extends State<ReaderScreen> {
       child: SafeArea(
         top: false,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceAround,
             children: [
-              Row(
-                children: [
-                  IconButton(
-                    icon: Icon(Icons.skip_previous_rounded, color: theme.textColor),
-                    tooltip: '上一章',
-                    onPressed: _currentActiveIndex > 0
-                        ? () => _startFromChapter(_currentActiveIndex - 1)
-                        : null,
-                  ),
-                  Expanded(
-                    child: SliderTheme(
-                      data: SliderTheme.of(context).copyWith(
-                        trackHeight: 3,
-                        thumbShape: const RoundSliderThumbShape(enabledThumbRadius: 6),
-                      ),
-                      child: Slider(
-                        value: _currentActiveIndex.toDouble(),
-                        min: 0,
-                        max: (widget.chapters.length - 1).toDouble().clamp(0.0, double.infinity),
-                        divisions: widget.chapters.length > 1 ? widget.chapters.length - 1 : 1,
-                        label: '第 ${_currentActiveIndex + 1} 章',
-                        onChanged: (val) {
-                          final target = val.round();
-                          if (target != _currentActiveIndex) {
-                            _startFromChapter(target);
-                          }
-                        },
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    icon: Icon(Icons.skip_next_rounded, color: theme.textColor),
-                    tooltip: '下一章',
-                    onPressed: _currentActiveIndex < widget.chapters.length - 1
-                        ? () => _startFromChapter(_currentActiveIndex + 1)
-                        : null,
-                  ),
-                ],
+              TextButton.icon(
+                onPressed: _showDirectoryDrawer,
+                icon: Icon(Icons.menu_book_outlined, color: theme.textColor, size: 20),
+                label: Text('目录', style: TextStyle(color: theme.textColor)),
               ),
-              const Divider(height: 1),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: [
-                  TextButton.icon(
-                    onPressed: _showDirectoryDrawer,
-                    icon: Icon(Icons.menu_book_outlined, color: theme.textColor, size: 20),
-                    label: Text('目录', style: TextStyle(color: theme.textColor)),
-                  ),
-                  TextButton.icon(
-                    onPressed: _startTtsReading,
-                    icon: Icon(Icons.headphones_outlined, color: theme.textColor, size: 20),
-                    label: Text('听书', style: TextStyle(color: theme.textColor)),
-                  ),
-                  TextButton.icon(
-                    onPressed: _showChapterCommentsOverview,
-                    icon: Icon(Icons.chat_bubble_outline, color: theme.textColor, size: 20),
-                    label: Text('段评', style: TextStyle(color: theme.textColor)),
-                  ),
-                  TextButton.icon(
-                    onPressed: _showSettingsModal,
-                    icon: Icon(Icons.text_format, color: theme.textColor, size: 20),
-                    label: Text('排版设置', style: TextStyle(color: theme.textColor)),
-                  ),
-                ],
+              TextButton.icon(
+                onPressed: _startTtsReading,
+                icon: Icon(Icons.headphones_outlined, color: theme.textColor, size: 20),
+                label: Text('听书', style: TextStyle(color: theme.textColor)),
+              ),
+              TextButton.icon(
+                onPressed: _showSettingsModal,
+                icon: Icon(Icons.text_format, color: theme.textColor, size: 20),
+                label: Text('排版设置', style: TextStyle(color: theme.textColor)),
               ),
             ],
           ),
