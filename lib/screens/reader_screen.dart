@@ -98,6 +98,30 @@ class _ReaderScreenState extends State<ReaderScreen> {
   double _horizontalPadding = 20.0; // 页面边距：14 紧凑, 20 适中, 28 宽松
   bool _volumeKeyScroll = false; // 音量物理键翻页滚动
   bool _showCommentBubbles = true; // 是否显示段评气泡
+  bool _indentTwoChars = true; // 首行缩进两字符
+  double _letterSpacing = 0.5; // 字间距
+  double _paragraphSpacing = 14.0; // 段间距
+  String _fontFamily = 'system'; // 字体设置
+  bool _isPageMode = false; // 双模式切换：水平翻页 vs 连续滚屏
+  PageController? _pageController;
+
+  // 沉浸式自动滚屏阅读
+  bool _isAutoScrolling = false;
+  double _autoScrollSpeed = 40.0; // px/s
+  Timer? _autoScrollTimer;
+
+  String? _resolveFontFamily(String font) {
+    switch (font) {
+      case 'kaiti':
+        return 'KaiTi';
+      case 'serif':
+        return 'SongTi';
+      case 'sans-serif':
+        return 'sans-serif';
+      default:
+        return null;
+    }
+  }
 
   static const List<ReaderTheme> _themes = [
     ReaderTheme(
@@ -169,6 +193,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _activeChapterNotifier.dispose();
     _statusTimer?.cancel();
     _highlightTimer?.cancel();
+    _autoScrollTimer?.cancel();
+    _pageController?.dispose();
     ReaderSystemService.setKeepScreenOn(false);
     ReaderSystemService.setVolumeKeyScrollEnabled(false);
     ReaderSystemService.registerVolumeKeyListener(null);
@@ -258,6 +284,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _horizontalPadding = prefs.getDouble('reader_horizontal_padding') ?? 20.0;
       _volumeKeyScroll = prefs.getBool('reader_volume_key_scroll') ?? false;
       _showCommentBubbles = prefs.getBool('reader_show_comment_bubbles') ?? true;
+      _indentTwoChars = prefs.getBool('reader_indent_two_chars') ?? true;
+      _letterSpacing = prefs.getDouble('reader_letter_spacing') ?? 0.5;
+      _paragraphSpacing = prefs.getDouble('reader_paragraph_spacing') ?? 14.0;
+      _fontFamily = prefs.getString('reader_font_family') ?? 'system';
+      _isPageMode = prefs.getBool('reader_is_page_mode') ?? false;
+      if (_isPageMode) {
+        _pageController = PageController(initialPage: _currentActiveIndex);
+      }
     });
   }
 
@@ -269,6 +303,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
     await prefs.setDouble('reader_horizontal_padding', _horizontalPadding);
     await prefs.setBool('reader_volume_key_scroll', _volumeKeyScroll);
     await prefs.setBool('reader_show_comment_bubbles', _showCommentBubbles);
+    await prefs.setBool('reader_indent_two_chars', _indentTwoChars);
+    await prefs.setDouble('reader_letter_spacing', _letterSpacing);
+    await prefs.setDouble('reader_paragraph_spacing', _paragraphSpacing);
+    await prefs.setString('reader_font_family', _fontFamily);
+    await prefs.setBool('reader_is_page_mode', _isPageMode);
   }
 
   void _onVolumeScroll(String direction) {
@@ -623,9 +662,56 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   void _toggleControls() {
+    if (_isAutoScrolling) {
+      if (_autoScrollTimer?.isActive == true) {
+        _autoScrollTimer?.cancel();
+      } else {
+        _startAutoScroll();
+      }
+      setState(() {});
+      return;
+    }
     setState(() {
       _showControls = !_showControls;
     });
+  }
+
+  void _toggleAutoScroll() {
+    if (_isAutoScrolling) {
+      _stopAutoScroll();
+    } else {
+      _startAutoScroll();
+    }
+  }
+
+  void _startAutoScroll() {
+    if (_isPageMode) {
+      setState(() {
+        _isPageMode = false;
+        _savePreferences();
+      });
+    }
+    setState(() => _isAutoScrolling = true);
+    _autoScrollTimer?.cancel();
+    const intervalMs = 25;
+    _autoScrollTimer = Timer.periodic(const Duration(milliseconds: intervalMs), (_) {
+      if (!_scrollController.hasClients || !_isAutoScrolling) return;
+      final step = _autoScrollSpeed * (intervalMs / 1000.0);
+      final nextOffset = _scrollController.offset + step;
+      if (nextOffset >= _scrollController.position.maxScrollExtent) {
+        _stopAutoScroll();
+      } else {
+        _scrollController.jumpTo(nextOffset);
+      }
+    });
+  }
+
+  void _stopAutoScroll() {
+    _autoScrollTimer?.cancel();
+    _autoScrollTimer = null;
+    if (mounted) {
+      setState(() => _isAutoScrolling = false);
+    }
   }
 
   Future<void> _toggleBookshelf() async {
@@ -880,6 +966,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final currentTheme = _themes[_themeIndex];
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: currentTheme.backgroundColor,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
@@ -889,7 +976,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
           builder: (context, setModalState) {
             return Padding(
               padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-              child: Column(
+              child: SingleChildScrollView(
+                child: Column(
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
@@ -911,6 +999,59 @@ class _ReaderScreenState extends State<ReaderScreen> {
                       fontWeight: FontWeight.bold,
                       color: currentTheme.textColor,
                     ),
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      Text(
+                        '翻页模式',
+                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
+                      ),
+                      const Spacer(),
+                      SegmentedButton<bool>(
+                        segments: const [
+                          ButtonSegment(value: false, label: Text('连续滚屏')),
+                          ButtonSegment(value: true, label: Text('左右翻页')),
+                        ],
+                        selected: {_isPageMode},
+                        showSelectedIcon: false,
+                        onSelectionChanged: (val) {
+                          setState(() {
+                            _isPageMode = val.first;
+                            if (_isPageMode) {
+                              _pageController = PageController(initialPage: _currentActiveIndex);
+                            }
+                          });
+                          setModalState(() {});
+                          _savePreferences();
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Text(
+                        '正文字体',
+                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
+                      ),
+                      const Spacer(),
+                      SegmentedButton<String>(
+                        segments: const [
+                          ButtonSegment(value: 'system', label: Text('系统')),
+                          ButtonSegment(value: 'kaiti', label: Text('楷体')),
+                          ButtonSegment(value: 'serif', label: Text('宋体')),
+                          ButtonSegment(value: 'sans-serif', label: Text('黑体')),
+                        ],
+                        selected: {_fontFamily},
+                        showSelectedIcon: false,
+                        onSelectionChanged: (val) {
+                          setState(() => _fontFamily = val.first);
+                          setModalState(() {});
+                          _savePreferences();
+                        },
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 16),
                   Row(
@@ -971,6 +1112,73 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         showSelectedIcon: false,
                         onSelectionChanged: (val) {
                           setState(() => _lineHeight = val.first);
+                          setModalState(() {});
+                          _savePreferences();
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Text(
+                        '字间距',
+                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
+                      ),
+                      const Spacer(),
+                      SegmentedButton<double>(
+                        segments: const [
+                          ButtonSegment(value: 0.0, label: Text('紧凑')),
+                          ButtonSegment(value: 0.5, label: Text('适中')),
+                          ButtonSegment(value: 1.2, label: Text('宽松')),
+                        ],
+                        selected: {_letterSpacing},
+                        showSelectedIcon: false,
+                        onSelectionChanged: (val) {
+                          setState(() => _letterSpacing = val.first);
+                          setModalState(() {});
+                          _savePreferences();
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Text(
+                        '段落间距',
+                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
+                      ),
+                      const Spacer(),
+                      SegmentedButton<double>(
+                        segments: const [
+                          ButtonSegment(value: 8.0, label: Text('小')),
+                          ButtonSegment(value: 14.0, label: Text('中')),
+                          ButtonSegment(value: 22.0, label: Text('大')),
+                        ],
+                        selected: {_paragraphSpacing},
+                        showSelectedIcon: false,
+                        onSelectionChanged: (val) {
+                          setState(() => _paragraphSpacing = val.first);
+                          setModalState(() {});
+                          _savePreferences();
+                        },
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Text(
+                        '首行缩进(2字符)',
+                        style: TextStyle(color: currentTheme.secondaryColor, fontSize: 14),
+                      ),
+                      const Spacer(),
+                      Switch.adaptive(
+                        value: _indentTwoChars,
+                        activeTrackColor: Theme.of(context).primaryColor,
+                        onChanged: (val) {
+                          setState(() => _indentTwoChars = val);
                           setModalState(() {});
                           _savePreferences();
                         },
@@ -1100,6 +1308,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     ],
                   ),
                 ],
+                ),
               ),
             );
           },
@@ -1214,6 +1423,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
               },
             ),
           ),
+
+          // 沉浸式自动阅读浮动控制条
+          if (_isAutoScrolling)
+            _buildAutoScrollControlBar(theme),
         ],
       ),
     );
@@ -1262,6 +1475,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
           ),
         ),
       );
+    }
+
+    // 双模式切换：左右翻页模式
+    if (_isPageMode) {
+      return _buildPageModeBody(theme);
     }
 
     return Scrollbar(
@@ -1466,7 +1684,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
             paraIndex: pIdx,
             commentCount: stats?.getCount(pIdx) ?? 0,
           ),
-          const SizedBox(height: 8),
+          SizedBox(height: _paragraphSpacing),
         ],
       ],
     );
@@ -1484,6 +1702,15 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final trimmed = paragraph.trim();
     if (trimmed.isEmpty) return const SizedBox.shrink();
 
+    var textToShow = paragraph;
+    if (_indentTwoChars) {
+      if (!textToShow.startsWith('\u3000\u3000') && !textToShow.startsWith('    ')) {
+        textToShow = '\u3000\u3000$trimmed';
+      }
+    } else {
+      textToShow = trimmed;
+    }
+
     final paraKeyStr = '${chapter.itemId}_$paraIndex';
     final pKey = _paragraphKeys.putIfAbsent(paraKeyStr, () => GlobalKey());
     final isLocateTarget = _highlightedParagraphKey == paraKeyStr;
@@ -1493,12 +1720,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
     if (currentTtsText.isEmpty) {
       inlineSpans.add(
         TextSpan(
-          text: paragraph,
+          text: textToShow,
           style: TextStyle(
             fontSize: _fontSize,
             height: _lineHeight,
             color: theme.textColor,
-            letterSpacing: 0.5,
+            letterSpacing: _letterSpacing,
+            fontFamily: _resolveFontFamily(_fontFamily),
           ),
         ),
       );
@@ -1511,17 +1739,18 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
       // 按自然句切分进行富文本高亮（Word 荧光笔标记风格，无外围多余边框）
       final sentencePattern = RegExp(r'[^。！？；!?;]+[。！？；!?;]?');
-      final matches = sentencePattern.allMatches(paragraph);
+      final matches = sentencePattern.allMatches(textToShow);
 
       if (matches.isEmpty) {
         inlineSpans.add(
           TextSpan(
-            text: paragraph,
+            text: textToShow,
             style: TextStyle(
               fontSize: _fontSize,
               height: _lineHeight,
               color: theme.textColor,
-              letterSpacing: 0.5,
+              letterSpacing: _letterSpacing,
+              fontFamily: _resolveFontFamily(_fontFamily),
             ),
           ),
         );
@@ -1550,7 +1779,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 color: theme.textColor,
                 backgroundColor: isSentHighlighted ? highlightMarkerBg : null,
                 fontWeight: isSentHighlighted ? FontWeight.w500 : FontWeight.normal,
-                letterSpacing: 0.5,
+                letterSpacing: _letterSpacing,
+                fontFamily: _resolveFontFamily(_fontFamily),
               ),
             ),
           );
@@ -1559,12 +1789,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
         if (!hasAnyHighlight) {
           inlineSpans.add(
             TextSpan(
-              text: paragraph,
+              text: textToShow,
               style: TextStyle(
                 fontSize: _fontSize,
                 height: _lineHeight,
                 color: theme.textColor,
-                letterSpacing: 0.5,
+                letterSpacing: _letterSpacing,
+                fontFamily: _resolveFontFamily(_fontFamily),
               ),
             ),
           );
@@ -2048,9 +2279,205 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 label: Text('听书', style: TextStyle(color: theme.textColor)),
               ),
               TextButton.icon(
+                onPressed: () {
+                  setState(() {
+                    _showControls = false;
+                  });
+                  _toggleAutoScroll();
+                },
+                icon: Icon(
+                  _isAutoScrolling ? Icons.pause_circle_outline : Icons.play_circle_outline,
+                  color: _isAutoScrolling ? Theme.of(context).primaryColor : theme.textColor,
+                  size: 20,
+                ),
+                label: Text(
+                  _isAutoScrolling ? '停止' : '自动阅读',
+                  style: TextStyle(
+                    color: _isAutoScrolling ? Theme.of(context).primaryColor : theme.textColor,
+                  ),
+                ),
+              ),
+              TextButton.icon(
                 onPressed: _showSettingsModal,
                 icon: Icon(Icons.text_format, color: theme.textColor, size: 20),
                 label: Text('排版设置', style: TextStyle(color: theme.textColor)),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPageModeBody(ReaderTheme theme) {
+    _pageController ??= PageController(initialPage: _currentActiveIndex);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return GestureDetector(
+          behavior: HitTestBehavior.translucent,
+          onTapUp: (details) {
+            final dx = details.localPosition.dx;
+            final width = constraints.maxWidth;
+            if (dx < width * 0.28) {
+              // 点击屏幕左侧 28% 向前翻页
+              if (_pageController?.hasClients == true && _currentActiveIndex > 0) {
+                _pageController?.previousPage(
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeInOut,
+                );
+              }
+            } else if (dx > width * 0.72) {
+              // 点击屏幕右侧 28% 向后翻页
+              if (_pageController?.hasClients == true && _currentActiveIndex < widget.chapters.length - 1) {
+                _pageController?.nextPage(
+                  duration: const Duration(milliseconds: 250),
+                  curve: Curves.easeInOut,
+                );
+              }
+            } else {
+              _toggleControls();
+            }
+          },
+          child: PageView.builder(
+            controller: _pageController,
+            itemCount: widget.chapters.length,
+            onPageChanged: (pageIndex) {
+              _currentActiveIndex = pageIndex;
+              _activeChapterNotifier.value = pageIndex;
+              _persistReadingProgress(pageIndex);
+              _fetchChapterContent(pageIndex);
+              _triggerSilentPrefetch(pageIndex);
+              setState(() {});
+            },
+            itemBuilder: (context, pageIndex) {
+              final chapter = widget.chapters[pageIndex];
+              final content = _chapterCache[pageIndex];
+              if (content == null || content.isEmpty) {
+                _fetchChapterContent(pageIndex);
+                return Center(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      CircularProgressIndicator(
+                        valueColor: AlwaysStoppedAnimation<Color>(theme.secondaryColor),
+                      ),
+                      const SizedBox(height: 12),
+                      Text('正在加载 ${chapter.title}...',
+                          style: TextStyle(color: theme.secondaryColor, fontSize: 13)),
+                    ],
+                  ),
+                );
+              }
+              final isTtsThisChapter =
+                  _ttsService.isActive && _ttsService.currentChapterTitle == chapter.title;
+              final currentTtsText = isTtsThisChapter ? _ttsService.currentText.trim() : '';
+
+              return SingleChildScrollView(
+                padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 12),
+                physics: const BouncingScrollPhysics(),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      chapter.title,
+                      style: TextStyle(
+                        fontSize: _fontSize + 4,
+                        fontWeight: FontWeight.bold,
+                        color: theme.textColor,
+                        height: 1.4,
+                      ),
+                    ),
+                    const SizedBox(height: 16),
+                    _buildChapterParagraphs(pageIndex, content, theme, currentTtsText),
+                    const SizedBox(height: 24),
+                    _buildChapterEndComments(chapter, theme),
+                    const SizedBox(height: 36),
+                  ],
+                ),
+              );
+            },
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildAutoScrollControlBar(ReaderTheme theme) {
+    return Positioned(
+      bottom: 24,
+      left: 20,
+      right: 20,
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          decoration: BoxDecoration(
+            color: theme.backgroundColor.withValues(alpha: 0.95),
+            borderRadius: BorderRadius.circular(30),
+            border: Border.all(color: theme.secondaryColor.withValues(alpha: 0.3)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.2),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
+              ),
+            ],
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Text(
+                '自动阅读',
+                style: TextStyle(
+                  color: theme.textColor,
+                  fontSize: 13,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+              const SizedBox(width: 8),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: Icon(Icons.remove_circle_outline, color: theme.secondaryColor, size: 20),
+                tooltip: '减速',
+                onPressed: _autoScrollSpeed > 15
+                    ? () => setState(() => _autoScrollSpeed -= 5)
+                    : null,
+              ),
+              Text(
+                '${_autoScrollSpeed.toInt()} px/s',
+                style: TextStyle(color: theme.textColor, fontSize: 12),
+              ),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: Icon(Icons.add_circle_outline, color: theme.secondaryColor, size: 20),
+                tooltip: '加速',
+                onPressed: _autoScrollSpeed < 100
+                    ? () => setState(() => _autoScrollSpeed += 5)
+                    : null,
+              ),
+              const SizedBox(width: 4),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                  _autoScrollTimer?.isActive == true ? Icons.pause_circle : Icons.play_circle,
+                  color: Theme.of(context).primaryColor,
+                  size: 24,
+                ),
+                tooltip: _autoScrollTimer?.isActive == true ? '暂停' : '继续',
+                onPressed: () {
+                  if (_autoScrollTimer?.isActive == true) {
+                    _autoScrollTimer?.cancel();
+                    setState(() {});
+                  } else {
+                    _startAutoScroll();
+                  }
+                },
+              ),
+              const SizedBox(width: 4),
+              IconButton(
+                visualDensity: VisualDensity.compact,
+                icon: Icon(Icons.close, color: theme.secondaryColor, size: 20),
+                tooltip: '退出自动阅读',
+                onPressed: _stopAutoScroll,
               ),
             ],
           ),
