@@ -510,6 +510,17 @@ class FanqieBackendEngine {
     final cleanId = bookId.trim();
     if (cleanId.isEmpty) return [];
 
+    // 0. 优先检查本地离线/本地导入书籍的 directory.json
+    try {
+      final bookDir = await getOfflineBookDir(cleanId);
+      final dirFile = File('${bookDir.path}/directory.json');
+      if (await dirFile.exists()) {
+        final raw = await dirFile.readAsString();
+        final List<dynamic> list = json.decode(raw);
+        return list.map((e) => Chapter.fromDirectoryJson(e as Map<String, dynamic>, 0)).toList();
+      }
+    } catch (_) {}
+
     Map<String, dynamic>? meta = _detailCache[cleanId];
     if (meta == null) {
       await getBookDetail(cleanId);

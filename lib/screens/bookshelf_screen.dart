@@ -9,6 +9,7 @@ import '../models/download_history.dart';
 import '../services/api_service.dart';
 import '../services/bookshelf_service.dart';
 import '../services/history_service.dart';
+import '../services/local_book_service.dart';
 import '../widgets/book_cover_widget.dart';
 import '../widgets/download_action_button.dart';
 import 'book_detail_screen.dart';
@@ -97,6 +98,98 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     });
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString('bookshelf_view_mode', nextMode == BookshelfViewMode.grid3 ? 'grid3' : 'list');
+  }
+
+  void _showImportLocalBookDialog() {
+    final pathController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.folder_open, size: 22),
+            SizedBox(width: 8),
+            Text('导入本地小说 (TXT/EPUB)'),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              '请输入本机 .txt 或 .epub 电子书文件的完整绝对路径：',
+              style: TextStyle(fontSize: 13, color: Colors.black87),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: pathController,
+              decoration: const InputDecoration(
+                hintText: '/path/to/novel.txt 或 .epub',
+                border: OutlineInputBorder(),
+                contentPadding: EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final path = pathController.text.trim();
+              if (path.isEmpty) return;
+              final file = File(path);
+              final exists = await file.exists();
+              if (!mounted) return;
+              if (!exists) {
+                if (mounted) {
+                  ScaffoldMessenger.of(context).showSnackBar(
+                    const SnackBar(content: Text('文件不存在，请检查路径是否正确')),
+                  );
+                }
+                return;
+              }
+              if (ctx.mounted) Navigator.pop(ctx);
+
+              BuildContext? loadingDialogContext;
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (dialogCtx) {
+                  loadingDialogContext = dialogCtx;
+                  return const Center(child: CircularProgressIndicator());
+                },
+              );
+
+              try {
+                final result = await LocalBookService().importLocalFile(file);
+                if (loadingDialogContext?.mounted == true) {
+                  Navigator.pop(loadingDialogContext!);
+                }
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                      content: Text(
+                          '成功导入《${result.book.bookName}》共 ${result.chapterCount} 章')),
+                );
+                _loadData(silent: true);
+              } catch (e) {
+                if (loadingDialogContext?.mounted == true) {
+                  Navigator.pop(loadingDialogContext!);
+                }
+                if (!mounted) return;
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text('导入失败: $e')),
+                );
+              }
+            },
+            child: const Text('导入'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _loadData({bool silent = false}) async {
@@ -499,6 +592,12 @@ class BookshelfScreenState extends State<BookshelfScreen> {
         actions: [
           if (!_isSelectionMode) ...[
             const DownloadActionButton(),
+            // 导入本地 TXT / EPUB 小说
+            IconButton(
+              icon: const Icon(Icons.file_upload_outlined),
+              tooltip: '导入本地小说',
+              onPressed: _showImportLocalBookDialog,
+            ),
             // 切换 列表 / 三列 视图按钮
             IconButton(
               icon: Icon(
