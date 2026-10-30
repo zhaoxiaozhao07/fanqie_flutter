@@ -5,8 +5,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/book.dart';
 import '../models/chapter.dart';
 import '../models/comment.dart';
+import '../models/bookmark.dart';
 import '../services/api_service.dart';
 import '../services/bookshelf_service.dart';
+import '../services/bookmark_service.dart';
 import '../services/download_service.dart';
 import '../services/reading_history_service.dart';
 import '../services/reader_system_service.dart';
@@ -53,6 +55,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   final ApiService _apiService = ApiService();
   final BookshelfService _bookshelfService = BookshelfService();
   final ReadingHistoryService _readingHistoryService = ReadingHistoryService();
+  final BookmarkService _bookmarkService = BookmarkService();
   final ScrollController _scrollController = ScrollController();
 
   // 章节内容内存缓存
@@ -85,6 +88,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   String? _errorMessage;
   bool _showControls = false;
   bool _isInBookshelf = false;
+  bool _isCurrentChapterBookmarked = false;
 
   // 底部常驻微型状态信息（时间与电池电量）
   Timer? _statusTimer;
@@ -172,6 +176,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
     _currentActiveIndex = widget.initialChapterIndex.clamp(0, widget.chapters.length - 1);
     _activeChapterNotifier = ValueNotifier<int>(_currentActiveIndex);
     _checkBookshelfStatus();
+    _checkBookmarkStatus();
+    _bookmarkService.changeNotifier.addListener(_checkBookmarkStatus);
     _loadPreferences().then((_) {
       _startFromChapter(_currentActiveIndex);
       ReaderSystemService.setVolumeKeyScrollEnabled(_volumeKeyScroll);
@@ -190,6 +196,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void dispose() {
     _ttsService.removeListener(_onTtsStateChanged);
     _ttsService.stop();
+    _bookmarkService.changeNotifier.removeListener(_checkBookmarkStatus);
     _activeChapterNotifier.dispose();
     _statusTimer?.cancel();
     _highlightTimer?.cancel();
@@ -272,6 +279,188 @@ class _ReaderScreenState extends State<ReaderScreen> {
         _isInBookshelf = _bookshelfService.isInBookshelf(widget.book.bookId);
       });
     }
+  }
+
+  Future<void> _checkBookmarkStatus() async {
+    await _bookmarkService.initialize();
+    final bookmarked = await _bookmarkService.isChapterBookmarked(
+      widget.book.bookId,
+      _currentActiveIndex,
+    );
+    if (mounted && _isCurrentChapterBookmarked != bookmarked) {
+      setState(() {
+        _isCurrentChapterBookmarked = bookmarked;
+      });
+    }
+  }
+
+  Future<void> _toggleBookmark() async {
+    final bookmarked = await _bookmarkService.isChapterBookmarked(
+      widget.book.bookId,
+      _currentActiveIndex,
+    );
+    if (bookmarked) {
+      await _bookmarkService.removeBookmarkByChapter(
+        widget.book.bookId,
+        _currentActiveIndex,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('已移除书签'), duration: Duration(seconds: 1)),
+        );
+      }
+    } else {
+      final chapter = widget.chapters[_currentActiveIndex];
+      final preview =
+          _chapterCache[_currentActiveIndex]?.split('\n\n').first ?? chapter.title;
+      await _bookmarkService.addBookmark(
+        bookId: widget.book.bookId,
+        chapterIndex: _currentActiveIndex,
+        chapterTitle: chapter.title,
+        contentPreview: preview,
+      );
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('书签添加成功'), duration: Duration(seconds: 1)),
+        );
+      }
+    }
+    _checkBookmarkStatus();
+  }
+
+  void _showParagraphActionSheet({
+    required Chapter chapter,
+    required int paraIndex,
+    required String text,
+  }) {
+    final theme = _themes[_themeIndex];
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: theme.backgroundColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.symmetric(vertical: 12),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 8),
+                  child: Text(
+                    text.length > 60 ? '${text.substring(0, 60)}...' : text,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: theme.secondaryColor,
+                      fontStyle: FontStyle.italic,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                const Divider(),
+                ListTile(
+                  leading: Icon(Icons.format_paint_outlined,
+                      color: Theme.of(context).primaryColor),
+                  title: Text('高亮划线', style: TextStyle(color: theme.textColor)),
+                  onTap: () async {
+                    Navigator.pop(ctx);
+                    await _bookmarkService.addNote(
+                      bookId: widget.book.bookId,
+                      chapterIndex: _currentActiveIndex,
+                      chapterTitle: chapter.title,
+                      paragraphIndex: paraIndex,
+                      text: text,
+                    );
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                            content: Text('已添加高亮划线'),
+                            duration: Duration(seconds: 1)),
+                      );
+                    }
+                  },
+                ),
+                ListTile(
+                  leading: Icon(Icons.edit_note, color: Theme.of(context).primaryColor),
+                  title: Text('写想法与笔记', style: TextStyle(color: theme.textColor)),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _showAddNoteDialog(
+                        chapter: chapter, paraIndex: paraIndex, text: text);
+                  },
+                ),
+                ListTile(
+                  leading: Icon(Icons.copy, color: theme.secondaryColor),
+                  title: Text('复制文本', style: TextStyle(color: theme.textColor)),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    Clipboard.setData(ClipboardData(text: text));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(
+                          content: Text('已复制段落到剪贴板'),
+                          duration: Duration(seconds: 1)),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  void _showAddNoteDialog({
+    required Chapter chapter,
+    required int paraIndex,
+    required String text,
+  }) {
+    final noteController = TextEditingController();
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('写阅读笔记'),
+        content: TextField(
+          controller: noteController,
+          maxLines: 4,
+          autofocus: true,
+          decoration: const InputDecoration(
+            hintText: '记录此刻的读后感悟或反思...',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          ElevatedButton(
+            onPressed: () async {
+              final note = noteController.text.trim();
+              Navigator.pop(ctx);
+              await _bookmarkService.addNote(
+                bookId: widget.book.bookId,
+                chapterIndex: _currentActiveIndex,
+                chapterTitle: chapter.title,
+                paragraphIndex: paraIndex,
+                text: text,
+                note: note,
+              );
+              if (mounted) {
+                ScaffoldMessenger.of(context).showSnackBar(
+                  const SnackBar(
+                      content: Text('笔记保存成功'), duration: Duration(seconds: 1)),
+                );
+              }
+            },
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _loadPreferences() async {
@@ -450,6 +639,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _activeChapterNotifier.value = active; // 仅通知微型小部件刷新，不触发全屏 Widget 树 Rebuild
       _persistReadingProgress(active);
       _triggerSilentPrefetch(active);
+      _checkBookmarkStatus();
     }
   }
 
@@ -737,6 +927,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     final searchController = TextEditingController();
     var isReverse = false;
     var isVolumeMode = false;
+    var activeTab = 0; // 0: 目录, 1: 书签, 2: 笔记
 
     showModalBottomSheet(
       context: context,
@@ -797,6 +988,22 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
                 return Column(
                   children: [
+                    Padding(
+                      padding: const EdgeInsets.fromLTRB(16, 12, 16, 4),
+                      child: SegmentedButton<int>(
+                        segments: const [
+                          ButtonSegment(value: 0, label: Text('目录')),
+                          ButtonSegment(value: 1, label: Text('书签')),
+                          ButtonSegment(value: 2, label: Text('笔记')),
+                        ],
+                        selected: {activeTab},
+                        showSelectedIcon: false,
+                        onSelectionChanged: (val) {
+                          setModalState(() => activeTab = val.first);
+                        },
+                      ),
+                    ),
+                    if (activeTab == 0) ...[
                     Padding(
                       padding: const EdgeInsets.fromLTRB(16, 12, 16, 8),
                       child: Row(
@@ -952,6 +1159,114 @@ class _ReaderScreenState extends State<ReaderScreen> {
                         },
                       ),
                     ),
+                    ] else if (activeTab == 1) ...[
+                      const Divider(height: 1),
+                      Expanded(
+                        child: FutureBuilder<List<Bookmark>>(
+                          future: _bookmarkService.getBookmarks(widget.book.bookId),
+                          builder: (context, snapshot) {
+                            final bookmarks = snapshot.data ?? [];
+                            if (bookmarks.isEmpty) {
+                              return Center(
+                                child: Text('暂无书签，可在阅读时点击顶栏书签添加',
+                                    style: TextStyle(color: currentTheme.secondaryColor)),
+                              );
+                            }
+                            return ListView.builder(
+                              controller: scrollController,
+                              itemCount: bookmarks.length,
+                              itemBuilder: (context, idx) {
+                                final bm = bookmarks[idx];
+                                return ListTile(
+                                  dense: true,
+                                  leading: Icon(Icons.bookmark,
+                                      color: Theme.of(context).primaryColor, size: 20),
+                                  title: Text(bm.chapterTitle,
+                                      style: TextStyle(
+                                          color: currentTheme.textColor,
+                                          fontWeight: FontWeight.w600)),
+                                  subtitle: Text(bm.contentPreview,
+                                      maxLines: 1,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          color: currentTheme.secondaryColor,
+                                          fontSize: 12)),
+                                  trailing: IconButton(
+                                    icon: Icon(Icons.delete_outline,
+                                        size: 18, color: currentTheme.secondaryColor),
+                                    onPressed: () async {
+                                      await _bookmarkService.removeBookmark(
+                                          bm.id, widget.book.bookId);
+                                      setModalState(() {});
+                                    },
+                                  ),
+                                  onTap: () {
+                                    Navigator.pop(ctx);
+                                    _startFromChapter(bm.chapterIndex);
+                                  },
+                                );
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                    ] else ...[
+                      const Divider(height: 1),
+                      Expanded(
+                        child: FutureBuilder<List<ReadingNote>>(
+                          future: _bookmarkService.getNotes(widget.book.bookId),
+                          builder: (context, snapshot) {
+                            final notes = snapshot.data ?? [];
+                            if (notes.isEmpty) {
+                              return Center(
+                                child: Text('暂无划线笔记，在阅读时长按正文段落即可添加',
+                                    style: TextStyle(color: currentTheme.secondaryColor)),
+                              );
+                            }
+                            return ListView.builder(
+                              controller: scrollController,
+                              itemCount: notes.length,
+                              itemBuilder: (context, idx) {
+                                final note = notes[idx];
+                                return ListTile(
+                                  dense: true,
+                                  leading: Icon(Icons.format_paint,
+                                      color: Theme.of(context).primaryColor, size: 20),
+                                  title: Text(note.text,
+                                      maxLines: 2,
+                                      overflow: TextOverflow.ellipsis,
+                                      style: TextStyle(
+                                          color: currentTheme.textColor, fontSize: 13)),
+                                  subtitle: note.note.isNotEmpty
+                                      ? Text('笔记: ${note.note}',
+                                          style: TextStyle(
+                                              color: Theme.of(context).primaryColor,
+                                              fontSize: 12))
+                                      : Text(
+                                          '第 ${note.chapterIndex + 1} 章 · ${note.chapterTitle}',
+                                          style: TextStyle(
+                                              color: currentTheme.secondaryColor,
+                                              fontSize: 11)),
+                                  trailing: IconButton(
+                                    icon: Icon(Icons.delete_outline,
+                                        size: 18, color: currentTheme.secondaryColor),
+                                    onPressed: () async {
+                                      await _bookmarkService.removeNote(
+                                          note.id, widget.book.bookId);
+                                      setModalState(() {});
+                                    },
+                                  ),
+                                  onTap: () {
+                                    Navigator.pop(ctx);
+                                    _startFromChapter(note.chapterIndex);
+                                  },
+                                );
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                    ],
                   ],
                 );
               },
@@ -1857,18 +2172,25 @@ class _ReaderScreenState extends State<ReaderScreen> {
       );
     }
 
-    return Container(
-      key: pKey,
-      padding: isLocateTarget ? const EdgeInsets.symmetric(vertical: 2, horizontal: 4) : EdgeInsets.zero,
-      decoration: isLocateTarget
-          ? BoxDecoration(
-              color: theme.highlightColor.withValues(alpha: 0.85),
-              borderRadius: BorderRadius.circular(6),
-              border: Border.all(color: Theme.of(context).primaryColor, width: 1.2),
-            )
-          : null,
-      child: Text.rich(
-        TextSpan(children: inlineSpans),
+    return GestureDetector(
+      onLongPress: () => _showParagraphActionSheet(
+        chapter: chapter,
+        paraIndex: paraIndex,
+        text: textToShow,
+      ),
+      child: Container(
+        key: pKey,
+        padding: isLocateTarget ? const EdgeInsets.symmetric(vertical: 2, horizontal: 4) : EdgeInsets.zero,
+        decoration: isLocateTarget
+            ? BoxDecoration(
+                color: theme.highlightColor.withValues(alpha: 0.85),
+                borderRadius: BorderRadius.circular(6),
+                border: Border.all(color: Theme.of(context).primaryColor, width: 1.2),
+              )
+            : null,
+        child: Text.rich(
+          TextSpan(children: inlineSpans),
+        ),
       ),
     );
   }
@@ -2068,6 +2390,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 ),
                 tooltip: _isInBookshelf ? '已在书架' : '加入书架',
                 onPressed: _toggleBookshelf,
+              ),
+              // 书签切换按钮
+              IconButton(
+                icon: Icon(
+                  _isCurrentChapterBookmarked ? Icons.bookmark : Icons.bookmark_border,
+                  color: _isCurrentChapterBookmarked ? Theme.of(context).primaryColor : theme.textColor,
+                  size: 22,
+                ),
+                tooltip: _isCurrentChapterBookmarked ? '取消书签' : '添加书签',
+                onPressed: _toggleBookmark,
               ),
               IconButton(
                 icon: Icon(Icons.list_rounded, size: 24, color: theme.textColor),
