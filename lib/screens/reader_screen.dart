@@ -111,6 +111,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
   PageController? _pageController;
   PageController _pageHorizontalController = PageController();
   int _currentHorizontalPageIndex = 0;
+  DateTime _lastBubbleTapTime = DateTime.fromMillisecondsSinceEpoch(0);
+  Offset? _lastPagePointerDown;
   List<ReadingNote> _cachedNotes = [];
   String? _lastPaginateKey;
   List<String> _cachedPaginatedPages = const [];
@@ -738,6 +740,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   void _toggleControls() {
+    if (DateTime.now().difference(_lastBubbleTapTime) < const Duration(milliseconds: 400)) {
+      return;
+    }
     if (_isAutoScrolling) {
       if (_autoScrollTimer?.isActive == true) {
         _autoScrollTimer?.cancel();
@@ -1119,7 +1124,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         return StatefulBuilder(
           builder: (context, setModalState) {
             return Container(
-              height: 460,
+              height: 520,
               padding: const EdgeInsets.fromLTRB(20, 14, 20, 16),
               child: SingleChildScrollView(
                 physics: const BouncingScrollPhysics(),
@@ -1346,6 +1351,24 @@ class _ReaderScreenState extends State<ReaderScreen> {
                               );
                             }),
                           ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+
+                    // 8. 段评气泡显示开关
+                    Row(
+                      children: [
+                        Text('段评气泡', style: TextStyle(color: currentTheme.secondaryColor, fontSize: 13, fontWeight: FontWeight.bold)),
+                        const Spacer(),
+                        Switch.adaptive(
+                          value: _showCommentBubbles,
+                          activeTrackColor: Theme.of(context).primaryColor,
+                          onChanged: (val) {
+                            setState(() => _showCommentBubbles = val);
+                            setModalState(() {});
+                            _savePreferences();
+                          },
                         ),
                       ],
                     ),
@@ -1843,51 +1866,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
     if (showBubble) {
       inlineSpans.add(
-        WidgetSpan(
-          alignment: PlaceholderAlignment.middle,
-          child: Padding(
-            padding: const EdgeInsets.only(left: 4.0),
-            child: GestureDetector(
-              onTap: () => _openParagraphComments(
-                chapter: chapter,
-                paraIndex: paraIndex,
-                paraText: trimmed,
-              ),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-                decoration: BoxDecoration(
-                  color: isDark
-                      ? Colors.white.withValues(alpha: 0.12)
-                      : theme.highlightColor.withValues(alpha: 0.95),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: theme.secondaryColor.withValues(alpha: 0.3),
-                    width: 0.5,
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.chat_bubble_outline,
-                      size: 10,
-                      color: isDark ? Colors.white70 : theme.secondaryColor,
-                    ),
-                    const SizedBox(width: 2.5),
-                    Text(
-                      commentCount > 999 ? '999+' : '$commentCount',
-                      style: TextStyle(
-                        fontSize: 9.5,
-                        fontWeight: FontWeight.bold,
-                        color: isDark ? Colors.white70 : theme.secondaryColor,
-                        height: 1.1,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
+        _buildCommentBubbleSpan(
+          chapter: chapter,
+          paraIndex: paraIndex,
+          trimmedText: trimmed,
+          commentCount: commentCount,
+          theme: theme,
+          isDark: isDark,
         ),
       );
     }
@@ -1919,6 +1904,75 @@ class _ReaderScreenState extends State<ReaderScreen> {
             paraIndex: paraIndex,
           );
         },
+      ),
+    );
+  }
+
+  /// 统一构建段后评论气泡（调大视觉尺寸与外扩触控热区，彻底杜绝误触上下操作栏）
+  InlineSpan _buildCommentBubbleSpan({
+    required Chapter chapter,
+    required int paraIndex,
+    required String trimmedText,
+    required int commentCount,
+    required ReaderTheme theme,
+    required bool isDark,
+  }) {
+    return WidgetSpan(
+      alignment: PlaceholderAlignment.middle,
+      child: Padding(
+        padding: const EdgeInsets.only(left: 6.0),
+        child: GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (_) {
+            _lastBubbleTapTime = DateTime.now();
+          },
+          onTap: () {
+            _lastBubbleTapTime = DateTime.now();
+            _openParagraphComments(
+              chapter: chapter,
+              paraIndex: paraIndex,
+              paraText: trimmedText,
+            );
+          },
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 4.0, vertical: 3.5),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 7.0, vertical: 2.5),
+              decoration: BoxDecoration(
+                color: isDark
+                    ? Colors.white.withValues(alpha: 0.16)
+                    : theme.highlightColor.withValues(alpha: 0.95),
+                borderRadius: BorderRadius.circular(9),
+                border: Border.all(
+                  color: isDark
+                      ? Colors.white.withValues(alpha: 0.25)
+                      : theme.secondaryColor.withValues(alpha: 0.35),
+                  width: 0.6,
+                ),
+              ),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.chat_bubble_outline,
+                    size: 12,
+                    color: isDark ? Colors.white70 : theme.secondaryColor,
+                  ),
+                  const SizedBox(width: 3.0),
+                  Text(
+                    commentCount > 999 ? '999+' : '$commentCount',
+                    style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.bold,
+                      color: isDark ? Colors.white70 : theme.secondaryColor,
+                      height: 1.1,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }
@@ -2449,128 +2503,130 @@ class _ReaderScreenState extends State<ReaderScreen> {
         final pages = _paginateContent(content, constraints.biggest);
         _currentHorizontalPageIndex = _currentHorizontalPageIndex.clamp(0, pages.length - 1);
 
-        return Stack(
-          children: [
-            // 单屏内容区域 (绝无垂直滚动条，软跨页折行填满整屏，下半截绝无大片空白)
-            PageView.builder(
-              controller: _pageHorizontalController,
-              itemCount: pages.length,
-              physics: const BouncingScrollPhysics(),
-              onPageChanged: (page) {
-                setState(() {
-                  _currentHorizontalPageIndex = page;
-                });
-              },
-              itemBuilder: (context, pageIdx) {
-                final pageText = pages[pageIdx];
-                final pageParagraphs = pageText.split('\n\n');
-                final chapterParas = content.split('\n\n');
+        return Listener(
+          behavior: HitTestBehavior.translucent,
+          onPointerDown: (event) {
+            _lastPagePointerDown = event.localPosition;
+          },
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            onTap: () {
+              final pos = _lastPagePointerDown ?? Offset(constraints.maxWidth / 2, 0);
+              _handleHorizontalPageTap(pos, constraints.maxWidth, pages.length);
+            },
+            child: Container(
+              width: constraints.maxWidth,
+              height: constraints.maxHeight,
+              color: Colors.transparent,
+              child: PageView.builder(
+                controller: _pageHorizontalController,
+                itemCount: pages.length,
+                physics: const BouncingScrollPhysics(),
+                onPageChanged: (page) {
+                  setState(() {
+                    _currentHorizontalPageIndex = page;
+                  });
+                },
+                itemBuilder: (context, pageIdx) {
+                  final pageText = pages[pageIdx];
+                  final pageParagraphs = pageText.split('\n\n');
+                  final chapterParas = content.split('\n\n');
 
-                return Container(
-                  width: constraints.maxWidth,
-                  height: constraints.maxHeight,
-                  padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 8),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      if (pageIdx == 0) ...[
-                        Text(
-                          chapter.title,
-                          style: TextStyle(
-                            fontSize: _fontSize + 4,
-                            fontWeight: FontWeight.bold,
-                            color: theme.textColor,
-                            height: 1.4,
-                            fontFamily: _resolveFontFamily(_fontFamily),
+                  return Container(
+                    width: constraints.maxWidth,
+                    height: constraints.maxHeight,
+                    padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        if (pageIdx == 0) ...[
+                          Text(
+                            chapter.title,
+                            style: TextStyle(
+                              fontSize: _fontSize + 4,
+                              fontWeight: FontWeight.bold,
+                              color: theme.textColor,
+                              height: 1.4,
+                              fontFamily: _resolveFontFamily(_fontFamily),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                        ],
+                        // 饱满填满整屏
+                        Expanded(
+                          child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              for (int i = 0; i < pageParagraphs.length; i++) ...[
+                                _buildParagraphWithUnderlines(
+                                  pageParagraphs[i],
+                                  theme,
+                                  chapter,
+                                  i,
+                                  chapterParas,
+                                  onTapParagraph: () {
+                                    final pos = _lastPagePointerDown ?? Offset(constraints.maxWidth / 2, 0);
+                                    _handleHorizontalPageTap(pos, constraints.maxWidth, pages.length);
+                                  },
+                                ),
+                                SizedBox(height: _paragraphSpacing.clamp(4.0, 14.0)),
+                              ],
+                            ],
                           ),
                         ),
-                        const SizedBox(height: 10),
-                      ],
-                      // 饱满填满整屏
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            for (int i = 0; i < pageParagraphs.length; i++) ...[
-                              _buildParagraphWithUnderlines(pageParagraphs[i], theme, chapter, i, chapterParas),
-                              SizedBox(height: _paragraphSpacing.clamp(4.0, 14.0)),
-                            ],
-                          ],
-                        ),
-                      ),
-                      // 纯净居中展示页码（去除重复的章节名）
-                      Padding(
-                        padding: const EdgeInsets.only(top: 4, bottom: 2),
-                        child: Center(
-                          child: Text(
-                            '第 ${pageIdx + 1} / ${pages.length} 页',
-                            style: TextStyle(
-                              fontSize: 11,
-                              color: theme.secondaryColor.withValues(alpha: 0.65),
-                              letterSpacing: 1.0,
+                        // 纯净居中展示页码（去除重复的章节名）
+                        Padding(
+                          padding: const EdgeInsets.only(top: 4, bottom: 2),
+                          child: Center(
+                            child: Text(
+                              '第 ${pageIdx + 1} / ${pages.length} 页',
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: theme.secondaryColor.withValues(alpha: 0.65),
+                                letterSpacing: 1.0,
+                              ),
                             ),
                           ),
                         ),
-                      ),
-                    ],
-                  ),
-                );
-              },
-            ),
-
-            // 屏幕左右点击热区与中间呼出菜单
-            Positioned.fill(
-              child: Row(
-                children: [
-                  // 左侧 28% 点击向前翻页
-                  Expanded(
-                    flex: 28,
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.translucent,
-                      onTap: () {
-                        if (_currentHorizontalPageIndex > 0) {
-                          _pageHorizontalController.previousPage(
-                            duration: const Duration(milliseconds: 200),
-                            curve: Curves.easeInOut,
-                          );
-                        } else if (_currentActiveIndex > 0) {
-                          _startFromChapter(_currentActiveIndex - 1, toLastPage: true);
-                        }
-                      },
+                      ],
                     ),
-                  ),
-                  // 中间 44% 点击切换控制栏
-                  Expanded(
-                    flex: 44,
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.translucent,
-                      onTap: _toggleControls,
-                    ),
-                  ),
-                  // 右侧 28% 点击向后翻页
-                  Expanded(
-                    flex: 28,
-                    child: GestureDetector(
-                      behavior: HitTestBehavior.translucent,
-                      onTap: () {
-                        if (_currentHorizontalPageIndex < pages.length - 1) {
-                          _pageHorizontalController.nextPage(
-                            duration: const Duration(milliseconds: 200),
-                            curve: Curves.easeInOut,
-                          );
-                        } else if (_currentActiveIndex < widget.chapters.length - 1) {
-                          _startFromChapter(_currentActiveIndex + 1);
-                        }
-                      },
-                    ),
-                  ),
-                ],
+                  );
+                },
               ),
             ),
-          ],
+          ),
         );
       },
     );
+  }
+
+  /// 处理翻页模式下的屏幕触控：左侧向前翻页，右侧向后翻页，中间呼出菜单（若点击了气泡则不触发）
+  void _handleHorizontalPageTap(Offset localPosition, double screenWidth, int totalPages) {
+    if (DateTime.now().difference(_lastBubbleTapTime) < const Duration(milliseconds: 400)) {
+      return;
+    }
+    final dx = localPosition.dx;
+    if (dx < screenWidth * 0.28) {
+      if (_currentHorizontalPageIndex > 0) {
+        _pageHorizontalController.previousPage(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeInOut,
+        );
+      } else if (_currentActiveIndex > 0) {
+        _startFromChapter(_currentActiveIndex - 1, toLastPage: true);
+      }
+    } else if (dx > screenWidth * 0.72) {
+      if (_currentHorizontalPageIndex < totalPages - 1) {
+        _pageHorizontalController.nextPage(
+          duration: const Duration(milliseconds: 200),
+          curve: Curves.easeInOut,
+        );
+      } else if (_currentActiveIndex < widget.chapters.length - 1) {
+        _startFromChapter(_currentActiveIndex + 1);
+      }
+    } else {
+      _toggleControls();
+    }
   }
 
   /// 单屏段落构建（带自由长按选词、纯正虚线下划线，支持段评气泡与点击取消划线）
@@ -2579,8 +2635,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
     ReaderTheme theme,
     Chapter chapter,
     int pIdx,
-    List<String> chapterParas,
-  ) {
+    List<String> chapterParas, {
+    VoidCallback? onTapParagraph,
+  }) {
     final trimmed = paragraph.trim();
     if (trimmed.isEmpty) return const SizedBox.shrink();
 
@@ -2624,57 +2681,20 @@ class _ReaderScreenState extends State<ReaderScreen> {
 
     if (showBubble) {
       spans.add(
-        WidgetSpan(
-          alignment: PlaceholderAlignment.middle,
-          child: Padding(
-            padding: const EdgeInsets.only(left: 4.0),
-            child: GestureDetector(
-              onTap: () => _openParagraphComments(
-                chapter: chapter,
-                paraIndex: effectiveParaIdx,
-                paraText: trimmed,
-              ),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1.5),
-                decoration: BoxDecoration(
-                  color: isDark
-                      ? Colors.white.withValues(alpha: 0.12)
-                      : theme.highlightColor.withValues(alpha: 0.95),
-                  borderRadius: BorderRadius.circular(8),
-                  border: Border.all(
-                    color: theme.secondaryColor.withValues(alpha: 0.3),
-                    width: 0.5,
-                  ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.chat_bubble_outline,
-                      size: 10,
-                      color: isDark ? Colors.white70 : theme.secondaryColor,
-                    ),
-                    const SizedBox(width: 2.5),
-                    Text(
-                      commentCount > 999 ? '999+' : '$commentCount',
-                      style: TextStyle(
-                        fontSize: 9.5,
-                        fontWeight: FontWeight.bold,
-                        color: isDark ? Colors.white70 : theme.secondaryColor,
-                        height: 1.1,
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          ),
+        _buildCommentBubbleSpan(
+          chapter: chapter,
+          paraIndex: effectiveParaIdx,
+          trimmedText: trimmed,
+          commentCount: commentCount,
+          theme: theme,
+          isDark: isDark,
         ),
       );
     }
 
     return SelectableText.rich(
       TextSpan(children: spans),
+      onTap: onTapParagraph,
       style: TextStyle(
         fontSize: _fontSize,
         height: _lineHeight,
