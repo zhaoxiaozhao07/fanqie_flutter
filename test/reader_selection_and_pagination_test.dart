@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -272,6 +273,243 @@ void main() {
         final fillRatio = h / normalAvailHeight;
         expect(fillRatio >= 0.88, isTrue, reason: 'Page $p filled less than 88%');
       }
+    });
+  });
+
+  group('Virtualized Vertical Scroll & On-Demand Selection Optimization Tests', () {
+    testWidgets('CustomScrollView + SliverList virtualizes paragraphs and activates SelectableText only on long press', (tester) async {
+      final paragraphs = List.generate(
+        120,
+        (i) => '　　第${i + 1}段：天地玄黄，宇宙洪荒。日月盈昃，辰宿列张。寒来暑往，秋收冬藏。闰余成岁，律吕调阳。',
+      );
+      final activeParaNotifier = ValueNotifier<String?>(null);
+      final activeSelectableKey = GlobalKey();
+      final scrollController = ScrollController();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: CustomScrollView(
+              controller: scrollController,
+              // ignore: deprecated_member_use
+              cacheExtent: 650.0,
+              slivers: [
+                SliverList(
+                  delegate: SliverChildBuilderDelegate(
+                    (context, index) {
+                      final paraKeyStr = 'ch1_$index';
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 14),
+                        child: ValueListenableBuilder<String?>(
+                          valueListenable: activeParaNotifier,
+                          builder: (context, activeKey, _) {
+                            if (activeKey == paraKeyStr) {
+                              return SelectableText.rich(
+                                key: activeSelectableKey,
+                                TextSpan(text: paragraphs[index]),
+                                contextMenuBuilder: (context, editableState) {
+                                  return TextSelectionToolbar(
+                                    anchorAbove: editableState.contextMenuAnchors.primaryAnchor,
+                                    anchorBelow: editableState.contextMenuAnchors.secondaryAnchor ??
+                                        editableState.contextMenuAnchors.primaryAnchor,
+                                    children: [
+                                      TextButton(
+                                        onPressed: () {
+                                          editableState.hideToolbar();
+                                          activeParaNotifier.value = null;
+                                        },
+                                        child: const Text('复制'),
+                                      ),
+                                      TextButton(
+                                        onPressed: () {
+                                          editableState.hideToolbar();
+                                          activeParaNotifier.value = null;
+                                        },
+                                        child: const Text('划线'),
+                                      ),
+                                    ],
+                                  );
+                                },
+                              );
+                            }
+                            return GestureDetector(
+                              behavior: HitTestBehavior.translucent,
+                              onLongPressStart: (details) {
+                                activeParaNotifier.value = paraKeyStr;
+                                WidgetsBinding.instance.addPostFrameCallback((_) {
+                                  final Object? st = activeSelectableKey.currentState;
+                                  if (st is TextSelectionGestureDetectorBuilderDelegate) {
+                                    final editable = st.editableTextKey.currentState;
+                                    if (editable != null && editable.mounted) {
+                                      editable.renderEditable.selectWordsInRange(
+                                        from: details.globalPosition,
+                                        cause: SelectionChangedCause.longPress,
+                                      );
+                                      editable.showToolbar();
+                                    }
+                                  }
+                                });
+                              },
+                              child: Text.rich(TextSpan(text: paragraphs[index])),
+                            );
+                          },
+                        ),
+                      );
+                    },
+                    childCount: paragraphs.length,
+                    addAutomaticKeepAlives: false,
+                    addRepaintBoundaries: true,
+                    addSemanticIndexes: false,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+
+      // 1. During normal reading/scrolling, ZERO SelectableText widgets are mounted,
+      //    and only viewport + cacheExtent paragraphs (< 35 out of 120) are built!
+      expect(find.byType(SelectableText), findsNothing);
+      final mountedTexts = tester.widgetList<Text>(find.byType(Text)).length;
+      expect(mountedTexts < 35, isTrue, reason: 'Should virtualize 120 paragraphs to < 35 mounted');
+
+      // 2. Single long press on paragraph 0 activates SelectableText and shows bubble menu
+      final firstParaFinder = find.textContaining('第1段：天地玄黄');
+      expect(firstParaFinder, findsOneWidget);
+      final gesture = await tester.startGesture(tester.getCenter(firstParaFinder));
+      await tester.pump(const Duration(milliseconds: 700));
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(find.byType(SelectableText), findsOneWidget);
+      expect(find.text('复制'), findsOneWidget);
+      expect(find.text('划线'), findsOneWidget);
+
+      // 3. Dismissing bubble menu reverts back to zero SelectableText instances
+      await tester.tap(find.text('划线'));
+      await tester.pumpAndSettle();
+      expect(find.byType(SelectableText), findsNothing);
+    });
+  });
+
+  group('Horizontal Page Turn Animation Tests', () {
+    testWidgets('Page turn animations (cover, simulation, slide, fade) animate smoothly and persist preference', (tester) async {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString('reader_page_turn_animation', 'simulation');
+      expect(prefs.getString('reader_page_turn_animation'), 'simulation');
+
+      final controller = PageController();
+      String currentAnimMode = 'cover';
+      final pages = ['第一页正文内容', '第二页正文内容', '第三页正文内容'];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                return Column(
+                  children: [
+                    SegmentedButton<String>(
+                      segments: const [
+                        ButtonSegment(value: 'cover', label: Text('覆盖')),
+                        ButtonSegment(value: 'simulation', label: Text('仿真')),
+                        ButtonSegment(value: 'slide', label: Text('滑动')),
+                        ButtonSegment(value: 'fade', label: Text('渐变')),
+                      ],
+                      selected: {currentAnimMode},
+                      onSelectionChanged: (val) {
+                        setState(() => currentAnimMode = val.first);
+                      },
+                    ),
+                    Expanded(
+                      child: LayoutBuilder(
+                        builder: (context, constraints) {
+                          return PageView.builder(
+                            controller: controller,
+                            itemCount: pages.length,
+                            itemBuilder: (context, pageIdx) {
+                              final card = Container(
+                                color: const Color(0xFFF5EEDC),
+                                alignment: Alignment.center,
+                                child: Text(pages[pageIdx]),
+                              );
+                              return AnimatedBuilder(
+                                animation: controller,
+                                child: card,
+                                builder: (context, staticChild) {
+                                  double page = 0.0;
+                                  if (controller.hasClients &&
+                                      controller.position.haveDimensions) {
+                                    page = controller.page ?? 0.0;
+                                  }
+                                  final delta = pageIdx - page;
+                                  if (delta.abs() < 0.0005 || delta.abs() >= 1.0) {
+                                    return staticChild!;
+                                  }
+                                  if (currentAnimMode == 'simulation' && delta < 0) {
+                                    final t = (-delta).clamp(0.0, 1.0);
+                                    final curlWidth = (math.sin(t * math.pi) * 44.0).clamp(6.0, 44.0);
+                                    return ClipRect(
+                                      child: Stack(
+                                        fit: StackFit.expand,
+                                        children: [
+                                          Transform.translate(
+                                            offset: Offset(t * constraints.maxWidth, 0),
+                                            child: staticChild,
+                                          ),
+                                          Positioned(
+                                            right: 0,
+                                            top: 0,
+                                            bottom: 0,
+                                            width: curlWidth,
+                                            child: const ColoredBox(color: Color(0xFFE5DAC4)),
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  }
+                                  return ClipRect(
+                                    child: Transform.translate(
+                                      offset: Offset(delta > 0 ? -delta * constraints.maxWidth : 0, 0),
+                                      child: staticChild,
+                                    ),
+                                  );
+                                },
+                              );
+                            },
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+      expect(find.text('第一页正文内容'), findsOneWidget);
+
+      // Switch animation mode to 仿真
+      await tester.tap(find.text('仿真'));
+      await tester.pumpAndSettle();
+      expect(currentAnimMode, 'simulation');
+
+      // Animate to next page and verify mid-animation frame renders curl transform without error
+      controller.nextPage(
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeOutCubic,
+      );
+      await tester.pump(const Duration(milliseconds: 120));
+      expect(find.byType(ClipRect), findsWidgets);
+
+      await tester.pumpAndSettle();
+      expect(find.text('第二页正文内容'), findsOneWidget);
     });
   });
 }

@@ -7,6 +7,7 @@ on:
       - master
     tags:
       - 'v*'  # 监听所有 v 开头的 tag，如 v1.0.0
+      - '[0-9]*'
   workflow_dispatch:  # 支持手动触发
     inputs:
       version:
@@ -73,6 +74,8 @@ jobs:
         run: |
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             VERSION=${GITHUB_REF#refs/tags/v}
+          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            VERSION=${GITHUB_REF#refs/tags/}
           elif [ -n "${{ github.event.inputs.version }}" ]; then
             VERSION=${{ github.event.inputs.version }}
           else
@@ -95,15 +98,18 @@ jobs:
           retention-days: 30
 
       - name: 创建 Release
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
         uses: softprops/action-gh-release@v2
         with:
           name: "番茄Reader v${{ steps.version.outputs.version }}"
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || format('v{0}', steps.version.outputs.version) }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', steps.version.outputs.version) }}
           body: |
             ## 番茄Reader v${{ steps.version.outputs.version }}
             
-            ### 🚀 核心新特性与改进 (v3.1.0 - 纯小说阅读全维增强版)
+            ### 🚀 核心新特性与改进 (v3.1.1 - 极致流畅滚屏与多模式翻页动画版)
+            - **上下滑屏 120fps 极致流畅优化**：重构为双向虚拟化段落级 `CustomScrollView` + `SliverList`，仅挂载视口内 15~25 个段落与微型 `RepaintBoundary`，向上追加章节天然零位移跳动；
+            - **按需瞬时激活自由选词**：日常阅读采用零开销 `Text.rich`，长按段落当帧无缝切换为 `SelectableText.rich` 并弹出暗色气泡菜单（复制 / 划线 / 取消划线）；
+            - **左右翻页阅读新增 4 种翻页动画**：支持「覆盖」「仿真（3D 书页卷曲高光与折痕暗影）」「滑动」「渐变」实时跟手与点击翻页动画，跨章翻页与上一章末页无缝衔接；
             - **双阅读模式自由切换**：垂直无缝连续滚屏与左右仿真翻页（PageView + 点击热区翻页），畅享纸书手感与单手翻页；
             - **精细排版定制与多字体**：首行缩进(2字符开关)、字间距、段落间距与页边距四维微调；支持系统默认、宋体、楷体、黑体自由切换；
             - **沉浸式自动阅读 / 自动平缓滚屏**：支持 15~100 px/s 速度调节，悬浮胶囊控制条，轻触正文随时暂停与继续；
