@@ -13,6 +13,7 @@ class SimulationPageTurn extends StatefulWidget {
   final Widget Function(BuildContext context, int pageIndex) pageBuilder;
   final Object? pageSetKey;
   final Object? contentVersion;
+  final Listenable? pageContentChanges;
   final Widget? nextChapterPreview;
   final Widget? previousChapterPreview;
   final ValueChanged<int> onPageChanged;
@@ -37,6 +38,7 @@ class SimulationPageTurn extends StatefulWidget {
     required this.pageBuilder,
     this.pageSetKey,
     this.contentVersion,
+    this.pageContentChanges,
     this.nextChapterPreview,
     this.previousChapterPreview,
     required this.onPageChanged,
@@ -62,12 +64,15 @@ class SimulationPageTurn extends StatefulWidget {
 class SimulationPageTurnState extends State<SimulationPageTurn>
     with SingleTickerProviderStateMixin {
   late final AnimationController _animController;
-  late final CurvedAnimation _curvedAnim;
   Animation<Offset>? _dragAnimation;
   final ValueNotifier<_CurlGeometry?> _geometry = ValueNotifier(null);
   final GlobalKey _frontPageKey = GlobalKey();
   final Map<int, Widget> _pageWidgets = {};
   ui.Image? _backImage;
+  ui.Image? _preparedBackImage;
+  bool _snapshotDirty = true;
+  bool _snapshotPending = false;
+  bool _snapshotSelectionActive = false;
 
   bool _isDragging = false;
   bool _isForward = true;
@@ -86,6 +91,8 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   bool _pointerCancelled = false;
   bool _awaitingCommit = false;
   Offset? _downPos;
+  Offset? _dragOrigin;
+  Offset? _logicalDragPos;
 
   bool get _isTurning => _turnSourceIndex != null;
   bool get isTurning => _isTurning;
@@ -97,26 +104,36 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
       vsync: this,
       duration: const Duration(milliseconds: 300),
     )..addListener(_onAnimationTick);
-    _curvedAnim = CurvedAnimation(
-      parent: _animController,
-      curve: Curves.easeOutCubic,
-    );
+    widget.pageContentChanges?.addListener(_invalidateSnapshot);
   }
 
   @override
   void didUpdateWidget(covariant SimulationPageTurn oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (oldWidget.pageContentChanges != widget.pageContentChanges) {
+      oldWidget.pageContentChanges?.removeListener(_invalidateSnapshot);
+      widget.pageContentChanges?.addListener(_invalidateSnapshot);
+    }
+    final selectionActive = widget.isSelectionActive?.call() == true;
     if (oldWidget.pageSetKey != widget.pageSetKey ||
         oldWidget.contentVersion != widget.contentVersion ||
         oldWidget.backgroundColor != widget.backgroundColor ||
         oldWidget.currentPageIndex != widget.currentPageIndex) {
       _pageWidgets.clear();
+      _invalidateSnapshot();
     }
+    if (_snapshotSelectionActive != selectionActive) _invalidateSnapshot();
+    _snapshotSelectionActive = selectionActive;
     if (oldWidget.pageSetKey != widget.pageSetKey ||
         oldWidget.totalPages != widget.totalPages ||
         oldWidget.currentPageIndex != widget.currentPageIndex ||
         oldWidget.backgroundColor != widget.backgroundColor) {
-      _resetTurn();
+      _resetTurn(
+        // 待决手势尚未翻页；静默预加载改变页窗口时不能丢掉按下位置。
+        preservePendingTouch:
+            (_touchPending && !_isTurning) ||
+            (oldWidget.pageSetKey == widget.pageSetKey && _awaitingCommit),
+      );
     }
   }
 
@@ -124,15 +141,16 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   void didChangeDependencies() {
     super.didChangeDependencies();
     _pageWidgets.clear();
+    _invalidateSnapshot();
   }
 
   @override
   void dispose() {
     _animController.removeListener(_onAnimationTick);
-    _curvedAnim.dispose();
+    widget.pageContentChanges?.removeListener(_invalidateSnapshot);
     _animController.dispose();
     _geometry.dispose();
-    _backImage?.dispose();
+    _preparedBackImage?.dispose();
     super.dispose();
   }
 
@@ -181,7 +199,8 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
       fromTop ? 0 : _viewSize.height,
     );
     // 始终翻起当前页。向后翻时不能把上一页当作正面，否则起手就跳页。
-    _captureBackImage();
+    // 纸背在静止帧预热。手指起拖时不再同步创建高 DPI 全屏截图。
+    _backImage = _snapshotDirty ? null : _preparedBackImage;
     setState(() {
       _turnSourceIndex = widget.currentPageIndex;
       _turnTargetIndex = widget.currentPageIndex + (forward ? 1 : -1);
@@ -189,23 +208,37 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   }
 
   Offset get _completedDragPosition => Offset(
-    _isForward ? -_viewSize.width * 1.25 : _viewSize.width * 2.25,
+    _isForward ? -_viewSize.width * 1.04 : _viewSize.width * 2.04,
     _cornerPos!.dy,
   );
 
-  void _captureBackImage() {
-    final boundary = _frontPageKey.currentContext?.findRenderObject();
-    if (boundary is! RenderRepaintBoundary ||
-        !boundary.attached ||
-        !boundary.hasSize ||
-        (kDebugMode && boundary.debugNeedsPaint)) {
-      return;
-    }
+  void _invalidateSnapshot() {
+    _snapshotDirty = true;
+    _scheduleBackImage();
+  }
 
-    // 同步获取已绘制图层，不等待异步截图，也不再挂载一份带选词 GlobalKey 的正文。
-    _backImage = boundary.toImageSync(
-      pixelRatio: MediaQuery.devicePixelRatioOf(context).clamp(1.0, 3.0),
-    );
+  void _scheduleBackImage() {
+    if (!mounted || !_snapshotDirty || _snapshotPending || _isTurning) return;
+    _snapshotPending = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _snapshotPending = false;
+      if (!mounted || _isTurning || !_snapshotDirty) return;
+      final boundary = _frontPageKey.currentContext?.findRenderObject();
+      if (boundary is! RenderRepaintBoundary ||
+          !boundary.attached ||
+          !boundary.hasSize ||
+          (kDebugMode && boundary.debugNeedsPaint)) {
+        return;
+      }
+      final oldImage = _preparedBackImage;
+      _preparedBackImage = boundary.toImageSync(
+        pixelRatio: MediaQuery.devicePixelRatioOf(context).clamp(1.0, 1.5),
+      );
+      _snapshotDirty = false;
+      if (oldImage != null) {
+        WidgetsBinding.instance.addPostFrameCallback((_) => oldImage.dispose());
+      }
+    });
   }
 
   void _updateDragPosition(Offset position) {
@@ -223,34 +256,36 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     required Offset from,
     required Offset to,
     required bool completePageTurn,
-    double? releaseVelocity,
+    Offset? releaseVelocity,
   }) async {
     final generation = ++_animationGeneration;
     _isDragging = false;
-    _dragAnimation = Tween<Offset>(begin: from, end: to).animate(_curvedAnim);
-    final remaining = ((to - from).distance / (_viewSize.width * 2.25)).clamp(
-      0.4,
-      1.0,
-    );
-    _animController.duration = Duration(
-      milliseconds: (300 * remaining).round(),
-    );
+    final distance = (to - from).distance;
+    final remaining = (distance / (_viewSize.width * 2)).clamp(0.0, 1.0);
     if (releaseVelocity == null) {
-      _curvedAnim.curve = Curves.easeOutCubic;
+      _animController.duration = const Duration(milliseconds: 300);
+      _dragAnimation = Tween<Offset>(
+        begin: from,
+        end: to,
+      ).chain(CurveTween(curve: Curves.easeOutCubic)).animate(_animController);
     } else {
-      final distance = (to.dx - from.dx).abs().clamp(1.0, double.infinity);
-      final speed = (releaseVelocity * (to.dx - from.dx).sign).clamp(
-        0.0,
-        5000.0,
-      );
-      final milliseconds = speed > 350
-          ? (distance / speed * 1000).clamp(100.0, 300.0).round()
-          : (300 * remaining).round();
+      final direction = distance < 0.01 ? Offset.zero : (to - from) / distance;
+      final speed =
+          releaseVelocity.dx * direction.dx + releaseVelocity.dy * direction.dy;
+      final milliseconds = distance < 1
+          ? 1
+          : speed > 350
+          ? (distance / speed * 1100).clamp(70.0, 260.0).round()
+          : (260 * math.sqrt(remaining)).clamp(90.0, 260.0).round();
       _animController.duration = Duration(milliseconds: milliseconds);
-      _curvedAnim.curve = _ReleaseCurve(
-        (speed * milliseconds / 1000 / distance).clamp(0.8, 3.0),
-      );
+      _dragAnimation = _ReleaseTween(
+        begin: from,
+        end: to,
+        velocity: releaseVelocity,
+        seconds: milliseconds / 1000,
+      ).animate(_animController);
     }
+    _updateDragPosition(from);
 
     try {
       await _animController.forward(from: 0).orCancel;
@@ -260,7 +295,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     if (!mounted || generation != _animationGeneration) return;
 
     final target = _turnTargetIndex;
-    setState(_resetTurn);
+    setState(() => _resetTurn(preservePendingTouch: true));
     _awaitingCommit = completePageTurn;
     _drainQueuedTurn();
     if (!completePageTurn || target == null) {
@@ -276,7 +311,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     }
   }
 
-  void _resetTurn() {
+  void _resetTurn({bool preservePendingTouch = false}) {
     ++_animationGeneration;
     _dragAnimation = null;
     _animController.stop();
@@ -285,15 +320,14 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     _turnTargetIndex = null;
     _cornerPos = null;
     _dragPos = null;
-    _touchPending = false;
-    _downPos = null;
-    _geometry.value = null;
-    final oldImage = _backImage;
-    _backImage = null;
-    if (oldImage != null) {
-      // 旧帧仍可能引用纸背图像，替换图层后再释放。
-      WidgetsBinding.instance.addPostFrameCallback((_) => oldImage.dispose());
+    _dragOrigin = null;
+    _logicalDragPos = null;
+    if (!preservePendingTouch) {
+      _touchPending = false;
+      _downPos = null;
     }
+    _geometry.value = null;
+    _backImage = null;
   }
 
   bool get _wasBubbleTapped {
@@ -304,8 +338,9 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
 
   void _drainQueuedTurn() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _isTurning || _touchPending) return;
+      if (!mounted) return;
       _awaitingCommit = false;
+      if (_isTurning || _touchPending) return;
       final direction = _queuedDirection;
       _queuedDirection = null;
       if (direction != null) _turnPage(forward: direction);
@@ -315,7 +350,10 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   void _onDragDown(DragDownDetails details) {
     _pointerCancelled = false;
     _touchPending = true;
-    _gestureBlocked = _isTurning || widget.isSelectionActive?.call() == true;
+    _gestureBlocked =
+        _isDragging ||
+        _awaitingCommit ||
+        widget.isSelectionActive?.call() == true;
     _boundaryDirection = null;
     _boundaryTravel = 0;
     _downPos = details.localPosition;
@@ -334,39 +372,63 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
         return;
       }
       if (movement.dx == 0) return;
-      final forward = movement.dx < 0;
-      final target = widget.currentPageIndex + (forward ? 1 : -1);
-      final preview = forward
-          ? widget.nextChapterPreview
-          : widget.previousChapterPreview;
-      if ((target < 0 || target >= widget.totalPages) && preview == null) {
-        _boundaryDirection = forward;
-        _boundaryTravel = movement.dx.abs();
-        return;
-      }
       _queuedDirection = null;
-      _beginTurn(
-        forward: forward,
-        fromTop: _downPos!.dy < _viewSize.height * 0.5,
-      );
+      if (_isTurning) {
+        // 横向手势赢得竞技场后才接管收尾，不抢占长按选词或气泡点击。
+        ++_animationGeneration;
+        _animController.stop();
+        _dragAnimation = null;
+        widget.onTurnStarted?.call();
+        _dragOrigin = _dragSpacePosition(_dragPos!);
+      } else {
+        final forward = movement.dx < 0;
+        final target = widget.currentPageIndex + (forward ? 1 : -1);
+        final preview = forward
+            ? widget.nextChapterPreview
+            : widget.previousChapterPreview;
+        if ((target < 0 || target >= widget.totalPages) && preview == null) {
+          _boundaryDirection = forward;
+          _boundaryTravel = movement.dx.abs();
+          return;
+        }
+        _beginTurn(
+          forward: forward,
+          fromTop: _downPos!.dy < _viewSize.height * 0.5,
+        );
+        _dragOrigin = _cornerPos;
+      }
       _isDragging = true;
     }
 
+    // 折痕位于纸角与拖点的中点：纸角移动两倍，折痕才与手指 1:1。
+    // 去除以书脊为圆心的径向限位，斜拖和靠近边缘时不会突然黏住。
+    _logicalDragPos = _dragOrigin! + movement * 2;
+    _updateDragPosition(_constrainDragPosition(_logicalDragPos!));
+  }
+
+  Offset _dragSpacePosition(Offset position) {
     final corner = _cornerPos!;
-    // 把手指位移映射到纸角，屏幕中部起拖也不会瞬间出现半页折痕。
-    var drag = corner + movement;
+    final progress = ((position.dx - corner.dx).abs() / (_viewSize.width * 2))
+        .clamp(0.0, 1.0);
+    return Offset(
+      position.dx,
+      corner.dy + (position.dy - corner.dy) / math.max(0.01, 1 - progress),
+    );
+  }
+
+  Offset _constrainDragPosition(Offset position) {
+    final corner = _cornerPos!;
     final w = _viewSize.width;
     final h = _viewSize.height;
-    drag = Offset(
-      drag.dx.clamp(_isForward ? -w * 0.35 : 0.0, _isForward ? w : w * 1.35),
-      drag.dy.clamp(corner.dy == 0 ? -20.0 : 0.0, corner.dy == 0 ? h : h + 20),
+    final x = position.dx.clamp(_isForward ? -w : 0.0, _isForward ? w : w * 2);
+    final travel = (x - corner.dx).abs();
+    final progress = (travel / (w * 2)).clamp(0.0, 1.0);
+    final bendLimit = math.min(h * 0.4, travel * 0.8);
+    final bend = (position.dy - corner.dy).clamp(
+      corner.dy == 0 ? 0.0 : -bendLimit,
+      corner.dy == 0 ? bendLimit : 0.0,
     );
-    final fixedCorner = Offset(_isForward ? 0 : w, corner.dy);
-    final radius = drag - fixedCorner;
-    if (radius.distance > w) {
-      drag = fixedCorner + radius * (w / radius.distance);
-    }
-    _updateDragPosition(drag);
+    return Offset(x, corner.dy + bend * (1 - progress));
   }
 
   void _onDragEnd(DragEndDetails details) {
@@ -397,7 +459,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     }
 
     final drag = _dragPos!;
-    final distance = (drag.dx - _cornerPos!.dx).abs();
+    final distance = (drag.dx - _cornerPos!.dx).abs() / 2;
     final velocity = details.velocity.pixelsPerSecond.dx;
     final directedVelocity = velocity * (_isForward ? -1 : 1);
     final shouldTurn =
@@ -407,7 +469,13 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
       from: drag,
       to: shouldTurn ? _completedDragPosition : _cornerPos!,
       completePageTurn: shouldTurn,
-      releaseVelocity: velocity,
+      // 对限位后的真实纸角求速度，斜拖松手也不会突然改变折痕方向。
+      releaseVelocity:
+          (_constrainDragPosition(
+                _logicalDragPos! + details.velocity.pixelsPerSecond * 0.002,
+              ) -
+              drag) /
+          0.001,
     );
   }
 
@@ -416,7 +484,12 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     _downPos = null;
     _boundaryDirection = null;
     if (_isDragging && _dragPos != null && _cornerPos != null) {
-      _runAnimation(from: _dragPos!, to: _cornerPos!, completePageTurn: false);
+      _runAnimation(
+        from: _dragPos!,
+        to: _cornerPos!,
+        completePageTurn: false,
+        releaseVelocity: Offset.zero,
+      );
     } else {
       _drainQueuedTurn();
     }
@@ -469,7 +542,9 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
           if (_isTurning) _resetTurn();
           _viewSize = constraints.biggest;
           _pageWidgets.clear();
+          _invalidateSnapshot();
         }
+        _scheduleBackImage();
         final sourceIndex = _turnSourceIndex ?? widget.currentPageIndex;
         _pageWidgets.removeWhere((index, _) => (index - sourceIndex).abs() > 1);
         final frontPage = RepaintBoundary(
@@ -594,18 +669,38 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   }
 }
 
-/// Hermite 收尾曲线：保留松手时的速度，并在目标处平滑停下。
-class _ReleaseCurve extends Curve {
-  final double initialSlope;
+/// 二维 Hermite 收尾：零速度松手不突兀加速，横纵动量同时接续，终点静止。
+class _ReleaseTween extends Animatable<Offset> {
+  final Offset begin;
+  final Offset end;
+  late final Offset tangent;
 
-  const _ReleaseCurve(this.initialSlope);
+  _ReleaseTween({
+    required this.begin,
+    required this.end,
+    required Offset velocity,
+    required double seconds,
+  }) {
+    double bounded(double distance, double speed) {
+      if (distance.abs() < 0.01) return 0;
+      final slope = (speed * seconds / distance).clamp(-1.0, 3.0);
+      return slope * distance;
+    }
+
+    tangent = Offset(
+      bounded(end.dx - begin.dx, velocity.dx),
+      bounded(end.dy - begin.dy, velocity.dy),
+    );
+  }
 
   @override
-  double transformInternal(double t) =>
-      ((initialSlope - 2) * t * t * t +
-              (3 - 2 * initialSlope) * t * t +
-              initialSlope * t)
-          .clamp(0.0, 1.0);
+  Offset transform(double t) {
+    final t2 = t * t;
+    final t3 = t2 * t;
+    return begin * (2 * t3 - 3 * t2 + 1) +
+        tangent * (t3 - 2 * t2 + t) +
+        end * (-2 * t3 + 3 * t2);
+  }
 }
 
 /// 折痕不与视口相交时依然返回真实多边形，不能退回原页。
@@ -666,7 +761,7 @@ _CurlGeometry? _computeCurlGeometry({
     final distanceToLine = eval(point);
     return point - normal * (2 * distanceToLine);
   }).toList();
-  final progress = (diff.dx.abs() / (size.width * 2.25)).clamp(0.0, 1.0);
+  final progress = (diff.dx.abs() / (size.width * 2)).clamp(0.0, 1.0);
   return _CurlGeometry(
     p1: intersections.length >= 2 ? intersections.first : null,
     p2: intersections.length >= 2 ? intersections.last : null,

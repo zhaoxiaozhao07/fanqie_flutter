@@ -121,6 +121,25 @@ Path _backClip(WidgetTester tester) {
   return clipper.getClip(_pageSize);
 }
 
+Offset _paperCorner(WidgetTester tester, Offset corner) {
+  final transform = tester
+      .widget<Transform>(
+        find.ancestor(
+          of: find.byType(RawImage),
+          matching: find.byType(Transform),
+        ),
+      )
+      .transform;
+  return Offset(
+    transform.entry(0, 0) * corner.dx +
+        transform.entry(0, 1) * corner.dy +
+        transform.entry(0, 3),
+    transform.entry(1, 0) * corner.dx +
+        transform.entry(1, 1) * corner.dy +
+        transform.entry(1, 3),
+  );
+}
+
 void main() {
   group('Simulation rendering regressions', () {
     testWidgets(
@@ -401,6 +420,187 @@ void main() {
       await tester.pumpAndSettle();
       expect(key.currentState!.changes, isEmpty);
       expect(key.currentState!.centerTaps, 0);
+    });
+
+    for (final forward in [true, false]) {
+      for (final top in [true, false]) {
+        testWidgets(
+          '${top ? 'top' : 'bottom'} ${forward ? 'forward' : 'backward'} crease tracks horizontal finger travel 1:1',
+          (tester) async {
+            final simulationKey = GlobalKey<SimulationPageTurnState>();
+            await tester.pumpWidget(
+              _SimulationHarness(initialPage: 1, simulationKey: simulationKey),
+            );
+            final corner = Offset(forward ? 400 : 0, top ? 0 : 600);
+            final start = Offset(forward ? 390 : 10, top ? 30 : 580);
+            final gesture = await tester.startGesture(start);
+            var travel = 0.0;
+            for (final delta in [20.0, 35.0, 55.0, -25.0]) {
+              travel += delta * (forward ? -1 : 1);
+              await gesture.moveBy(Offset(delta * (forward ? -1 : 1), 0));
+              await tester.pump(const Duration(milliseconds: 16));
+              final paper = _paperCorner(tester, corner);
+              expect(paper.dx, closeTo(corner.dx + travel * 2, 0.01));
+              expect(
+                (paper.dx + corner.dx) / 2,
+                closeTo(corner.dx + travel, 0.01),
+              );
+            }
+            await gesture.cancel();
+            await tester.pumpAndSettle();
+            expect(tester.takeException(), isNull);
+          },
+        );
+      }
+    }
+
+    testWidgets('vertical bending never clamps horizontal finger travel', (
+      tester,
+    ) async {
+      final simulationKey = GlobalKey<SimulationPageTurnState>();
+      await tester.pumpWidget(_SimulationHarness(simulationKey: simulationKey));
+      final gesture = await tester.startGesture(const Offset(390, 580));
+      await gesture.moveBy(const Offset(-80, -260));
+      await tester.pump();
+      expect(
+        _paperCorner(tester, const Offset(400, 600)).dx,
+        closeTo(240, 0.01),
+      );
+      await gesture.moveBy(const Offset(0, 120));
+      await tester.pump();
+      expect(
+        _paperCorner(tester, const Offset(400, 600)).dx,
+        closeTo(240, 0.01),
+      );
+      await gesture.cancel();
+      await tester.pumpAndSettle();
+    });
+
+    testWidgets('a new horizontal drag takes over a settling turn', (
+      tester,
+    ) async {
+      final key = GlobalKey<_SimulationHarnessState>();
+      final simulationKey = GlobalKey<SimulationPageTurnState>();
+      await tester.pumpWidget(
+        _SimulationHarness(key: key, simulationKey: simulationKey),
+      );
+      simulationKey.currentState!.turnToNextPage();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      final before = _paperCorner(tester, const Offset(400, 600));
+      final gesture = await tester.startGesture(const Offset(200, 300));
+      await gesture.moveBy(const Offset(50, 0));
+      await tester.pump();
+      final grabbed = _paperCorner(tester, const Offset(400, 600));
+      expect(grabbed.dx, closeTo(before.dx + 100, 0.01));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(key.currentState!.changes, isEmpty);
+      expect(
+        _paperCorner(tester, const Offset(400, 600)).dx,
+        closeTo(grabbed.dx, 0.01),
+      );
+      await gesture.cancel();
+      await tester.pumpAndSettle();
+      expect(key.currentState!.changes, isEmpty);
+      expect(_frontClip(tester).getBounds(), Offset.zero & _pageSize);
+      simulationKey.currentState!.turnToNextPage();
+      await tester.pumpAndSettle();
+      expect(key.currentState!.changes, [1]);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a held pointer remains usable when a turn commits', (
+      tester,
+    ) async {
+      final key = GlobalKey<_SimulationHarnessState>();
+      final simulationKey = GlobalKey<SimulationPageTurnState>();
+      await tester.pumpWidget(
+        _SimulationHarness(key: key, simulationKey: simulationKey),
+      );
+      simulationKey.currentState!.turnToNextPage();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 80));
+      final gesture = await tester.startGesture(const Offset(350, 300));
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(key.currentState!.changes, [1]);
+      await gesture.moveBy(const Offset(-100, 0));
+      await tester.pump();
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(key.currentState!.changes, [1, 2]);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('stationary release does not kick the paper forward', (
+      tester,
+    ) async {
+      final simulationKey = GlobalKey<SimulationPageTurnState>();
+      await tester.pumpWidget(_SimulationHarness(simulationKey: simulationKey));
+      final gesture = await tester.startGesture(const Offset(390, 580));
+      await gesture.moveBy(const Offset(-100, 0));
+      await tester.pump(const Duration(milliseconds: 300));
+      final before = _paperCorner(tester, const Offset(400, 600));
+      await gesture.up();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 1));
+      final after = _paperCorner(tester, const Offset(400, 600));
+      expect((after - before).distance, lessThan(1));
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('a page window update does not drop a pending drag', (
+      tester,
+    ) async {
+      final key = GlobalKey<_SimulationHarnessState>();
+      final simulationKey = GlobalKey<SimulationPageTurnState>();
+      await tester.pumpWidget(
+        _SimulationHarness(key: key, simulationKey: simulationKey),
+      );
+      final gesture = await tester.startGesture(const Offset(350, 300));
+      key.currentState!.changeChapter();
+      await tester.pump();
+      await gesture.moveBy(const Offset(-100, 0));
+      await tester.pump();
+      expect(simulationKey.currentState!.isTurning, isTrue);
+      expect(
+        _paperCorner(tester, const Offset(400, 600)).dx,
+        closeTo(200, 0.01),
+      );
+      await gesture.up();
+      await tester.pumpAndSettle();
+      expect(key.currentState!.changes, [1]);
+      expect(find.text('chapter-b-page-1'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('paper snapshot is prewarmed and reused after cancellation', (
+      tester,
+    ) async {
+      tester.view.devicePixelRatio = 3;
+      tester.view.physicalSize = const Size(1200, 1800);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetPhysicalSize);
+      final simulationKey = GlobalKey<SimulationPageTurnState>();
+      await tester.pumpWidget(_SimulationHarness(simulationKey: simulationKey));
+      final gesture = await tester.startGesture(const Offset(390, 580));
+      await gesture.moveBy(const Offset(-50, 0));
+      await tester.pump();
+      final first = tester.widget<RawImage>(find.byType(RawImage)).image!;
+      expect(
+        first.width,
+        600,
+        reason: 'Ghost text uses at most 1.5x resolution.',
+      );
+      await gesture.cancel();
+      await tester.pumpAndSettle();
+      final next = await tester.startGesture(const Offset(390, 580));
+      await next.moveBy(const Offset(-50, 0));
+      await tester.pump();
+      expect(tester.widget<RawImage>(find.byType(RawImage)).image, same(first));
+      await next.cancel();
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
     });
 
     testWidgets(

@@ -27,6 +27,7 @@ import '../services/tts_service.dart';
 import '../widgets/tts_player_panel.dart';
 import '../widgets/paragraph_comment_sheet.dart';
 import '../widgets/reader_page_view.dart';
+import '../widgets/reader_comment_bubble.dart';
 
 /// 阅读器主题配置
 class ReaderTheme {
@@ -52,6 +53,8 @@ class ReaderScreen extends StatefulWidget {
   final List<Chapter> chapters;
   final int initialChapterIndex;
   final Future<String?> Function(Chapter chapter)? chapterContentLoader;
+  final Future<ChapterCommentStats?> Function(Chapter chapter)?
+  chapterCommentStatsLoader;
 
   const ReaderScreen({
     super.key,
@@ -59,6 +62,7 @@ class ReaderScreen extends StatefulWidget {
     required this.chapters,
     this.initialChapterIndex = 0,
     this.chapterContentLoader,
+    this.chapterCommentStatsLoader,
   });
 
   @override
@@ -333,12 +337,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     for (final timer in _layoutWarmTimers.values) {
       timer.cancel();
     }
-    _savePositionNow();
+    _savePositionNow(notify: false);
     _flushPreferences();
     _ttsService.removeListener(_onTtsStateChanged);
     _ttsStartGeneration++;
     _ttsService.onChapterComplete = null;
-    _ttsService.stop().catchError((_) {});
+    // 卸载时树仍可能被锁定；全局 TTS 通知不能同步重建其他阅读器/播放器。
+    Future<void>.microtask(_ttsService.stop).catchError((_) {});
     _bookmarkService.changeNotifier.removeListener(_checkBookmarkStatus);
     _bookmarkService.changeNotifier.removeListener(_loadNotes);
     _activeSelectableParaNotifier.removeListener(_onReaderSelectionChanged);
@@ -855,24 +860,24 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  TextPainter _paragraphPainter(String text, double width) =>
-      TextPainter(
-        text: TextSpan(
-          text: text,
-          style: TextStyle(
-            fontSize: _fontSize,
-            height: _lineHeight,
-            letterSpacing: _letterSpacing,
-            fontFamily: _resolveFontFamily(_fontFamily),
-          ),
-        ),
-        textDirection: TextDirection.ltr,
-        textScaler: MediaQuery.textScalerOf(context),
-      )..layout(
-        maxWidth: math
-            .max(1, width - (_showCommentBubbles ? 54 : 0))
-            .toDouble(),
-      );
+  TextPainter _paragraphPainter(String text, double width) => TextPainter(
+    text: TextSpan(text: text, style: _readerBodyStyle()),
+    textDirection: TextDirection.ltr,
+    textScaler: MediaQuery.textScalerOf(context),
+  )..layout(maxWidth: math.max(1, width).toDouble());
+
+  TextStyle _readerBodyStyle({Color? color}) => TextStyle(
+    inherit: false,
+    color: color,
+    fontSize: _fontSize,
+    height: _lineHeight,
+    leadingDistribution: TextLeadingDistribution.even,
+    fontWeight: FontWeight.normal,
+    textBaseline: TextBaseline.alphabetic,
+    letterSpacing: _letterSpacing,
+    wordSpacing: 0,
+    fontFamily: _resolveFontFamily(_fontFamily) ?? 'Roboto',
+  );
 
   double _estimatedParagraphHeight(int chapterIndex, int paragraphIndex) {
     final key = '${widget.chapters[chapterIndex].itemId}_$paragraphIndex';
@@ -893,11 +898,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     _positionTimer = Timer(const Duration(milliseconds: 500), _savePositionNow);
   }
 
-  Future<void> _savePositionNow() {
+  Future<void> _savePositionNow({bool notify = true}) {
     if (mounted) {
       _readingPosition = _captureReadingPosition() ?? _readingPosition;
     }
-    if (mounted) _positionVersion.value++;
+    if (mounted && notify) _positionVersion.value++;
     final position = _readingPosition;
     return position == null
         ? Future.value()
@@ -1556,10 +1561,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     final request = () async {
       try {
-        final stats = await _apiService.getChapterCommentStats(
-          itemId,
-          bookId: widget.book.bookId,
-        );
+        final loader = widget.chapterCommentStatsLoader;
+        final stats = loader == null
+            ? await _apiService.getChapterCommentStats(
+                itemId,
+                bookId: widget.book.bookId,
+              )
+            : await loader(widget.chapters[_chapterIndexById[itemId]!]);
         if (stats != null && mounted) {
           _chapterCommentStats[itemId] = stats;
           _notifyComments();
@@ -3189,8 +3197,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
     }
 
-    // 段评使用固定边栏，不再让异步计数把正文挤到下一行。
-    final content = DecoratedBox(
+    return DecoratedBox(
       decoration: isLocateTarget
           ? BoxDecoration(
               color: theme.highlightColor.withValues(alpha: 0.85),
@@ -3208,34 +3215,16 @@ class _ReaderScreenState extends State<ReaderScreen>
         chapterIndex: validChapIdx,
         paraIndex: paraIndex,
         onTap: _toggleControls,
+        commentBubble: showBubble
+            ? _buildCommentBubble(chapter, paraIndex, trimmed, theme)
+            : null,
+        commentBubbleSize: showBubble
+            ? ReaderCommentBubble.sizeFor(
+                MediaQuery.textScalerOf(context),
+                count: commentCount,
+              )
+            : null,
       ),
-    );
-    return Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Expanded(child: content),
-        if (_showCommentBubbles)
-          SizedBox(
-            width: 54,
-            height: math.min(
-              28.0,
-              _lineHeight * MediaQuery.textScalerOf(context).scale(_fontSize),
-            ),
-            child: showBubble
-                ? _buildPageCommentBubble(
-                    chapter,
-                    ReaderPageFragment(
-                      paragraphIndex: paraIndex,
-                      startOffset: 0,
-                      endOffset: trimmed.length,
-                      text: trimmed,
-                      height: _fontSize * _lineHeight,
-                    ),
-                    theme,
-                  )
-                : const SizedBox.shrink(),
-          ),
-      ],
     );
   }
 
@@ -3247,13 +3236,28 @@ class _ReaderScreenState extends State<ReaderScreen>
     required int chapterIndex,
     required int paraIndex,
     required VoidCallback? onTap,
+    Widget? commentBubble,
+    Size? commentBubbleSize,
   }) {
-    final baseStyle = TextStyle(
-      fontSize: _fontSize,
-      height: _lineHeight,
-      color: theme.textColor,
-      letterSpacing: _letterSpacing,
-      fontFamily: _resolveFontFamily(_fontFamily),
+    final baseStyle = _readerBodyStyle(color: theme.textColor);
+    final commentChild = commentBubble == null
+        ? null
+        : SizedBox.fromSize(size: commentBubbleSize, child: commentBubble);
+    final spanScale =
+        MediaQuery.textScalerOf(context).scale(_fontSize) / _fontSize;
+    final commentSpan = commentBubble == null
+        ? null
+        : WidgetSpan(
+            alignment: PlaceholderAlignment.middle,
+            child: SizedBox.fromSize(
+              // WidgetSpan 会再按正文字号缩放整个控件，先抵消该倍率；
+              // 数字已按系统 TextScaler 排版，不能二次放大并挤出分页。
+              size: commentBubbleSize! / spanScale,
+              child: FittedBox(fit: BoxFit.fill, child: commentChild),
+            ),
+          );
+    final textSpan = TextSpan(
+      children: [...inlineSpans, if (commentSpan != null) commentSpan],
     );
 
     return ValueListenableBuilder<String?>(
@@ -3261,7 +3265,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       builder: (context, activeParaKey, _) {
         final isSelectedPara = activeParaKey == paraKeyStr;
         if (isSelectedPara) {
-          return SelectableText.rich(
+          final selectable = SelectableText.rich(
             key: _activeSelectableTextKey,
             TextSpan(children: inlineSpans),
             style: baseStyle,
@@ -3286,6 +3290,42 @@ class _ReaderScreenState extends State<ReaderScreen>
               );
             },
           );
+          if (commentSpan == null) return selectable;
+          // EditableText 不支持内联控件。保持原排版高度并覆盖同一段尾位置，
+          // 选词/复制只包含原文，不带气泡占位符或计数，也不让后续段落跳动。
+          return LayoutBuilder(
+            builder: (context, constraints) {
+              final painter =
+                  TextPainter(
+                    text: TextSpan(
+                      style: baseStyle,
+                      children: textSpan.children,
+                    ),
+                    textDirection: TextDirection.ltr,
+                    textScaler: MediaQuery.textScalerOf(context),
+                  )..setPlaceholderDimensions([
+                    PlaceholderDimensions(
+                      size: commentBubbleSize!,
+                      alignment: PlaceholderAlignment.middle,
+                    ),
+                  ]);
+              painter.layout(maxWidth: constraints.maxWidth);
+              final height = painter.height;
+              final rect = painter.inlinePlaceholderBoxes!.single.toRect();
+              painter.dispose();
+              return SizedBox(
+                width: constraints.maxWidth,
+                height: height,
+                child: Stack(
+                  clipBehavior: Clip.none,
+                  children: [
+                    selectable,
+                    Positioned.fromRect(rect: rect, child: commentChild!),
+                  ],
+                ),
+              );
+            },
+          );
         }
 
         return GestureDetector(
@@ -3302,7 +3342,11 @@ class _ReaderScreenState extends State<ReaderScreen>
           ),
           onLongPressEnd: (_) =>
               _endParagraphSelectionDrag(paraKeyStr: paraKeyStr),
-          child: Text.rich(TextSpan(children: inlineSpans), style: baseStyle),
+          child: Text.rich(
+            textSpan,
+            key: ValueKey('reader-paragraph-$paraKeyStr'),
+            style: baseStyle,
+          ),
         );
       },
     );
@@ -3960,12 +4004,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   ReaderLayout _layoutFor(Size size) => ReaderLayout(
     size: size,
-    bodyStyle: TextStyle(
-      fontSize: _fontSize,
-      height: _lineHeight,
-      letterSpacing: _letterSpacing,
-      fontFamily: _resolveFontFamily(_fontFamily),
-    ),
+    bodyStyle: _readerBodyStyle(),
     titleStyle: TextStyle(
       fontSize: _fontSize + 4,
       height: 1.4,
@@ -3975,7 +4014,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     textScaler: MediaQuery.textScalerOf(context),
     horizontalPadding: _horizontalPadding,
     paragraphSpacing: _paragraphSpacing.clamp(4.0, 14.0),
-    commentGutter: _showCommentBubbles ? 54 : 0,
+    inlineCommentSize: _showCommentBubbles
+        ? ReaderCommentBubble.sizeFor(MediaQuery.textScalerOf(context))
+        : Size.zero,
   );
 
   ReaderChapterPages _preparePages(int index, ReaderLayout layout) {
@@ -4162,6 +4203,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 backgroundColor: theme.backgroundColor,
                 isDark: theme.systemBrightness == Brightness.dark,
                 selection: _activeSelectableParaNotifier,
+                pageContentChanges: _commentStatsVersionNotifier,
                 onDismissSelection: () =>
                     _activeSelectableParaNotifier.value = null,
                 lastBubbleTap: () => _lastBubbleTapTime,
@@ -4291,41 +4333,18 @@ class _ReaderScreenState extends State<ReaderScreen>
                             SizedBox(
                               height: _paragraphSpacing.clamp(4.0, 14.0),
                             ),
-                          Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Expanded(
-                                child: _buildParagraphWithUnderlines(
-                                  page.fragments[index].text,
-                                  theme,
-                                  chapter,
-                                  page.fragments[index].paragraphIndex,
-                                  chapterIndex: address.chapterIndex,
-                                  pageIdx: address.pageIndex,
-                                  sourceParagraph:
-                                      paragraphs[page
-                                              .fragments[index]
-                                              .paragraphIndex]
-                                          .trim(),
-                                  startOffset:
-                                      page.fragments[index].startOffset,
-                                  endOffset: page.fragments[index].endOffset,
-                                ),
-                              ),
-                              if (_showCommentBubbles)
-                                SizedBox(
-                                  width: 54,
-                                  height: math.min(
-                                    28.0,
-                                    page.fragments[index].height,
-                                  ),
-                                  child: _buildPageCommentBubble(
-                                    chapter,
-                                    page.fragments[index],
-                                    theme,
-                                  ),
-                                ),
-                            ],
+                          _buildParagraphWithUnderlines(
+                            page.fragments[index].text,
+                            theme,
+                            chapter,
+                            page.fragments[index].paragraphIndex,
+                            chapterIndex: address.chapterIndex,
+                            pageIdx: address.pageIndex,
+                            sourceParagraph:
+                                paragraphs[page.fragments[index].paragraphIndex]
+                                    .trim(),
+                            startOffset: page.fragments[index].startOffset,
+                            endOffset: page.fragments[index].endOffset,
                           ),
                         ],
                       ],
@@ -4357,57 +4376,28 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  Widget _buildPageCommentBubble(
+  Widget _buildCommentBubble(
     Chapter chapter,
-    ReaderPageFragment fragment,
+    int paragraphIndex,
+    String originalText,
     ReaderTheme theme,
   ) {
     final count =
-        _chapterCommentStats[chapter.itemId]?.getCount(
-          fragment.paragraphIndex,
-        ) ??
-        0;
-    if (count == 0) return const SizedBox.shrink();
-    return GestureDetector(
-      behavior: HitTestBehavior.opaque,
-      onTapDown: (_) => _lastBubbleTapTime = DateTime.now(),
+        _chapterCommentStats[chapter.itemId]?.getCount(paragraphIndex) ?? 0;
+    return ReaderCommentBubble(
+      key: ValueKey('paragraph-comment-${chapter.itemId}-$paragraphIndex'),
+      count: count,
+      backgroundColor: theme.highlightColor,
+      foregroundColor: theme.secondaryColor,
+      onTapDown: () => _lastBubbleTapTime = DateTime.now(),
       onTap: () {
         _lastBubbleTapTime = DateTime.now();
         _openParagraphComments(
           chapter: chapter,
-          paraIndex: fragment.paragraphIndex,
-          paraText: fragment.text.trim(),
+          paraIndex: paragraphIndex,
+          paraText: originalText,
         );
       },
-      child: Padding(
-        padding: const EdgeInsets.only(left: 6),
-        child: FittedBox(
-          fit: BoxFit.scaleDown,
-          alignment: Alignment.topCenter,
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-            decoration: BoxDecoration(
-              color: theme.highlightColor,
-              borderRadius: BorderRadius.circular(8),
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Icon(
-                  Icons.chat_bubble_outline,
-                  size: 10,
-                  color: theme.secondaryColor,
-                ),
-                const SizedBox(width: 2),
-                Text(
-                  count > 999 ? '999+' : '$count',
-                  style: TextStyle(fontSize: 10, color: theme.secondaryColor),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
     );
   }
 
@@ -4471,6 +4461,20 @@ class _ReaderScreenState extends State<ReaderScreen>
         chapterIndex: validChapIdx,
         paraIndex: effectiveParaIdx,
         onTap: null,
+        // 续页中段不重复显示段评。只在原段落的真正结尾预留内联气泡；
+        // 统计异步到达时可原位显示，不缩窄正文，也不改变既有分页。
+        commentBubble:
+            _showCommentBubbles && endOffset == sourceParagraph.length
+            ? _buildCommentBubble(
+                chapter,
+                effectiveParaIdx,
+                sourceParagraph,
+                theme,
+              )
+            : null,
+        commentBubbleSize: _showCommentBubbles
+            ? ReaderCommentBubble.sizeFor(MediaQuery.textScalerOf(context))
+            : null,
       ),
     );
   }

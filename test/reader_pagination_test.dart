@@ -1,11 +1,12 @@
 import 'package:fanqie_flutter/models/reading_position.dart';
 import 'package:fanqie_flutter/services/reader_pagination.dart';
 import 'package:fanqie_flutter/services/reader_position_service.dart';
+import 'package:fanqie_flutter/widgets/reader_comment_bubble.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-ReaderLayout layout(double scale, {double width = 400, double gutter = 54}) =>
+ReaderLayout layout(double scale, {double width = 400, bool comments = true}) =>
     ReaderLayout(
       size: Size(width, 760),
       bodyStyle: const TextStyle(fontSize: 18, height: 1.8, letterSpacing: 0.5),
@@ -17,7 +18,9 @@ ReaderLayout layout(double scale, {double width = 400, double gutter = 54}) =>
       textScaler: TextScaler.linear(scale),
       horizontalPadding: 20,
       paragraphSpacing: 14,
-      commentGutter: gutter,
+      inlineCommentSize: comments
+          ? ReaderCommentBubble.sizeFor(TextScaler.linear(scale))
+          : Size.zero,
     );
 
 void main() {

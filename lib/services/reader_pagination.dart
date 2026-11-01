@@ -12,7 +12,7 @@ class ReaderLayout {
   final TextScaler textScaler;
   final double horizontalPadding;
   final double paragraphSpacing;
-  final double commentGutter;
+  final Size inlineCommentSize;
 
   const ReaderLayout({
     required this.size,
@@ -21,7 +21,7 @@ class ReaderLayout {
     required this.textScaler,
     required this.horizontalPadding,
     required this.paragraphSpacing,
-    this.commentGutter = 0,
+    this.inlineCommentSize = Size.zero,
   });
 
   Object get key => (
@@ -31,7 +31,7 @@ class ReaderLayout {
     textScaler,
     horizontalPadding,
     paragraphSpacing,
-    commentGutter,
+    inlineCommentSize,
   );
 }
 
@@ -156,14 +156,40 @@ class ReaderPaginationCache {
   }) {
     final width = math.max(
       1.0,
-      layout.size.width - layout.horizontalPadding * 2 - layout.commentGutter,
+      layout.size.width - layout.horizontalPadding * 2,
     );
     final painter = TextPainter(
       textDirection: TextDirection.ltr,
       textScaler: layout.textScaler,
     );
-    double measure(String text, TextStyle style, double maxWidth) {
-      painter.text = TextSpan(text: text, style: style);
+    double measure(
+      String text,
+      TextStyle style,
+      double maxWidth, {
+      bool paragraphEnd = false,
+    }) {
+      final hasComment = paragraphEnd && !layout.inlineCommentSize.isEmpty;
+      painter.text = TextSpan(
+        style: style,
+        children: [
+          TextSpan(text: text),
+          if (hasComment)
+            const WidgetSpan(
+              alignment: PlaceholderAlignment.middle,
+              child: SizedBox.shrink(),
+            ),
+        ],
+      );
+      painter.setPlaceholderDimensions(
+        hasComment
+            ? [
+                PlaceholderDimensions(
+                  size: layout.inlineCommentSize,
+                  alignment: PlaceholderAlignment.middle,
+                ),
+              ]
+            : const [],
+      );
       painter.layout(maxWidth: maxWidth);
       return painter.height;
     }
@@ -221,7 +247,12 @@ class ReaderPaginationCache {
           final room = available() - usedHeight - spacing;
           final prefix = indent && cursor == 0 ? '\u3000\u3000' : '';
           final display = '$prefix${original.substring(cursor)}';
-          final fullHeight = measure(display, layout.bodyStyle, width);
+          final fullHeight = measure(
+            display,
+            layout.bodyStyle,
+            width,
+            paragraphEnd: true,
+          );
           var end = display.length;
           var height = fullHeight;
           if (height > room + 0.01) {
@@ -244,11 +275,30 @@ class ReaderPaginationCache {
                   original.substring(cursor).characters.first.length;
               oversized = true;
             }
+            // 气泡单独溢出时，最后一个完整字素随气泡留到续页；
+            // 不生成丢失原文位置的“仅气泡页”，也不切断 emoji。
+            if (candidate >= display.length &&
+                !layout.inlineCommentSize.isEmpty) {
+              candidate =
+                  display.length -
+                  original.substring(cursor).characters.last.length;
+              if (candidate <= prefix.length && fragments.isNotEmpty) {
+                flush();
+                continue;
+              }
+            }
             end = candidate.clamp(prefix.length + 1, display.length);
+            if (candidate <= prefix.length) {
+              end =
+                  prefix.length +
+                  original.substring(cursor).characters.first.length;
+              oversized = true;
+            }
             height = measure(
               display.substring(0, end),
               layout.bodyStyle,
               width,
+              paragraphEnd: end == display.length,
             );
             // 少数字体/词边界的独立续页重排可能多出一行，退回上一行再核对。
             while (height > room + 0.01 &&
@@ -266,6 +316,7 @@ class ReaderPaginationCache {
                 display.substring(0, end),
                 layout.bodyStyle,
                 width,
+                paragraphEnd: end == display.length,
               );
             }
           }

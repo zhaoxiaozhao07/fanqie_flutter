@@ -20,6 +20,7 @@ class ReaderPageView extends StatefulWidget {
   final Color backgroundColor;
   final bool isDark;
   final ValueListenable<String?> selection;
+  final Listenable? pageContentChanges;
   final ValueChanged<ReaderPageItem> onPageSettled;
   final VoidCallback onPreviousBoundary;
   final VoidCallback onNextBoundary;
@@ -39,6 +40,7 @@ class ReaderPageView extends StatefulWidget {
     required this.backgroundColor,
     required this.isDark,
     required this.selection,
+    this.pageContentChanges,
     required this.onPageSettled,
     required this.onPreviousBoundary,
     required this.onNextBoundary,
@@ -297,6 +299,7 @@ class ReaderPageViewState extends State<ReaderPageView> {
             currentPageIndex: _index,
             pageSetKey: _pageSetVersion,
             contentVersion: _contentVersion,
+            pageContentChanges: widget.pageContentChanges,
             backgroundColor: widget.backgroundColor,
             isDark: widget.isDark,
             isSelectionActive: () => widget.selection.value != null,
