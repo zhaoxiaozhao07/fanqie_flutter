@@ -31,7 +31,7 @@
 - [x] E9 轻量阅读辅助
 - [x] 全量静态分析、单元/组件/集成测试（本地通过，发布 CI 复验）
 - [x] Android 构建与设备测试（Release APK + API 35 模拟器）
-- [ ] v3.2.0 发布 workflow 与产物验证
+- [x] v3.2.0 发布 workflow 与产物验证
 
 后续各提交在此记录实现范围、测试和剩余限制。
 
@@ -132,7 +132,7 @@
 - 阅读历史保存上次正文片段，不生成或上传剧情摘要。
 - 4 项统计服务测试通过；当前全套 Dart 测试 191 项通过。
 
-## 发布前检查（进行中）
+## 发布验证完成（2026-11-02）
 
 - 静态分析：无问题。
 - Android 平台回归：9 项通过，包括窗口亮度、GB18030、取消、备份原生存储和统计持久化。
@@ -141,4 +141,10 @@
 - 发布 workflow 增加版本一致性、Dart、Android 与长时测试门禁，签名配置缺失时拒绝正式发布。
 - 本地 Release APK 构建通过，包版本核验为 `versionName=3.2.0`、`versionCode=320`、minSdk 24 / targetSdk 36。
 - Release 构建需允许 Flutter 刷新平台注册文件；不能在同一目录同时运行调试测试和 Release 构建，避免开发依赖注册文件相互覆盖。
-- 发布 CI 与 GitHub Release 结果待记录。
+- 主分支 CI 通过：[41354726281](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/runs/41354726281)。
+- 发布 CI 全部通过：[41355091770](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/runs/41355091770)，包含 Dart 测试、Android 平台/30 分钟关屏复验和签名构建。
+- 正式发布：[v3.2.0](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/tag/v3.2.0)，非草稿、非预发布。
+- 标签对应提交：`1a01b6151ead3271a738fca9e326f3a22c2588d4`；本次后续仅补充验证记录，不移动发布标签。
+- 发布附件：`fanqie-v3.2.0.apk`（81,869,366 字节）及 `.sha256` 校验文件。
+- APK SHA-256：`686dd9242e233ecbc9142cdfa1f7f85ac0a6c07655dcbdd823ece4a4b9aa83a5`，已核对 GitHub 附件摘要与随附校验文件一致。
+- CI 中的 Node/action 版本弃用提示不影响本次通过，后续维护可升级相关 Actions。
