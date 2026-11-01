@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'search_screen.dart';
 import 'bookshelf_screen.dart';
 import 'history_screen.dart';
+import '../widgets/tts_player_panel.dart';
 
 /// 主页面 - 底部三导航：主页、书架、历史
 class MainScreen extends StatefulWidget {
@@ -35,31 +36,37 @@ class _MainScreenState extends State<MainScreen> {
           HistoryScreen(key: _historyKey),
         ],
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: _currentIndex,
-        onDestinationSelected: (index) {
-          setState(() => _currentIndex = index);
-          if (index == 1) {
-            _bookshelfKey.currentState?.refresh();
-          } else if (index == 2) {
-            _historyKey.currentState?.refreshHistory();
-          }
-        },
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.home_outlined),
-            selectedIcon: Icon(Icons.home_rounded),
-            label: '主页',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.collections_bookmark_outlined),
-            selectedIcon: Icon(Icons.collections_bookmark_rounded),
-            label: '书架',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.history_outlined),
-            selectedIcon: Icon(Icons.history_rounded),
-            label: '历史',
+      bottomNavigationBar: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          TtsPlayerPanel(onClose: () {}),
+          NavigationBar(
+            selectedIndex: _currentIndex,
+            onDestinationSelected: (index) {
+              setState(() => _currentIndex = index);
+              if (index == 1) {
+                _bookshelfKey.currentState?.refresh();
+              } else if (index == 2) {
+                _historyKey.currentState?.refreshHistory();
+              }
+            },
+            destinations: const [
+              NavigationDestination(
+                icon: Icon(Icons.home_outlined),
+                selectedIcon: Icon(Icons.home_rounded),
+                label: '主页',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.collections_bookmark_outlined),
+                selectedIcon: Icon(Icons.collections_bookmark_rounded),
+                label: '书架',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.history_outlined),
+                selectedIcon: Icon(Icons.history_rounded),
+                label: '历史',
+              ),
+            ],
           ),
         ],
       ),

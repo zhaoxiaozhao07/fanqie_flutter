@@ -24,6 +24,7 @@ import '../services/reader_pagination.dart';
 import '../services/reader_position_service.dart';
 import '../services/reader_font_service.dart';
 import '../services/reader_cache_service.dart';
+import '../services/reader_text.dart';
 import '../services/tts_service.dart';
 import '../widgets/tts_player_panel.dart';
 import '../widgets/paragraph_comment_sheet.dart';
@@ -198,6 +199,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   int _themeIndex = 1; // 默认羊皮纸
   double _horizontalPadding = 20.0; // 页面边距：14 紧凑, 20 适中, 28 宽松
   bool _volumeKeyScroll = false; // 音量物理键翻页滚动
+  bool get _canUseVolumeKeys =>
+      _volumeKeyScroll && !_ttsService.isActive && _readerPanels == 0;
   bool _showCommentBubbles = true; // 是否显示段评气泡
   bool _indentTwoChars = true; // 首行缩进两字符
   double _letterSpacing = 0.5; // 字间距
@@ -328,10 +331,11 @@ class _ReaderScreenState extends State<ReaderScreen>
             SnackBar(content: Text(target!.notice!)),
           );
         }
-        ReaderSystemService.setVolumeKeyScrollEnabled(_volumeKeyScroll);
+        ReaderSystemService.setVolumeKeyScrollEnabled(_canUseVolumeKeys);
       }
     });
     _scrollController.addListener(_onScroll);
+    _ttsService.attachReader(widget.book.bookId);
     _ttsService.addListener(_onTtsStateChanged);
 
     // 启用阅读屏幕常亮与定时电量/时间更新
@@ -365,10 +369,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     _savePositionNow(notify: false);
     _flushPreferences();
     _ttsService.removeListener(_onTtsStateChanged);
+    _ttsService.detachReader(widget.book.bookId);
     _ttsStartGeneration++;
-    _ttsService.onChapterComplete = null;
-    // 卸载时树仍可能被锁定；全局 TTS 通知不能同步重建其他阅读器/播放器。
-    Future<void>.microtask(_ttsService.stop).catchError((_) {});
+    // The service owns the playlist; leaving this route must not stop audio.
     _bookmarkService.changeNotifier.removeListener(_checkBookmarkStatus);
     _bookmarkService.changeNotifier.removeListener(_loadNotes);
     _activeSelectableParaNotifier.removeListener(_onReaderSelectionChanged);
@@ -411,6 +414,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     if (key == _ttsPaintKey) return;
     _ttsPaintKey = key;
+    ReaderSystemService.setVolumeKeyScrollEnabled(_canUseVolumeKeys);
     _ttsHighlightNotifier.value++;
     if (_ttsService.isPlaying &&
         !_isAutoScrolling &&
@@ -419,45 +423,24 @@ class _ReaderScreenState extends State<ReaderScreen>
         _readerPanels == 0 &&
         _activeSelectableParaNotifier.value == null &&
         DateTime.now().isAfter(_manualScrollUntil) &&
-        _scrollController.hasClients) {
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
       _autoScrollFollowTts();
     }
   }
 
   void _autoScrollFollowTts() {
-    final chapterIndex =
-        widget.chapters[_currentActiveIndex].title ==
-            _ttsService.currentChapterTitle
-        ? _currentActiveIndex
-        : widget.chapters.indexWhere(
-            (chapter) => chapter.title == _ttsService.currentChapterTitle,
-          );
-    if (chapterIndex < 0 || !_displayedChapters.contains(chapterIndex)) return;
-    final paragraphs = _getChapterParagraphs(chapterIndex);
-    final spoken = _ttsService.currentText.replaceAll(RegExp(r'\s'), '');
-    if (spoken.isEmpty) return;
-    final prefix = spoken.substring(0, math.min(24, spoken.length));
-    var paragraphIndex = -1;
-    var characterOffset = 0;
-    // 直接定位正在朗读的原文，不再用切片百分比或固定 2400px 猜测位置。
-    for (var index = 0; index < paragraphs.length; index++) {
-      final original = paragraphs[index].trim();
-      final normalized = original.replaceAll(RegExp(r'\s'), '');
-      final offset = normalized.indexOf(prefix);
-      if (offset < 0) continue;
-      paragraphIndex = index;
-      var count = 0;
-      for (
-        var cursor = 0;
-        cursor < original.length && count < offset;
-        cursor++
-      ) {
-        if (original[cursor].trim().isNotEmpty) count++;
-        characterOffset = cursor + 1;
-      }
-      break;
+    final position = _ttsService.currentPosition;
+    if (position == null || _ttsService.currentBookId != widget.book.bookId) return;
+    final chapterIndex = _chapterIndexById[position.chapterId];
+    if (chapterIndex == null) return;
+    if (_isPageMode || !_displayedChapters.contains(chapterIndex)) {
+      unawaited(_startFromChapter(chapterIndex, position: position));
+      return;
     }
-    if (paragraphIndex < 0) return;
+    final paragraphs = _getChapterParagraphs(chapterIndex);
+    if (position.paragraphIndex >= paragraphs.length) return;
+    final paragraphIndex = position.paragraphIndex;
+    final characterOffset = position.characterOffset;
     final chapter = widget.chapters[chapterIndex];
     final mounted = _mountedParagraphs['${chapter.itemId}_$paragraphIndex'];
     if (mounted == null || !mounted.context.mounted) {
@@ -490,11 +473,11 @@ class _ReaderScreenState extends State<ReaderScreen>
         body.localToGlobal(Offset.zero).dy -
         body.size.height * 0.35;
     if (delta.abs() < 35) return;
-    final position = _scrollController.position;
+    final scrollPosition = _scrollController.position;
     _scrollController.animateTo(
       (_scrollController.offset + delta).clamp(
-        position.minScrollExtent,
-        position.maxScrollExtent,
+        scrollPosition.minScrollExtent,
+        scrollPosition.maxScrollExtent,
       ),
       duration: const Duration(milliseconds: 250),
       curve: Curves.easeOutCubic,
@@ -735,8 +718,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _onVolumeScroll(String direction) {
     if (!mounted ||
-        !_volumeKeyScroll ||
-        _readerPanels > 0 ||
+        !_canUseVolumeKeys ||
         !(ModalRoute.of(context)?.isCurrent ?? true)) {
       return;
     }
@@ -1140,6 +1122,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      _ttsPaintKey = null;
+      _onTtsStateChanged();
       if (_resumeAutoAfterLifecycle && _isAutoScrolling) _startAutoScroll();
       _resumeAutoAfterLifecycle = false;
     } else {
@@ -1797,38 +1781,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   /// 文本段落格式化与首行重复章节名智能去重
-  String _formatContent(String raw, {String? chapterTitle}) {
-    final lines = raw.split(RegExp(r'\r?\n'));
-    final formatted = <String>[];
-    bool isFirstLine = true;
-
-    final normalizedTitle = chapterTitle
-        ?.replaceAll(RegExp(r'[\s\p{P}]', unicode: true), '')
-        .toLowerCase();
-
-    for (var line in lines) {
-      final trimmed = line.trim();
-      if (trimmed.isEmpty) continue;
-
-      if (isFirstLine) {
-        isFirstLine = false;
-        // 智能去重：若正文第一行与识别出的章节名重复，剔除该行
-        final normalizedLine = trimmed.replaceAll(RegExp(r'[\s\p{P}]', unicode: true), '').toLowerCase();
-        if (normalizedTitle != null && normalizedTitle.isNotEmpty) {
-          if (normalizedLine == normalizedTitle ||
-              (normalizedLine.length < 35 && (normalizedTitle.contains(normalizedLine) || normalizedLine.contains(normalizedTitle)))) {
-            continue;
-          }
-        }
-        if (trimmed.length < 30 && RegExp(r'^第[0-9一二三四五六七八九十百千万]+[章卷回节集]').hasMatch(trimmed)) {
-          continue;
-        }
-      }
-
-      formatted.add('\u3000\u3000$trimmed');
-    }
-    return formatted.join('\n\n');
-  }
+  String _formatContent(String raw, {String? chapterTitle}) =>
+      ReaderText.display(raw, chapterTitle: chapterTitle);
 
   void _toggleControls() {
     if (DateTime.now().difference(_lastBubbleTapTime) <
@@ -1855,7 +1809,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _panelsClosed!.complete();
       }
       if (mounted) {
-        ReaderSystemService.setVolumeKeyScrollEnabled(_volumeKeyScroll);
+        ReaderSystemService.setVolumeKeyScrollEnabled(_canUseVolumeKeys);
       }
     }
   }
@@ -2586,7 +2540,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                       onChanged: (value) => _applyReaderSetting(() {
                         _volumeKeyScroll = value;
                         ReaderSystemService.setVolumeKeyScrollEnabled(
-                          value && _readerPanels == 0,
+                          _canUseVolumeKeys,
                         );
                       }, layoutChanged: false),
                     ),
@@ -3204,97 +3158,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     final validChapIdx = chapterIndex;
     final paraUnderlines = _getParaUnderlines(validChapIdx, paraIndex);
 
-    final inlineSpans = <InlineSpan>[];
-    if (currentTtsText.isEmpty) {
-      inlineSpans.addAll(
-        _buildSpansWithUnderline(
-          textToShow,
-          paraUnderlines,
-          theme,
-          validChapIdx,
-          paraIndex,
-        ),
-      );
-    } else {
-      final cleanTts = currentTtsText.replaceAll(RegExp(r'[\s\r\n]'), '');
-      final cleanParagraph = trimmed.replaceAll(RegExp(r'[\s\r\n]'), '');
-      final isFullMatch =
-          cleanTts.contains(cleanParagraph) ||
-          cleanParagraph.contains(cleanTts);
-
-      final sentencePattern = RegExp(r'[^。！？；!?;]+[。！？；!?;]?');
-      final matches = sentencePattern.allMatches(textToShow);
-
-      if (matches.isEmpty) {
-        inlineSpans.addAll(
-          _buildSpansWithUnderline(
-            textToShow,
-            paraUnderlines,
-            theme,
-            validChapIdx,
-            paraIndex,
-          ),
-        );
-      } else {
-        final spans = <TextSpan>[];
-        final highlightMarkerBg = theme.highlightColor;
-        bool hasAnyHighlight = false;
-
-        for (final match in matches) {
-          final sentence = match.group(0) ?? '';
-          final cleanSent = sentence.replaceAll(
-            RegExp(r'[\s\p{P}]', unicode: true),
-            '',
-          );
-
-          final isSentHighlighted =
-              cleanSent.isNotEmpty &&
-              (cleanTts.contains(cleanSent) ||
-                  (cleanSent.length > 4 &&
-                      cleanTts.contains(cleanSent.substring(0, 4))) ||
-                  isFullMatch);
-
-          if (isSentHighlighted) hasAnyHighlight = true;
-          final isUnderlined = paraUnderlines.any(
-            (p) => sentence.contains(p) || p.contains(sentence),
-          );
-
-          spans.add(
-            TextSpan(
-              text: sentence,
-              style: TextStyle(
-                fontSize: _fontSize,
-                height: _lineHeight,
-                color: theme.textColor,
-                backgroundColor: isSentHighlighted ? highlightMarkerBg : null,
-                fontWeight: FontWeight.normal,
-                letterSpacing: _letterSpacing,
-                fontFamily: _resolveFontFamily(_fontFamily),
-                // 纯正虚线下划线，字体基线平整，绝无文字抬高！
-                decoration: isUnderlined ? TextDecoration.underline : null,
-                decorationStyle: TextDecorationStyle.dashed,
-                decorationColor: theme.textColor.withValues(alpha: 0.85),
-                decorationThickness: 1.5,
-              ),
-            ),
-          );
-        }
-
-        if (!hasAnyHighlight) {
-          inlineSpans.addAll(
-            _buildSpansWithUnderline(
-              textToShow,
-              paraUnderlines,
-              theme,
-              validChapIdx,
-              paraIndex,
-            ),
-          );
-        } else {
-          inlineSpans.addAll(spans);
-        }
-      }
-    }
+    final inlineSpans = _withSpokenHighlight(
+      _buildSpansWithUnderline(textToShow, paraUnderlines, theme, validChapIdx, paraIndex),
+      textToShow, theme, chapter.itemId, paraIndex,
+      sourceStart: 0, sourceEnd: trimmed.length,
+    );
 
     return DecoratedBox(
       decoration: isLocateTarget
@@ -3862,53 +3730,17 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _startTtsReading({int? chapterIndex}) async {
     final tts = _ttsService;
-    if (chapterIndex == null && tts.isActive) {
-      tts.isPlaying ? tts.pause() : tts.resume();
+    if (chapterIndex == null && tts.isActive &&
+        tts.currentBookId == widget.book.bookId) {
+      tts.isPaused ? await tts.resume() : await tts.pause();
       return;
     }
-    final generation = ++_ttsStartGeneration;
+    _ttsStartGeneration++;
     final index = chapterIndex ?? _currentActiveIndex;
     if (index < 0 || index >= widget.chapters.length) return;
-    await _fetchChapterContent(index);
-    if (!mounted || generation != _ttsStartGeneration) return;
-    final chapter = widget.chapters[index];
-    final paragraphs = _getChapterParagraphs(index);
-    if (paragraphs.isEmpty) return;
-    var text = _chapterCache[index] ?? '';
-    if (chapterIndex == null) {
-      final position = _captureReadingPosition();
-      if (position?.chapterId == chapter.itemId) {
-        final paragraph = position!.paragraphIndex.clamp(
-          0,
-          paragraphs.length - 1,
-        );
-        final original = paragraphs[paragraph].trim();
-        text = [
-          original.substring(
-            position.characterOffset.clamp(0, original.length),
-          ),
-          ...paragraphs.skip(paragraph + 1).map((value) => value.trim()),
-        ].where((value) => value.isNotEmpty).join('\n\n');
-      }
-    }
-    if (text.isEmpty) return;
+    final position = chapterIndex == null ? _captureReadingPosition() : null;
     _showControls = false;
-    tts.onChapterComplete = (_) async {
-      final next = index + 1;
-      if (!mounted || next >= widget.chapters.length) return;
-      final epoch = _ttsStartGeneration;
-      await _fetchChapterContent(next);
-      if (!mounted ||
-          epoch != _ttsStartGeneration ||
-          !_chapterCache.containsKey(next)) {
-        return;
-      }
-      if (_currentActiveIndex == index || _readerPanels > 0) {
-        _startFromChapter(next);
-      }
-      _startTtsReading(chapterIndex: next);
-    };
-    await tts.startChapter(chapter.title, text);
+    await tts.startBook(widget.book, widget.chapters, index, position: position);
   }
 
   void _showQuickCacheModal() {
@@ -4235,7 +4067,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 backgroundColor: theme.backgroundColor,
                 isDark: theme.systemBrightness == Brightness.dark,
                 selection: _activeSelectableParaNotifier,
-                pageContentChanges: _commentStatsVersionNotifier,
+                pageContentChanges: _paragraphSignals,
                 onDismissSelection: () =>
                     _activeSelectableParaNotifier.value = null,
                 lastBubbleTap: () => _lastBubbleTapTime,
@@ -4351,9 +4183,9 @@ class _ReaderScreenState extends State<ReaderScreen>
                   physics: page.oversized
                       ? const ClampingScrollPhysics()
                       : const NeverScrollableScrollPhysics(),
-                  child: ValueListenableBuilder<int>(
-                    valueListenable: _commentStatsVersionNotifier,
-                    builder: (context, _, _) => Column(
+                  child: AnimatedBuilder(
+                    animation: _paragraphSignals,
+                    builder: (context, _) => Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         for (
@@ -4471,12 +4303,10 @@ class _ReaderScreenState extends State<ReaderScreen>
         offset = sourceParagraph.indexOf(phrase, offset + 1);
       }
     }
-    final spans = _buildSpansWithUnderline(
-      textToShow,
-      visibleUnderlines,
-      theme,
-      validChapIdx,
-      effectiveParaIdx,
+    final spans = _withSpokenHighlight(
+      _buildSpansWithUnderline(textToShow, visibleUnderlines, theme, validChapIdx, effectiveParaIdx),
+      textToShow, theme, chapter.itemId, effectiveParaIdx,
+      sourceStart: startOffset, sourceEnd: endOffset,
     );
 
     final paraKeyStr = 'page_${chapter.itemId}_${pageIdx}_$pIdx';
@@ -4509,6 +4339,41 @@ class _ReaderScreenState extends State<ReaderScreen>
             : null,
       ),
     );
+  }
+
+  List<InlineSpan> _withSpokenHighlight(
+    List<InlineSpan> spans, String text, ReaderTheme theme,
+    String chapterId, int paragraphIndex, {
+    required int sourceStart, required int sourceEnd,
+  }) {
+    final range = _ttsService.spokenRange(widget.book.bookId, chapterId, paragraphIndex);
+    if (range == null) return spans;
+    final prefix = math.max(0, text.length - (sourceEnd - sourceStart));
+    final start = (range.start - sourceStart + prefix).clamp(prefix, text.length);
+    final end = (range.end - sourceStart + prefix).clamp(prefix, text.length);
+    if (start >= end) return spans;
+    var cursor = 0;
+    final result = <InlineSpan>[];
+    for (final span in spans) {
+      if (span is! TextSpan || span.text == null) {
+        result.add(span);
+        cursor += span.toPlainText().length;
+        continue;
+      }
+      final value = span.text!;
+      final left = (start - cursor).clamp(0, value.length);
+      final right = (end - cursor).clamp(0, value.length);
+      if (left >= right) {
+        result.add(span);
+      } else {
+        if (left > 0) result.add(TextSpan(text: value.substring(0, left), style: span.style));
+        result.add(TextSpan(text: value.substring(left, right),
+          style: (span.style ?? const TextStyle()).copyWith(backgroundColor: theme.highlightColor)));
+        if (right < value.length) result.add(TextSpan(text: value.substring(right), style: span.style));
+      }
+      cursor += value.length;
+    }
+    return result;
   }
 
   /// 纯正虚线下划线构建（字体平整不跳起，仅在文字下方展示优雅虚线）

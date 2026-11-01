@@ -2,14 +2,13 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
-import '../services/tts_service.dart';
-
 /// 阅读器系统级辅助服务（屏幕常亮、电量获取）
 class ReaderSystemService {
   static const MethodChannel _channel = MethodChannel('com.fanqie.fanqie_flutter/download');
 
   static void Function(String direction)? _volumeKeyCallback;
   static void Function(String method, dynamic args)? _ttsCallback;
+  static void Function(String method)? _mediaCallback;
   static bool _handlerInitialized = false;
 
   /// A hint for prefetch policy, never proof that a request will succeed.
@@ -32,14 +31,8 @@ class ReaderSystemService {
         _volumeKeyCallback?.call(dir);
       } else if (call.method.startsWith('onTts') || call.method.startsWith('onAudio')) {
         _ttsCallback?.call(call.method, call.arguments);
-      } else if (call.method == 'onMediaPlay') {
-        TtsService().resume();
-      } else if (call.method == 'onMediaPause') {
-        TtsService().pause();
-      } else if (call.method == 'onMediaNext') {
-        TtsService().nextChunk();
-      } else if (call.method == 'onMediaPrev') {
-        TtsService().previousChunk();
+      } else if (call.method.startsWith('onMedia')) {
+        _mediaCallback?.call(call.method);
       }
     });
   }
@@ -54,6 +47,11 @@ class ReaderSystemService {
   static void registerTtsListener(void Function(String method, dynamic args)? callback) {
     _ensureGlobalHandler();
     _ttsCallback = callback;
+  }
+
+  static void registerMediaListener(void Function(String method)? callback) {
+    _ensureGlobalHandler();
+    _mediaCallback = callback;
   }
 
   /// 开启或关闭音量键按键拦截

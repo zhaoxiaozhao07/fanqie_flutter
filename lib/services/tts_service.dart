@@ -1,31 +1,35 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/foundation.dart';
+
 import 'package:flutter/services.dart';
+import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+
+import '../models/book.dart';
+import '../models/chapter.dart';
+import '../models/reading_position.dart';
+import 'api_service.dart';
+import 'bookshelf_service.dart';
+import 'reader_position_service.dart';
 import 'reader_system_service.dart';
+import 'reader_text.dart';
+import 'reading_history_service.dart';
 
-/// TTS 发音引擎类型
-enum TtsEngineType {
-  native, // 系统原生 TTS
-  openAi, // OpenAI 兼容 TTS 接口
-}
+enum TtsEngineType { native, openAi }
 
-/// TTS 播放状态
-enum TtsPlayState {
-  stopped,
-  playing,
-  paused,
-  buffering,
-}
+enum TtsPlayState { stopped, playing, paused, buffering }
 
-/// 单个文本切片模型
+typedef TtsInvoker =
+    Future<Object?> Function(String method, Map<String, Object?>? args);
+
 class TtsChunk {
   final int index;
   final String text;
+  final int startOffset;
+  final int endOffset;
   String? audioFilePath;
   bool isPreloaded = false;
   bool isPreloading = false;
@@ -33,112 +37,238 @@ class TtsChunk {
   TtsChunk({
     required this.index,
     required this.text,
+    this.startOffset = 0,
+    int? endOffset,
     this.audioFilePath,
-  });
+  }) : endOffset = endOffset ?? startOffset + text.length;
 }
 
-/// TTS 语音听书服务（支持原生 TTS 与 OpenAI 兼容 TTS 双缓冲预拉取流水线）
-class TtsService extends ChangeNotifier {
+/// One playback owner, independent of reader routes. Every asynchronous result
+/// and native event is checked against a session and a playback token.
+class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   static final TtsService _instance = TtsService._internal();
   factory TtsService() => _instance;
-  TtsService._internal() {
-    _initPlatformListener();
-    loadSettings();
+  static const _channel = MethodChannel('com.fanqie.fanqie_flutter/download');
+
+  TtsService._internal()
+    : _invoke = _nativeInvoke,
+      _http = http.Client(),
+      _now = DateTime.now {
+    WidgetsBinding.instance.addObserver(this);
+    _bindPlatformEvents();
+    _ready = loadSettings();
   }
 
-  static const MethodChannel _channel = MethodChannel('com.fanqie.fanqie_flutter/download');
+  @visibleForTesting
+  TtsService.forTesting({
+    required TtsInvoker invoke,
+    http.Client? client,
+    DateTime Function()? now,
+    bool bindPlatformEvents = false,
+  }) : _invoke = invoke,
+       _http = client ?? http.Client(),
+       _now = now ?? DateTime.now {
+    if (bindPlatformEvents) {
+      WidgetsBinding.instance.addObserver(this);
+      _bindPlatformEvents();
+    }
+    _ready = loadSettings();
+  }
 
-  // 配置
+  static Future<Object?> _nativeInvoke(
+    String method,
+    Map<String, Object?>? args,
+  ) => _channel.invokeMethod<Object?>(method, args);
+
+  final TtsInvoker _invoke;
+  final http.Client _http;
+  final DateTime Function() _now;
+  final ApiService _api = ApiService();
+  late final Future<void> _ready;
+  bool _closed = false;
+  bool _boundPlatformEvents = false;
+  int _session = 0;
+  int _startIntent = 0;
+  bool _appForeground = true;
+  int _playSerial = 0;
+  String? _playToken;
+  final String _instanceId = DateTime.now().microsecondsSinceEpoch.toString();
   TtsEngineType _engineType = TtsEngineType.native;
+  TtsEngineType? _actualEngine;
   String _openAiBaseUrl = 'https://api.openai.com';
   String _openAiApiKey = '';
   String _openAiModel = 'tts-1';
   String _openAiVoice = 'alloy';
-  double _speechRate = 1.0;
+  double _speechRate = 1;
+  TtsPlayState _state = TtsPlayState.stopped;
+  List<TtsChunk> _chunks = [];
+  int _currentIndex = 0;
+  String _currentChapterTitle = '';
+  String _source = '';
+  Book? _book;
+  List<Chapter> _chapters = [];
+  int _chapterIndex = 0;
+  final Map<String, int> _attachedReaders = {};
+  final Map<int, Future<String?>> _preloads = {};
+  bool _audioStarted = false;
+  Timer? _watchdog;
+  Timer? _sleepTimer;
+  DateTime? _sleepDeadline;
+  bool _stopAfterCurrentChapter = false;
+  String? _errorMessage;
+  String? _notice;
+  void Function(int chapterIndex)? onChapterComplete;
 
   TtsEngineType get engineType => _engineType;
+  TtsEngineType? get actualEngine => _actualEngine;
   String get openAiBaseUrl => _openAiBaseUrl;
   String get openAiApiKey => _openAiApiKey;
   String get openAiModel => _openAiModel;
   String get openAiVoice => _openAiVoice;
   double get speechRate => _speechRate;
-
-  // 运行状态
-  TtsPlayState _state = TtsPlayState.stopped;
   TtsPlayState get state => _state;
   bool get isPlaying => _state == TtsPlayState.playing;
   bool get isPaused => _state == TtsPlayState.paused;
-  bool get isActive => _state == TtsPlayState.playing || _state == TtsPlayState.paused || _state == TtsPlayState.buffering;
-
-  // 播放队列与切片管理
-  List<TtsChunk> _chunks = [];
-  int _currentIndex = 0;
-  String _currentChapterTitle = '';
-  void Function(int chapterIndex)? onChapterComplete;
-
+  bool get isActive => _state != TtsPlayState.stopped;
   List<TtsChunk> get chunks => List.unmodifiable(_chunks);
   int get currentIndex => _currentIndex;
   String get currentChapterTitle => _currentChapterTitle;
-  String get currentText => _chunks.isNotEmpty && _currentIndex < _chunks.length ? _chunks[_currentIndex].text : '';
-  double get progress => _chunks.isNotEmpty ? ((_currentIndex + 1) / _chunks.length).clamp(0.0, 1.0) : 0.0;
-
-  // 定时停止
-  Timer? _stopTimer;
-  int _timerRemainingMinutes = 0;
-  int get timerRemainingMinutes => _timerRemainingMinutes;
-  bool _stopAfterCurrentChapter = false;
+  String? get currentBookId => _book?.bookId;
+  String get currentBookTitle => _book?.bookName ?? _currentChapterTitle;
+  String? get errorMessage => _errorMessage;
+  String? get notice => _notice;
+  String? get currentPlaybackToken => _playToken;
+  String get currentText =>
+      _currentIndex < _chunks.length ? _chunks[_currentIndex].text : '';
+  double get progress =>
+      _chunks.isEmpty ? 0 : ((_currentIndex + 1) / _chunks.length).clamp(0, 1);
   bool get stopAfterCurrentChapter => _stopAfterCurrentChapter;
+  int get timerRemainingMinutes => _sleepDeadline == null
+      ? 0
+      : (_sleepDeadline!.difference(_now()).inMilliseconds / 60000)
+            .ceil()
+            .clamp(0, 1440);
 
-  void setStopAfterCurrentChapter(bool value) {
-    _stopAfterCurrentChapter = value;
-    notifyListeners();
-  }
-
-  void toggleStopAfterCurrentChapter() {
-    _stopAfterCurrentChapter = !_stopAfterCurrentChapter;
-    notifyListeners();
-  }
-
-  void _syncMediaState(bool isPlaying) {
-    ReaderSystemService.updateMediaPlaybackState(
-      title: _currentChapterTitle.isNotEmpty ? _currentChapterTitle : '听书朗读',
-      subtitle: currentText,
-      isPlaying: isPlaying,
+  ReadingPosition? get currentPosition {
+    if (_book == null || _chapters.isEmpty || _currentIndex >= _chunks.length) {
+      return null;
+    }
+    return ReaderText.positionForOffset(
+      _chapters[_chapterIndex].itemId,
+      _source,
+      _chunks[_currentIndex].startOffset,
     );
   }
 
-  // 播放看门狗超时定时器（防止极端异常下漏掉回调导致播放停滞）
-  Timer? _watchdogTimer;
+  ({int start, int end})? spokenRange(
+    String bookId,
+    String chapterId,
+    int paragraphIndex,
+  ) {
+    if (!isActive ||
+        bookId != currentBookId ||
+        _chapters.isEmpty ||
+        _chapters[_chapterIndex].itemId != chapterId ||
+        _currentIndex >= _chunks.length) {
+      return null;
+    }
+    final paragraphs = _source.split('\n\n');
+    if (paragraphIndex < 0 || paragraphIndex >= paragraphs.length) return null;
+    final base = ReaderText.offsetForPosition(
+      _source,
+      ReadingPosition(chapterId: chapterId, paragraphIndex: paragraphIndex),
+    );
+    final chunk = _chunks[_currentIndex];
+    final start = (chunk.startOffset - base).clamp(
+      0,
+      paragraphs[paragraphIndex].length,
+    );
+    final end = (chunk.endOffset - base).clamp(
+      0,
+      paragraphs[paragraphIndex].length,
+    );
+    return start < end ? (start: start, end: end) : null;
+  }
 
-  // 预取 Future 映射
-  final Map<int, Future<String?>> _preloadFutures = {};
-  final http.Client _httpClient = http.Client();
+  void attachReader(String bookId) =>
+      _attachedReaders[bookId] = (_attachedReaders[bookId] ?? 0) + 1;
+  void detachReader(String bookId) {
+    final count = (_attachedReaders[bookId] ?? 1) - 1;
+    if (count <= 0) {
+      _attachedReaders.remove(bookId);
+    } else {
+      _attachedReaders[bookId] = count;
+    }
+    if (isActive && currentBookId == bookId) _persistPosition();
+  }
 
-  void _initPlatformListener() {
-    // 统一通过 ReaderSystemService 消息路由总线监听播放事件，彻底消除 Handler 互相覆盖 Bug
-    ReaderSystemService.registerTtsListener((method, args) {
-      if (method == 'onTtsComplete' || method == 'onAudioComplete') {
-        _onChunkFinished();
-      } else if (method == 'onTtsError' || method == 'onAudioError') {
-        _onChunkFinished();
+  void _notify() {
+    if (!_closed) notifyListeners();
+  }
+
+  void _bindPlatformEvents() {
+    _boundPlatformEvents = true;
+    ReaderSystemService.registerTtsListener(handlePlatformEvent);
+    ReaderSystemService.registerMediaListener((method) {
+      switch (method) {
+        case 'onMediaPlay':
+          unawaited(resume());
+          break;
+        case 'onMediaPause':
+          unawaited(pause());
+          break;
+        case 'onMediaNext':
+          unawaited(nextChunk());
+          break;
+        case 'onMediaPrev':
+          unawaited(previousChunk());
+          break;
+        case 'onMediaStop':
+          unawaited(stop());
+          break;
       }
     });
+  }
 
-    // 初始化原生 TTS
-    if (Platform.isAndroid) {
-      _channel.invokeMethod('initNativeTts');
+  Future<Object?> _safe(String method, [Map<String, Object?>? args]) async {
+    try {
+      return await _invoke(method, args);
+    } catch (_) {
+      return null;
     }
   }
 
+  bool _current(int session, String token) =>
+      !_closed &&
+      session == _session &&
+      token == _playToken &&
+      _state != TtsPlayState.stopped &&
+      _state != TtsPlayState.paused;
+
   Future<void> loadSettings() async {
     final prefs = await SharedPreferences.getInstance();
-    _engineType = (prefs.getString('tts_engine_type') == 'openAi') ? TtsEngineType.openAi : TtsEngineType.native;
-    _openAiBaseUrl = prefs.getString('tts_openai_base_url') ?? 'https://api.openai.com';
-    _openAiApiKey = prefs.getString('tts_openai_api_key') ?? '';
+    _engineType = prefs.getString('tts_engine_type') == 'openAi'
+        ? TtsEngineType.openAi
+        : TtsEngineType.native;
+    _openAiBaseUrl =
+        prefs.getString('tts_openai_base_url') ?? 'https://api.openai.com';
     _openAiModel = prefs.getString('tts_openai_model') ?? 'tts-1';
     _openAiVoice = prefs.getString('tts_openai_voice') ?? 'alloy';
-    _speechRate = prefs.getDouble('tts_speech_rate') ?? 1.0;
-    notifyListeners();
+    _speechRate = (prefs.getDouble('tts_speech_rate') ?? 1).clamp(.5, 2);
+    final legacy = prefs.getString('tts_openai_api_key');
+    try {
+      _openAiApiKey = (await _invoke('readTtsSecret', null)) as String? ?? '';
+      if (_openAiApiKey.isEmpty && legacy?.isNotEmpty == true) {
+        if (await _invoke('writeTtsSecret', {'value': legacy}) != true) {
+          throw StateError('安全存储不可用');
+        }
+        _openAiApiKey = legacy!;
+      }
+      if (legacy != null) await prefs.remove('tts_openai_api_key');
+    } catch (_) {
+      if (legacy?.isNotEmpty == true) _notice = '语音密钥迁移未完成，请在设置中重新保存';
+    }
+    _notify();
   }
 
   Future<void> saveSettings({
@@ -149,346 +279,615 @@ class TtsService extends ChangeNotifier {
     String? openAiVoice,
     double? speechRate,
   }) async {
-    final prefs = await SharedPreferences.getInstance();
-    if (engineType != null) {
-      _engineType = engineType;
-      await prefs.setString('tts_engine_type', engineType == TtsEngineType.openAi ? 'openAi' : 'native');
-    }
+    await _ready;
     if (openAiBaseUrl != null) {
-      _openAiBaseUrl = openAiBaseUrl.trim();
-      await prefs.setString('tts_openai_base_url', _openAiBaseUrl);
+      final uri = Uri.tryParse(openAiBaseUrl.trim());
+      final local =
+          uri != null &&
+          ['localhost', '127.0.0.1', '::1', '10.0.2.2'].contains(uri.host);
+      if (uri == null ||
+          uri.host.isEmpty ||
+          uri.userInfo.isNotEmpty ||
+          (uri.scheme != 'https' && !(uri.scheme == 'http' && local))) {
+        throw const FormatException('语音接口须使用 HTTPS（本机调试地址除外）');
+      }
     }
+    // A failed secure write must not silently drop the old key or persist plaintext.
     if (openAiApiKey != null) {
+      if (await _invoke('writeTtsSecret', {'value': openAiApiKey.trim()}) !=
+          true) {
+        throw StateError('语音密钥未能写入系统安全存储');
+      }
       _openAiApiKey = openAiApiKey.trim();
-      await prefs.setString('tts_openai_api_key', _openAiApiKey);
     }
-    if (openAiModel != null) {
-      _openAiModel = openAiModel.trim();
-      await prefs.setString('tts_openai_model', _openAiModel);
+    final prefs = await SharedPreferences.getInstance();
+    if (engineType != null) _engineType = engineType;
+    if (openAiBaseUrl != null) {
+      _openAiBaseUrl = openAiBaseUrl.trim().replaceAll(RegExp(r'/+$'), '');
     }
-    if (openAiVoice != null) {
-      _openAiVoice = openAiVoice.trim();
-      await prefs.setString('tts_openai_voice', _openAiVoice);
-    }
-    if (speechRate != null) {
-      _speechRate = speechRate;
-      await prefs.setDouble('tts_speech_rate', _speechRate);
-    }
-    notifyListeners();
+    if (openAiModel != null) _openAiModel = openAiModel.trim();
+    if (openAiVoice != null) _openAiVoice = openAiVoice.trim();
+    if (speechRate != null) _speechRate = speechRate.clamp(.5, 2);
+    await prefs.setString('tts_engine_type', _engineType.name);
+    await prefs.setString('tts_openai_base_url', _openAiBaseUrl);
+    await prefs.setString('tts_openai_model', _openAiModel);
+    await prefs.setString('tts_openai_voice', _openAiVoice);
+    await prefs.setDouble('tts_speech_rate', _speechRate);
+    await prefs.remove('tts_openai_api_key');
+    _notify();
   }
 
-  /// 智能文本分块算法：按句末自然停顿切分，并归并为 80~200 字的高效切片
-  List<TtsChunk> splitIntoChunks(String content) {
-    final clean = content.replaceAll(RegExp(r'\r'), '').trim();
-    if (clean.isEmpty) return [];
-
-    final sentenceEndings = RegExp(r'[。！？；!?;]+|\n+');
-    final rawSentences = <String>[];
-    int lastEnd = 0;
-
-    for (final match in sentenceEndings.allMatches(clean)) {
-      final s = clean.substring(lastEnd, match.end).trim();
-      if (s.isNotEmpty) {
-        rawSentences.add(s);
-      }
-      lastEnd = match.end;
-    }
-    if (lastEnd < clean.length) {
-      final s = clean.substring(lastEnd).trim();
-      if (s.isNotEmpty) rawSentences.add(s);
-    }
-
-    // 合并短句为合适长度的 Chunk (目标 80~200 字)
+  List<TtsChunk> splitIntoChunks(String content, {int startOffset = 0}) {
     final chunks = <TtsChunk>[];
-    final sb = StringBuffer();
-    int chunkIdx = 0;
-
-    for (final sent in rawSentences) {
-      if (sb.length + sent.length > 200 && sb.isNotEmpty) {
-        chunks.add(TtsChunk(index: chunkIdx++, text: sb.toString().trim()));
-        sb.clear();
+    var start = ReaderText.safeOffset(content, startOffset);
+    var end = start;
+    var count = 0;
+    void flush() {
+      final raw = content.substring(start, end);
+      final text = raw.trim();
+      if (text.isNotEmpty) {
+        final offset = start + raw.length - raw.trimLeft().length;
+        chunks.add(
+          TtsChunk(
+            index: chunks.length,
+            text: text,
+            startOffset: offset,
+            endOffset: offset + text.length,
+          ),
+        );
       }
-      sb.write(sent);
-    }
-    if (sb.isNotEmpty) {
-      chunks.add(TtsChunk(index: chunkIdx++, text: sb.toString().trim()));
+      start = end;
+      count = 0;
     }
 
+    // Grapheme iteration never splits surrogate pairs or combining characters.
+    for (final character in content.substring(start).characters) {
+      end += character.length;
+      count++;
+      if (count >= 200 ||
+          (count >= 80 && RegExp(r'[。！？!?；;\n]').hasMatch(character))) {
+        flush();
+      }
+    }
+    flush();
     return chunks;
   }
 
-  /// 开始播放章节内容
-  Future<void> startChapter(String chapterTitle, String chapterContent, {int startChunk = 0}) async {
-    await stop();
-    _currentChapterTitle = chapterTitle;
-    _chunks = splitIntoChunks(chapterContent);
-    _currentIndex = startChunk.clamp(0, _chunks.isEmpty ? 0 : _chunks.length - 1);
-
-    if (_chunks.isEmpty) {
-      _state = TtsPlayState.stopped;
-      notifyListeners();
-      return;
-    }
-
-    _state = TtsPlayState.playing;
-    notifyListeners();
-
-    _playCurrentChunk();
+  Future<void> startBook(
+    Book book,
+    List<Chapter> chapters,
+    int chapterIndex, {
+    ReadingPosition? position,
+  }) async {
+    final intent = ++_startIntent;
+    await _ready;
+    if (intent != _startIntent) return;
+    await stop(supersedeStart: false);
+    if (intent != _startIntent) return;
+    if (chapters.isEmpty || _closed) return;
+    _book = book;
+    _chapters = List.unmodifiable(chapters);
+    _chapterIndex = chapterIndex.clamp(0, chapters.length - 1);
+    await _openBookChapter(_chapterIndex, position: position);
   }
 
-  /// 播放当前分块，并触发后续分块的双缓冲滑动预取
+  Future<void> _openBookChapter(int index, {ReadingPosition? position}) async {
+    final session = ++_session;
+    _playToken = null;
+    _state = TtsPlayState.buffering;
+    _errorMessage = null;
+    _chapterIndex = index;
+    _notify();
+    final book = _book;
+    if (book == null) return;
+    final chapter = _chapters[index];
+    _currentChapterTitle = chapter.title;
+    final previousChunks = _chunks;
+    _chunks = [];
+    _currentIndex = 0;
+    _preloads.clear();
+    unawaited(_deleteAudio(previousChunks));
+    try {
+      final raw =
+          chapter.content ??
+          await _api
+              .getChapterContent(chapter.itemId, bookId: book.bookId)
+              .timeout(const Duration(seconds: 30));
+      if (session != _session || !isActive || isPaused) return;
+      if (raw == null || raw.trim().isEmpty || raw.contains('APP端专享/锁章章节')) {
+        throw const FormatException('章节正文不可用');
+      }
+      final source = ReaderText.paragraphs(
+        raw,
+        chapterTitle: chapter.title,
+      ).join('\n\n');
+      final offset = position?.chapterId == chapter.itemId
+          ? ReaderText.offsetForPosition(source, position!)
+          : 0;
+      await _prepareChapter(
+        chapter.title,
+        source,
+        offset: offset,
+        session: session,
+      );
+    } catch (_) {
+      if (session == _session) _fail('下一章加载失败，已暂停；点击继续重试，不会跳过正文');
+    }
+  }
+
+  Future<void> startChapter(
+    String chapterTitle,
+    String chapterContent, {
+    int startChunk = 0,
+  }) async {
+    final intent = ++_startIntent;
+    await _ready;
+    if (intent != _startIntent) return;
+    await stop(supersedeStart: false);
+    if (intent != _startIntent) return;
+    final session = ++_session;
+    await _prepareChapter(
+      chapterTitle,
+      chapterContent,
+      session: session,
+      startChunk: startChunk,
+    );
+  }
+
+  Future<void> _prepareChapter(
+    String title,
+    String source, {
+    required int session,
+    int offset = 0,
+    int startChunk = 0,
+  }) async {
+    final oldChunks = _chunks;
+    _chunks = [];
+    _preloads.clear();
+    await _stopPlayers();
+    unawaited(_deleteAudio(oldChunks));
+    if (session != _session || _closed || isPaused) return;
+    _source = source;
+    _currentChapterTitle = title;
+    _chunks = splitIntoChunks(source, startOffset: offset);
+    _currentIndex = startChunk.clamp(
+      0,
+      _chunks.isEmpty ? 0 : _chunks.length - 1,
+    );
+    if (_chunks.isEmpty) {
+      _fail('章节没有可朗读的正文');
+      return;
+    }
+    _state = TtsPlayState.buffering;
+    _notify();
+    await _playCurrentChunk();
+  }
+
   Future<void> _playCurrentChunk() async {
-    if (_currentIndex >= _chunks.length) {
-      _state = TtsPlayState.stopped;
-      _watchdogTimer?.cancel();
-      notifyListeners();
-      _syncMediaState(false);
-      if (_stopAfterCurrentChapter) {
-        _stopAfterCurrentChapter = false;
-        stop();
+    if (_currentIndex >= _chunks.length || _closed) return;
+    final session = _session;
+    final token = '$_instanceId:$session:$_currentIndex:${++_playSerial}';
+    _playToken = token;
+    _audioStarted = false;
+    _actualEngine = null;
+    _errorMessage = null;
+    _notice = null;
+    _watchdog?.cancel();
+    _state = TtsPlayState.buffering;
+    _notify();
+    await _stopPlayers();
+    if (!_current(session, token)) return;
+    final chunk = _chunks[_currentIndex];
+    try {
+      String? audio;
+      if (_engineType == TtsEngineType.openAi) {
+        audio = await _fetchAudio(chunk.index, session);
+        if (!_current(session, token)) return;
+        if (audio == null) _notice = '网络语音不可用，已切换系统语音；可在设置中检查接口';
+      }
+      _actualEngine = audio == null
+          ? TtsEngineType.native
+          : TtsEngineType.openAi;
+      final accepted = await _invoke(
+        audio == null ? 'speakNativeTts' : 'playAudioFile',
+        {
+          'id': token,
+          'text': chunk.text,
+          'filePath': audio,
+          'rate': _speechRate,
+        },
+      ).timeout(const Duration(seconds: 30));
+      if (!_current(session, token)) return;
+      if (accepted != true) {
+        _fail('语音播放未启动，请检查系统语音引擎或音频输出');
         return;
       }
-      onChapterComplete?.call(_currentIndex);
-      return;
-    }
-
-    final chunk = _chunks[_currentIndex];
-    
-    // 启动当前切片播放看门狗（预估发音秒数 + 容错裕量），确保无论原生还是网络发音绝不卡顿挂起
-    _watchdogTimer?.cancel();
-    final estSeconds = ((chunk.text.length / 3.8) / _speechRate + 6.0).clamp(6.0, 40.0).toInt();
-    _watchdogTimer = Timer(Duration(seconds: estSeconds), () {
-      if (isActive && _currentIndex == chunk.index) {
-        _onChunkFinished();
-      }
-    });
-
-    // 1. 若使用 OpenAI TTS，启动滑动窗口预取流水线（预拉取后面 2 个切片）
-    if (_engineType == TtsEngineType.openAi) {
-      _triggerPreload(_currentIndex + 1);
-      _triggerPreload(_currentIndex + 2);
-
-      String? audioPath = chunk.audioFilePath;
-      if (audioPath == null || !File(audioPath).existsSync()) {
-        _state = TtsPlayState.buffering;
-        notifyListeners();
-
-        // 等待当前切片音频就绪
-        audioPath = await _fetchChunkAudio(_currentIndex);
-      }
-
-      if (_state == TtsPlayState.stopped) return;
-
-      if (audioPath != null && File(audioPath).existsSync()) {
-        _state = TtsPlayState.playing;
-        notifyListeners();
-        _syncMediaState(true);
-        await _channel.invokeMethod('playAudioFile', {'filePath': audioPath});
-      } else {
-        // OpenAI TTS 获取失败，自动容错降级使用原生发音
-        _state = TtsPlayState.playing;
-        notifyListeners();
-        _syncMediaState(true);
-        await _channel.invokeMethod('speakNativeTts', {
-          'text': chunk.text,
-          'rate': _speechRate,
-          'id': 'chunk_${chunk.index}',
-        });
-      }
-    } else {
-      // 2. 原生系统 TTS 播放
+      _audioStarted = audio != null;
       _state = TtsPlayState.playing;
-      notifyListeners();
-        _syncMediaState(true);
-      await _channel.invokeMethod('speakNativeTts', {
-        'text': chunk.text,
-        'rate': _speechRate,
-        'id': 'chunk_${chunk.index}',
-      });
+      _armWatchdog(chunk, token);
+      _syncMediaState();
+      _persistPosition();
+      _notify();
+      if (_engineType == TtsEngineType.openAi) {
+        for (final next in [chunk.index + 1, chunk.index + 2]) {
+          if (next < _chunks.length) unawaited(_fetchAudio(next, session));
+        }
+      }
+    } catch (_) {
+      if (_current(session, token)) _fail('语音播放异常，已暂停；点击继续重试');
     }
   }
 
-  /// 双缓冲预拉取流水线触发器
-  void _triggerPreload(int index) {
-    if (index >= _chunks.length || _engineType != TtsEngineType.openAi) return;
-    final chunk = _chunks[index];
-    if (chunk.isPreloaded || chunk.isPreloading) return;
-
-    chunk.isPreloading = true;
-    _preloadFutures[index] = _fetchChunkAudio(index).then((path) {
-      chunk.isPreloaded = path != null;
-      chunk.isPreloading = false;
-      return path;
-    }).catchError((_) {
-      chunk.isPreloading = false;
-      return null;
+  void _armWatchdog(TtsChunk chunk, String token) {
+    _watchdog?.cancel();
+    final seconds = (chunk.text.characters.length / (2.5 * _speechRate) + 30)
+        .ceil()
+        .clamp(30, 240);
+    _watchdog = Timer(Duration(seconds: seconds), () {
+      if (token == _playToken && isPlaying) _fail('播放回调超时，已暂停在本段，请重试');
     });
   }
 
-  /// 请求 OpenAI 兼容 TTS 接口并将二进制 MP3 存入临时切片文件
-  Future<String?> _fetchChunkAudio(int index) async {
-    if (index >= _chunks.length) return null;
+  Future<String?> _fetchAudio(int index, int session) {
+    if (session != _session || index >= _chunks.length) {
+      return Future.value(null);
+    }
+    final existing = _preloads[index];
+    if (existing != null) return existing;
     final chunk = _chunks[index];
-    if (chunk.audioFilePath != null && File(chunk.audioFilePath!).existsSync()) {
+    late final Future<String?> request;
+    chunk.isPreloading = true;
+    request = _downloadAudio(chunk, session).whenComplete(() {
+      chunk.isPreloading = false;
+      if (identical(_preloads[index], request)) _preloads.remove(index);
+    });
+    _preloads[index] = request;
+    return request;
+  }
+
+  Future<String?> _downloadAudio(TtsChunk chunk, int session) async {
+    if (chunk.audioFilePath != null &&
+        await File(chunk.audioFilePath!).exists()) {
       return chunk.audioFilePath;
     }
-
-    try {
-      final cleanBase = _openAiBaseUrl.replaceAll(RegExp(r'/+$'), '');
-      final uri = Uri.parse('$cleanBase/v1/audio/speech');
-
-      final body = jsonEncode({
-        'model': _openAiModel.isNotEmpty ? _openAiModel : 'tts-1',
-        'input': chunk.text,
-        'voice': _openAiVoice.isNotEmpty ? _openAiVoice : 'alloy',
-        'response_format': 'mp3',
-        'speed': _speechRate,
-      });
-
-      final headers = <String, String>{
-        'Content-Type': 'application/json',
-      };
-      if (_openAiApiKey.isNotEmpty) {
-        headers['Authorization'] = 'Bearer $_openAiApiKey';
-      }
-
-      final res = await _httpClient.post(uri, headers: headers, body: body).timeout(const Duration(seconds: 15));
-      if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
-        Directory tempDir;
-        try {
-          tempDir = await getTemporaryDirectory();
-        } catch (_) {
-          tempDir = Directory.systemTemp;
+    final base = _openAiBaseUrl.replaceAll(RegExp(r'/+$'), '');
+    final uri = Uri.parse(
+      base.endsWith('/v1') ? '$base/audio/speech' : '$base/v1/audio/speech',
+    );
+    final local = [
+      'localhost',
+      '127.0.0.1',
+      '::1',
+      '10.0.2.2',
+    ].contains(uri.host);
+    if (uri.userInfo.isNotEmpty ||
+        uri.host.isEmpty ||
+        (uri.scheme != 'https' && !(uri.scheme == 'http' && local))) {
+      return null;
+    }
+    for (var attempt = 0; attempt < 2; attempt++) {
+      if (session != _session || _closed) return null;
+      try {
+        final response = await _http
+            .post(
+              uri,
+              headers: {
+                'Content-Type': 'application/json',
+                if (_openAiApiKey.isNotEmpty)
+                  'Authorization': 'Bearer $_openAiApiKey',
+              },
+              body: jsonEncode({
+                'model': _openAiModel,
+                'input': chunk.text,
+                'voice': _openAiVoice,
+                'response_format': 'mp3',
+                'speed': _speechRate,
+              }),
+            )
+            .timeout(const Duration(seconds: 15));
+        if (session != _session || _closed) return null;
+        if (response.statusCode == 401 || response.statusCode == 403) {
+          return null;
         }
-        final audioFile = File('${tempDir.path}/tts_chunk_${DateTime.now().millisecondsSinceEpoch}_$index.mp3');
-        await audioFile.writeAsBytes(res.bodyBytes);
-        chunk.audioFilePath = audioFile.path;
-        chunk.isPreloaded = true;
-        return audioFile.path;
+        if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
+          Directory root;
+          try {
+            root = await getTemporaryDirectory();
+          } catch (_) {
+            root = Directory.systemTemp;
+          }
+          if (session != _session || _closed) return null;
+          final file = File(
+            '${root.path}/tts_$_instanceId-$session-${chunk.index}.mp3',
+          );
+          await file.writeAsBytes(response.bodyBytes, flush: true);
+          if (session != _session || _closed) {
+            await file.delete();
+            return null;
+          }
+          chunk.audioFilePath = file.path;
+          chunk.isPreloaded = true;
+          return file.path;
+        }
+      } catch (_) {
+        /* bounded retry, never log credentials or source text */
       }
-    } catch (e) {
-      if (kDebugMode) debugPrint('OpenAI TTS fetch error ($index): $e');
+      if (attempt == 0) {
+        await Future<void>.delayed(const Duration(milliseconds: 300));
+      }
     }
     return null;
   }
 
-  /// 切片播放完毕回调，立即切入下一个切片
-  void _onChunkFinished() {
-    _watchdogTimer?.cancel();
-    if (_state != TtsPlayState.playing && _state != TtsPlayState.buffering) return;
-
-    _currentIndex++;
-    if (_currentIndex < _chunks.length) {
-      _playCurrentChunk();
-    } else {
-      _state = TtsPlayState.stopped;
-      notifyListeners();
-      _syncMediaState(false);
-      if (_stopAfterCurrentChapter) {
-        _stopAfterCurrentChapter = false;
-        stop();
+  void handlePlatformEvent(String method, dynamic args) {
+    if (_closed) return;
+    final id = args is Map ? args['id']?.toString() : args?.toString();
+    if (method == 'onAudioFocusLost' || method == 'onAudioBecomingNoisy') {
+      if (method == 'onAudioFocusLost' && id != null && id != _playToken) {
         return;
       }
-      onChapterComplete?.call(_currentIndex);
+      unawaited(pause());
+      return;
     }
-  }
-
-  /// 暂停播放
-  Future<void> pause() async {
-    _watchdogTimer?.cancel();
-    if (_state != TtsPlayState.playing) return;
-    _state = TtsPlayState.paused;
-    notifyListeners();
-    _syncMediaState(false);
-
-    if (_engineType == TtsEngineType.openAi) {
-      await _channel.invokeMethod('pauseAudio');
-    } else {
-      await _channel.invokeMethod('stopNativeTts');
+    if (method == 'onAudioSleepTimer') {
+      final expired = args is Map ? (args['deadline'] as num?)?.toInt() : null;
+      if (expired != null &&
+          expired == _sleepDeadline?.millisecondsSinceEpoch) {
+        unawaited(stop());
+      }
+      return;
     }
-  }
-
-  /// 继续播放
-  Future<void> resume() async {
-    if (_state != TtsPlayState.paused) return;
-    _state = TtsPlayState.playing;
-    notifyListeners();
-    _syncMediaState(true);
-
-    if (_engineType == TtsEngineType.openAi) {
-      await _channel.invokeMethod('resumeAudio');
-    } else {
-      _playCurrentChunk();
+    if (id == null ||
+        id != _playToken ||
+        (!isPlaying &&
+            !(state == TtsPlayState.buffering && _actualEngine != null))) {
+      return;
     }
-  }
-
-  /// 停止播放并清理队列
-  Future<void> stop() async {
-    _watchdogTimer?.cancel();
-    _state = TtsPlayState.stopped;
-    _stopTimer?.cancel();
-    _timerRemainingMinutes = 0;
-    _stopAfterCurrentChapter = false;
-    notifyListeners();
-    _syncMediaState(false);
-    _channel.invokeMethod('setAudioVolume', {'volume': 1.0}).catchError((_) {});
-
-    await _channel.invokeMethod('stopNativeTts');
-    await _channel.invokeMethod('stopAudio');
-
-    // 清理临时音频缓存切片
-    for (final c in _chunks) {
-      if (c.audioFilePath != null) {
-        try {
-          final f = File(c.audioFilePath!);
-          if (f.existsSync()) f.deleteSync();
-        } catch (_) {}
+    if (method == 'onTtsError' || method == 'onAudioError') {
+      _fail('当前语音播放失败，已保留本段，点击继续重试');
+    } else if (method == 'onTtsComplete' || method == 'onAudioComplete') {
+      _playToken =
+          null; // consume before any await: duplicate completion is harmless
+      _watchdog?.cancel();
+      _currentIndex++;
+      if (_currentIndex < _chunks.length) {
+        unawaited(_playCurrentChunk());
+      } else {
+        unawaited(_chapterFinished());
       }
     }
-    _chunks.clear();
-    _preloadFutures.clear();
   }
 
-  /// 下一句/下一切片
-  void nextChunk() {
-    if (_currentIndex < _chunks.length - 1) {
-      _currentIndex++;
-      _channel.invokeMethod('stopAudio');
-      _channel.invokeMethod('stopNativeTts');
-      _playCurrentChunk();
+  Future<void> _chapterFinished() async {
+    if (_stopAfterCurrentChapter || _sleepDeadline?.isBefore(_now()) == true) {
+      await stop();
+      return;
     }
-  }
-
-  /// 上一句/上一切片
-  void previousChunk() {
-    if (_currentIndex > 0) {
-      _currentIndex--;
-      _channel.invokeMethod('stopAudio');
-      _channel.invokeMethod('stopNativeTts');
-      _playCurrentChunk();
-    }
-  }
-
-  /// 设置睡眠定时器（分钟）
-  void setSleepTimer(int minutes) {
-    _stopTimer?.cancel();
-    _timerRemainingMinutes = minutes;
-    notifyListeners();
-
-    if (minutes > 0) {
-      _stopTimer = Timer.periodic(const Duration(minutes: 1), (timer) {
-        _timerRemainingMinutes--;
-        if (_timerRemainingMinutes <= 0) {
-          timer.cancel();
-          stop();
-        } else if (_timerRemainingMinutes == 1) {
-          // 最后一分钟平滑淡出音量
-          _channel.invokeMethod('setAudioVolume', {'volume': 0.5}).catchError((_) {});
-        }
-        notifyListeners();
-      });
+    if (_book != null && _chapterIndex + 1 < _chapters.length) {
+      await _openBookChapter(_chapterIndex + 1);
     } else {
-      _channel.invokeMethod('setAudioVolume', {'volume': 1.0}).catchError((_) {});
+      final last = _chapterIndex;
+      await stop();
+      onChapterComplete?.call(last);
     }
+  }
+
+  void _fail(String message) {
+    final failedToken = _playToken;
+    _playToken = null;
+    _watchdog?.cancel();
+    _state = TtsPlayState.paused;
+    _audioStarted = false;
+    _errorMessage = message;
+    unawaited(_safe('stopPlayback', {'id': failedToken}));
+    _syncMediaState();
+    _notify();
+  }
+
+  Future<void> pause() async {
+    if (!isActive || isPaused) return;
+    _watchdog?.cancel();
+    _state = TtsPlayState.paused;
+    _notify();
+    _syncMediaState();
+    if (_actualEngine == TtsEngineType.openAi && _audioStarted) {
+      await _safe('pauseAudio', {'id': _playToken});
+    } else {
+      await _safe('stopNativeTts');
+    }
+  }
+
+  Future<void> resume() async {
+    if (!isPaused) return;
+    if (_chunks.isEmpty || _currentIndex >= _chunks.length) {
+      if (_book != null) await _openBookChapter(_chapterIndex);
+      return;
+    }
+    if (_actualEngine == TtsEngineType.openAi &&
+        _audioStarted &&
+        _playToken != null) {
+      final token = _playToken!;
+      _state = TtsPlayState.playing;
+      final accepted = await _safe('resumeAudio', {'id': token});
+      if (token != _playToken || !isPlaying) return;
+      if (accepted != true) {
+        _fail('恢复播放失败，请重试');
+        return;
+      }
+      _armWatchdog(_chunks[_currentIndex], token);
+      _syncMediaState();
+      _notify();
+    } else {
+      await _playCurrentChunk();
+      if (isPlaying && _actualEngine == TtsEngineType.native) {
+        _notice = '${_notice == null ? '' : '$_notice；'}系统语音从当前段重新开始';
+        _notify();
+      }
+    }
+  }
+
+  Future<void> nextChunk() async {
+    if (_currentIndex + 1 >= _chunks.length) return;
+    _currentIndex++;
+    await _playCurrentChunk();
+  }
+
+  Future<void> previousChunk() async {
+    if (_currentIndex <= 0 || _chunks.isEmpty) return;
+    _currentIndex--;
+    await _playCurrentChunk();
+  }
+
+  Future<void> _stopPlayers() async {
+    await _safe('stopPlayback');
+  }
+
+  Future<void> _deleteAudio(List<TtsChunk> chunks) async {
+    for (final chunk in chunks) {
+      if (chunk.audioFilePath == null) continue;
+      try {
+        final file = File(chunk.audioFilePath!);
+        if (await file.exists()) await file.delete();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> stop({bool supersedeStart = true}) async {
+    if (supersedeStart) ++_startIntent;
+    final stoppedSession = ++_session;
+    _playToken = null;
+    _watchdog?.cancel();
+    _sleepTimer?.cancel();
+    _sleepDeadline = null;
+    _stopAfterCurrentChapter = false;
+    _state = TtsPlayState.stopped;
+    _actualEngine = null;
+    _audioStarted = false;
+    _errorMessage = null;
+    final oldChunks = _chunks;
+    _chunks = [];
+    _preloads.clear();
+    _book = null;
+    _chapters = [];
+    _notify();
+    await _stopPlayers();
+    if (stoppedSession == _session) {
+      await Future.wait([
+        _safe('setAudioVolume', {'volume': 1.0}),
+        _safe('setSleepDeadline', {'milliseconds': 0}),
+        if (supersedeStart) _safe('releasePlaybackService'),
+      ]);
+    }
+    await _deleteAudio(oldChunks);
+  }
+
+  void setStopAfterCurrentChapter(bool value) {
+    _stopAfterCurrentChapter = value;
+    _notify();
+  }
+
+  void toggleStopAfterCurrentChapter() =>
+      setStopAfterCurrentChapter(!_stopAfterCurrentChapter);
+  void setSleepTimer(int minutes) {
+    _sleepTimer?.cancel();
+    _sleepDeadline = minutes <= 0
+        ? null
+        : _now().add(Duration(minutes: minutes.clamp(1, 1440)));
+    unawaited(
+      _safe('setSleepDeadline', {
+        'milliseconds': _sleepDeadline?.millisecondsSinceEpoch ?? 0,
+      }),
+    );
+    unawaited(_safe('setAudioVolume', {'volume': 1.0}));
+    if (_sleepDeadline != null) {
+      _sleepTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+        final remaining =
+            _sleepDeadline?.difference(_now()).inMilliseconds ?? 0;
+        if (remaining <= 0) {
+          unawaited(stop());
+          return;
+        }
+        if (remaining <= 10000) {
+          unawaited(
+            _safe('setAudioVolume', {
+              'volume': (remaining / 10000).clamp(0.0, 1.0),
+            }),
+          );
+        }
+        _notify();
+      });
+    }
+    _notify();
+  }
+
+  void _syncMediaState() {
+    unawaited(
+      _safe('updateMediaPlaybackState', {
+        'title': currentBookTitle,
+        'subtitle': _currentChapterTitle,
+        'isPlaying': isPlaying,
+        'isActive': isActive,
+      }),
+    );
+  }
+
+  void _persistPosition() {
+    final position = currentPosition;
+    final book = _book;
+    if (position == null ||
+        book == null ||
+        (_appForeground && _attachedReaders.containsKey(book.bookId))) {
+      return;
+    }
+    final index = _chapterIndex;
+    final title = _chapters[index].title;
+    unawaited(
+      ReaderPositionService()
+          .save(
+            book.bookId,
+            position,
+            chapterIndex: index,
+            chapterTitle: title,
+            previousChapterId: index > 0 ? _chapters[index - 1].itemId : null,
+            nextChapterId: index + 1 < _chapters.length
+                ? _chapters[index + 1].itemId
+                : null,
+            onCommitted: () async {
+              await ReadingHistoryService().recordReading(
+                book: book,
+                chapterIndex: index,
+                chapterTitle: title,
+              );
+              final shelf = BookshelfService();
+              await shelf.initialize();
+              if (shelf.isInBookshelf(book.bookId)) {
+                await shelf.updateReadingProgress(book.bookId, index, title);
+              }
+            },
+          )
+          .catchError((_) {
+            _notice = '听书进度未保存，请检查存储空间';
+          }),
+    );
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appForeground = state == AppLifecycleState.resumed;
+    if (!_appForeground && isActive) _persistPosition();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    if (_boundPlatformEvents) {
+      ReaderSystemService.registerTtsListener(null);
+      ReaderSystemService.registerMediaListener(null);
+    }
+    _closed = true;
+    unawaited(stop());
+    _http.close();
+    _api.dispose();
+    super.dispose();
   }
 }

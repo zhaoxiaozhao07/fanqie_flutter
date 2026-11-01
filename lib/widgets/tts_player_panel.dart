@@ -68,7 +68,8 @@ class TtsPlayerPanel extends StatelessWidget {
                         borderRadius: BorderRadius.circular(4),
                       ),
                       child: Text(
-                        ttsService.engineType == TtsEngineType.openAi
+                        (ttsService.actualEngine ?? ttsService.engineType) ==
+                                TtsEngineType.openAi
                             ? 'AI 语音'
                             : '系统原生',
                         style: TextStyle(
@@ -103,6 +104,15 @@ class TtsPlayerPanel extends StatelessWidget {
                     ),
                   ],
                 ),
+                if (ttsService.errorMessage != null ||
+                    ttsService.notice != null)
+                  Padding(
+                    padding: const EdgeInsets.symmetric(vertical: 4),
+                    child: Text(
+                      ttsService.errorMessage ?? ttsService.notice!,
+                      style: TextStyle(color: textColor, fontSize: 12),
+                    ),
+                  ),
                 const SizedBox(height: 6),
                 // 控制按键
                 Row(
@@ -498,7 +508,7 @@ class TtsPlayerPanel extends StatelessWidget {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          '注：支持自由输入任意模型音色名称（如 alloy、nova、zh-CN-XiaoxiaoNeural 等）。系统已内置双缓冲预加载管道，后台自动提前拉取后续切片，杜绝切句等待。',
+                          '网络语音会将当前和后续两段正文发送到所配置的服务。密钥仅保存在设备安全存储。系统语音暂停后从当前段重新开始。',
                           style: TextStyle(
                             fontSize: 11,
                             color: AppTheme.textHint,
@@ -509,16 +519,30 @@ class TtsPlayerPanel extends StatelessWidget {
                       SizedBox(
                         width: double.infinity,
                         child: FilledButton(
-                          onPressed: () {
-                            tts.saveSettings(
-                              engineType: selectedEngine,
-                              openAiBaseUrl: urlCtrl.text,
-                              openAiApiKey: keyCtrl.text,
-                              openAiModel: modelCtrl.text,
-                              openAiVoice: voiceCtrl.text,
-                              speechRate: speechRate,
-                            );
-                            Navigator.pop(ctx);
+                          onPressed: () async {
+                            try {
+                              await tts.saveSettings(
+                                engineType: selectedEngine,
+                                openAiBaseUrl:
+                                    selectedEngine == TtsEngineType.openAi
+                                    ? urlCtrl.text
+                                    : null,
+                                openAiApiKey:
+                                    selectedEngine == TtsEngineType.openAi
+                                    ? keyCtrl.text
+                                    : null,
+                                openAiModel: modelCtrl.text,
+                                openAiVoice: voiceCtrl.text,
+                                speechRate: speechRate,
+                              );
+                              if (ctx.mounted) Navigator.pop(ctx);
+                            } catch (error) {
+                              if (ctx.mounted) {
+                                ScaffoldMessenger.of(ctx).showSnackBar(
+                                  SnackBar(content: Text('保存失败：$error')),
+                                );
+                              }
+                            }
                           },
                           child: Text('保存配置'),
                         ),
