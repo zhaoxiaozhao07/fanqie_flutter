@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:characters/characters.dart';
 import 'package:fanqie_flutter/models/book.dart';
 import 'package:fanqie_flutter/models/chapter.dart';
+import 'package:fanqie_flutter/models/reading_position.dart';
 import 'package:fanqie_flutter/services/tts_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -199,6 +200,61 @@ void main() {
   );
 
   test(
+    'long chapters retain only a bounded audio window and can seek back',
+    () async {
+      await tts.stop();
+      tts.dispose();
+      var requests = 0;
+      tts = TtsService.forTesting(
+        invoke: platform.invoke,
+        client: MockClient((_) async {
+          requests++;
+          return http.Response.bytes([1, 2, 3], 200);
+        }),
+      );
+      await tts.saveSettings(engineType: TtsEngineType.openAi);
+      await tts.startChapter('长章', '文' * 2000);
+      for (var i = 0; i < 8; i++) {
+        await tts.nextChunk();
+        expect(
+          tts.chunks.where((chunk) => chunk.audioFilePath != null).length,
+          lessThanOrEqualTo(4),
+        );
+      }
+      expect(tts.chunks.first.audioFilePath, isNull);
+      final before = requests;
+      await tts.previousChunk();
+      await tts.previousChunk();
+      expect(tts.actualEngine, TtsEngineType.openAi);
+      expect(requests, greaterThan(before));
+    },
+  );
+
+  test(
+    'changing voice while buffering invalidates pending audio until resume',
+    () async {
+      await tts.stop();
+      tts.dispose();
+      final gate = Completer<http.Response>();
+      tts = TtsService.forTesting(
+        invoke: platform.invoke,
+        client: MockClient((_) => gate.future),
+      );
+      await tts.saveSettings(engineType: TtsEngineType.openAi);
+      final starting = tts.startChapter('调整音色', '正文' * 50);
+      await drain();
+      await tts.saveSettings(engineType: TtsEngineType.native);
+      gate.complete(http.Response.bytes([1, 2, 3], 200));
+      await starting;
+      expect(tts.isPaused, true);
+      expect(platform.count('playAudioFile'), 0);
+      await tts.resume();
+      expect(tts.actualEngine, TtsEngineType.native);
+      expect(platform.count('speakNativeTts'), 1);
+    },
+  );
+
+  test(
     'playlist advances without a reader route and retains sleep deadline',
     () async {
       await tts.startBook(
@@ -223,6 +279,40 @@ void main() {
       });
       await drain();
       expect(tts.state, TtsPlayState.stopped);
+    },
+  );
+
+  test(
+    'pause during book opening preserves the requested source position',
+    () async {
+      void pauseOpening() {
+        if (tts.state == TtsPlayState.buffering && tts.chunks.isEmpty) {
+          unawaited(tts.pause());
+        }
+      }
+
+      tts.addListener(pauseOpening);
+      await tts.startBook(
+        Book(bookId: 'resume-book', bookName: '原位续听', author: '测试'),
+        [
+          Chapter(
+            itemId: 'resume-chapter',
+            title: '章节',
+            content: '${'开场内容。' * 20}\n\n${'继续阅读位置。' * 30}',
+          ),
+        ],
+        0,
+        position: const ReadingPosition(
+          chapterId: 'resume-chapter',
+          paragraphIndex: 1,
+          characterOffset: 3,
+        ),
+      );
+      tts.removeListener(pauseOpening);
+      expect(tts.isPaused, true);
+      await tts.resume();
+      expect(tts.currentPosition!.paragraphIndex, 1);
+      expect(tts.currentPosition!.characterOffset, 3);
     },
   );
 

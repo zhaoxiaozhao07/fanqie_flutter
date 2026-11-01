@@ -10,6 +10,17 @@ case "$DEVICE_ID" in
 esac
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 LOG="${PLATFORM_TEST_LOG:-/tmp/fanqie-platform-tests.log}"
+TARGET="${PLATFORM_TEST_TARGET:-integration_test/reader_platform_test.dart}"
+EXTRA_ARGS=(--reporter expanded)
+SOAK_BUDGET=0
+if [[ "$TARGET" == *reader_soak_test.dart ]]; then
+  SOAK_SECONDS="${SOAK_SECONDS:-1800}"
+  if ! [[ "$SOAK_SECONDS" =~ ^[0-9]+$ ]] || [ "$SOAK_SECONDS" -lt 5 ] || [ "$SOAK_SECONDS" -gt 3600 ]; then
+    echo "SOAK_SECONDS must be 5–3600." >&2; exit 2
+  fi
+  EXTRA_ARGS+=("--dart-define=SOAK_SECONDS=$SOAK_SECONDS")
+  SOAK_BUDGET="$SOAK_SECONDS"
+fi
 PACKAGE="com.fanqie.fanqie_flutter"
 restore() {
   adb -s "$DEVICE_ID" shell input keyevent 224 >/dev/null 2>&1 || true
@@ -25,17 +36,22 @@ cleanup() {
 trap cleanup EXIT
 cd "$ROOT"
 : > "$LOG"
-"$FLUTTER" test integration_test/reader_platform_test.dart -d "$DEVICE_ID" --reporter expanded > "$LOG" 2>&1 &
+"$FLUTTER" test "$TARGET" -d "$DEVICE_ID" "${EXTRA_ARGS[@]}" > "$LOG" 2>&1 &
 TEST_PID=$!
 BACKGROUND=0
 VERIFIED=0
 PAUSED=0
 PLAYED=0
-DEADLINE=$((SECONDS + 1800))
+CAPTURED=0
+DEADLINE=$((SECONDS + 1800 + SOAK_BUDGET))
 while kill -0 "$TEST_PID" 2>/dev/null; do
   if [ "$SECONDS" -gt "$DEADLINE" ]; then
     echo "Android platform verification timed out; see $LOG" >&2
     exit 1
+  fi
+  if [ "$CAPTURED" = 0 ] && grep -q 'FANQIE_READER_SETTINGS_CAPTURE' "$LOG"; then
+    adb -s "$DEVICE_ID" exec-out screencap -p > "${LOG%.log}-settings.png"
+    CAPTURED=1
   fi
   if [ "$BACKGROUND" = 0 ] && grep -q 'FANQIE_BACKGROUND_READY' "$LOG"; then
     adb -s "$DEVICE_ID" shell input keyevent 3

@@ -19,6 +19,10 @@ class ReaderText {
         if (title.isNotEmpty && normalized == title) {
           continue;
         }
+        final bareHeading = RegExp(
+          r'^第[0-9一二三四五六七八九十百千万零两]+[章卷回节集]$',
+        ).hasMatch(normalized);
+        if (bareHeading && title.startsWith(normalized)) continue;
       }
       result.add(text);
     }

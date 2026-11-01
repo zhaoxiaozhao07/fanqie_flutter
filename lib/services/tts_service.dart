@@ -91,6 +91,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   int _startIntent = 0;
   bool _appForeground = true;
   int _playSerial = 0;
+  int _audioSerial = 0;
   String? _playToken;
   final String _instanceId = DateTime.now().microsecondsSinceEpoch.toString();
   TtsEngineType _engineType = TtsEngineType.native;
@@ -108,6 +109,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   Book? _book;
   List<Chapter> _chapters = [];
   int _chapterIndex = 0;
+  ReadingPosition? _pendingBookPosition;
   final Map<String, int> _attachedReaders = {};
   final Map<int, Future<String?>> _preloads = {};
   bool _audioStarted = false;
@@ -280,6 +282,14 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     double? speechRate,
   }) async {
     await _ready;
+    final previousVoice = (
+      _engineType,
+      _openAiBaseUrl,
+      _openAiApiKey,
+      _openAiModel,
+      _openAiVoice,
+      _speechRate,
+    );
     if (openAiBaseUrl != null) {
       final uri = Uri.tryParse(openAiBaseUrl.trim());
       final local =
@@ -314,6 +324,31 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     await prefs.setString('tts_openai_voice', _openAiVoice);
     await prefs.setDouble('tts_speech_rate', _speechRate);
     await prefs.remove('tts_openai_api_key');
+    final nextVoice = (
+      _engineType,
+      _openAiBaseUrl,
+      _openAiApiKey,
+      _openAiModel,
+      _openAiVoice,
+      _speechRate,
+    );
+    if (isActive && previousVoice != nextVoice) {
+      await pause();
+      ++_session;
+      _playToken = null;
+      _preloads.clear();
+      _actualEngine = null;
+      _audioStarted = false;
+      final stale = <String>[];
+      for (final chunk in _chunks) {
+        if (chunk.audioFilePath != null) stale.add(chunk.audioFilePath!);
+        chunk.audioFilePath = null;
+        chunk.isPreloaded = false;
+      }
+      await _deletePaths(stale);
+      _errorMessage = null;
+      _notice = '语音设置已保存，点击继续应用新设置';
+    }
     _notify();
   }
 
@@ -376,6 +411,9 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     _playToken = null;
     _state = TtsPlayState.buffering;
     _errorMessage = null;
+    if (_chapterIndex != index) _pendingBookPosition = null;
+    if (position != null) _pendingBookPosition = position;
+    final startPosition = _pendingBookPosition;
     _chapterIndex = index;
     _notify();
     final book = _book;
@@ -401,8 +439,8 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
         raw,
         chapterTitle: chapter.title,
       ).join('\n\n');
-      final offset = position?.chapterId == chapter.itemId
-          ? ReaderText.offsetForPosition(source, position!)
+      final offset = startPosition?.chapterId == chapter.itemId
+          ? ReaderText.offsetForPosition(source, startPosition!)
           : 0;
       await _prepareChapter(
         chapter.title,
@@ -507,6 +545,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
       _armWatchdog(chunk, token);
       _syncMediaState();
       _persistPosition();
+      _prunePlayedAudio();
       _notify();
       if (_engineType == TtsEngineType.openAi) {
         for (final next in [chunk.index + 1, chunk.index + 2]) {
@@ -597,11 +636,18 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
             root = Directory.systemTemp;
           }
           if (session != _session || _closed) return null;
+          if (chunk.index < _currentIndex - 1 ||
+              chunk.index > _currentIndex + 2) {
+            return null;
+          }
           final file = File(
-            '${root.path}/tts_$_instanceId-$session-${chunk.index}.mp3',
+            '${root.path}/tts_$_instanceId-$session-${chunk.index}-${++_audioSerial}.mp3',
           );
           await file.writeAsBytes(response.bodyBytes, flush: true);
-          if (session != _session || _closed) {
+          if (session != _session ||
+              _closed ||
+              chunk.index < _currentIndex - 1 ||
+              chunk.index > _currentIndex + 2) {
             await file.delete();
             return null;
           }
@@ -743,10 +789,28 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> _deleteAudio(List<TtsChunk> chunks) async {
-    for (final chunk in chunks) {
+    await _deletePaths([
+      for (final chunk in chunks)
+        if (chunk.audioFilePath != null) chunk.audioFilePath!,
+    ]);
+  }
+
+  void _prunePlayedAudio() {
+    final stale = <String>[];
+    for (var index = 0; index < _currentIndex - 1; index++) {
+      final chunk = _chunks[index];
       if (chunk.audioFilePath == null) continue;
+      stale.add(chunk.audioFilePath!);
+      chunk.audioFilePath = null;
+      chunk.isPreloaded = false;
+    }
+    unawaited(_deletePaths(stale));
+  }
+
+  Future<void> _deletePaths(List<String> paths) async {
+    for (final path in paths) {
       try {
-        final file = File(chunk.audioFilePath!);
+        final file = File(path);
         if (await file.exists()) await file.delete();
       } catch (_) {}
     }
@@ -769,6 +833,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     _preloads.clear();
     _book = null;
     _chapters = [];
+    _pendingBookPosition = null;
     _notify();
     await _stopPlayers();
     if (stoppedSession == _session) {

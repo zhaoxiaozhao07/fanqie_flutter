@@ -10,6 +10,7 @@ void main() {
       '前行。',
     ]);
     expect(ReaderText.paragraphs('第一章写到这里。\n继续。'), ['第一章写到这里。', '继续。']);
+    expect(ReaderText.paragraphs('第一章\n正文', chapterTitle: '第一章 少年'), ['正文']);
   });
   test('display indentation does not change canonical paragraph offsets', () {
     const text = '第一段\n\n第二段文本';
