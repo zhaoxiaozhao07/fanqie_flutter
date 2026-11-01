@@ -81,6 +81,16 @@ flutter:
   assets:
     - assets/icons/fanqie.png
     - assets/data/
+    - assets/fonts/LXGW-OFL.txt
+    - assets/fonts/ZCOOL-OFL.txt
+
+  fonts:
+    - family: ReaderKaiTi
+      fonts:
+        - asset: assets/fonts/LXGWWenKaiLite-Regular.ttf
+    - family: ReaderSongTi
+      fonts:
+        - asset: assets/fonts/ZCOOLXiaoWei-Regular.ttf
 
   # To add assets to your application, add an assets section, like this:
   # assets:

@@ -5,6 +5,7 @@ class Bookmark {
   final int chapterIndex;
   final String chapterTitle;
   final int paragraphIndex;
+  final int characterOffset;
   final String contentPreview;
   final DateTime createdAt;
 
@@ -14,19 +15,21 @@ class Bookmark {
     required this.chapterIndex,
     required this.chapterTitle,
     this.paragraphIndex = 0,
+    this.characterOffset = 0,
     required this.contentPreview,
     required this.createdAt,
   });
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'book_id': bookId,
-        'chapter_index': chapterIndex,
-        'chapter_title': chapterTitle,
-        'paragraph_index': paragraphIndex,
-        'content_preview': contentPreview,
-        'created_at': createdAt.toIso8601String(),
-      };
+    'id': id,
+    'book_id': bookId,
+    'chapter_index': chapterIndex,
+    'chapter_title': chapterTitle,
+    'paragraph_index': paragraphIndex,
+    'character_offset': characterOffset,
+    'content_preview': contentPreview,
+    'created_at': createdAt.toIso8601String(),
+  };
 
   factory Bookmark.fromJson(Map<String, dynamic> json) {
     return Bookmark(
@@ -35,6 +38,7 @@ class Bookmark {
       chapterIndex: json['chapter_index'] as int? ?? 0,
       chapterTitle: json['chapter_title']?.toString() ?? '',
       paragraphIndex: json['paragraph_index'] as int? ?? 0,
+      characterOffset: (json['character_offset'] as num?)?.toInt() ?? 0,
       contentPreview: json['content_preview']?.toString() ?? '',
       createdAt: json['created_at'] != null
           ? DateTime.tryParse(json['created_at'].toString()) ?? DateTime.now()
@@ -66,15 +70,15 @@ class ReadingNote {
   });
 
   Map<String, dynamic> toJson() => {
-        'id': id,
-        'book_id': bookId,
-        'chapter_index': chapterIndex,
-        'chapter_title': chapterTitle,
-        'paragraph_index': paragraphIndex,
-        'text': text,
-        'note': note,
-        'created_at': createdAt.toIso8601String(),
-      };
+    'id': id,
+    'book_id': bookId,
+    'chapter_index': chapterIndex,
+    'chapter_title': chapterTitle,
+    'paragraph_index': paragraphIndex,
+    'text': text,
+    'note': note,
+    'created_at': createdAt.toIso8601String(),
+  };
 
   factory ReadingNote.fromJson(Map<String, dynamic> json) {
     return ReadingNote(

@@ -12,6 +12,7 @@ class SimulationPageTurn extends StatefulWidget {
   final int currentPageIndex;
   final Widget Function(BuildContext context, int pageIndex) pageBuilder;
   final Object? pageSetKey;
+  final Object? contentVersion;
   final Widget? nextChapterPreview;
   final Widget? previousChapterPreview;
   final ValueChanged<int> onPageChanged;
@@ -21,6 +22,13 @@ class SimulationPageTurn extends StatefulWidget {
   final Color backgroundColor;
   final bool isDark;
   final DateTime Function()? lastBubbleTapTimeGetter;
+  final bool Function()? isSelectionActive;
+  final VoidCallback? onDismissSelection;
+  final VoidCallback? onTurnStarted;
+  final VoidCallback? onInteractionEnded;
+  final ValueChanged<bool>? onTurnRequested;
+  final double previousTapFraction;
+  final double nextTapFraction;
 
   const SimulationPageTurn({
     super.key,
@@ -28,6 +36,7 @@ class SimulationPageTurn extends StatefulWidget {
     required this.currentPageIndex,
     required this.pageBuilder,
     this.pageSetKey,
+    this.contentVersion,
     this.nextChapterPreview,
     this.previousChapterPreview,
     required this.onPageChanged,
@@ -37,6 +46,13 @@ class SimulationPageTurn extends StatefulWidget {
     required this.backgroundColor,
     this.isDark = false,
     this.lastBubbleTapTimeGetter,
+    this.isSelectionActive,
+    this.onDismissSelection,
+    this.onTurnStarted,
+    this.onInteractionEnded,
+    this.onTurnRequested,
+    this.previousTapFraction = 0.28,
+    this.nextTapFraction = 0.72,
   });
 
   @override
@@ -62,11 +78,17 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   Offset? _dragPos;
   Size _viewSize = Size.zero;
 
-  int? _activePointer;
+  bool _touchPending = false;
+  bool _gestureBlocked = false;
+  bool? _queuedDirection;
+  bool? _boundaryDirection;
+  double _boundaryTravel = 0;
+  bool _pointerCancelled = false;
+  bool _awaitingCommit = false;
   Offset? _downPos;
-  DateTime _downTime = DateTime.fromMillisecondsSinceEpoch(0);
 
   bool get _isTurning => _turnSourceIndex != null;
+  bool get isTurning => _isTurning;
 
   @override
   void initState() {
@@ -84,7 +106,12 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   @override
   void didUpdateWidget(covariant SimulationPageTurn oldWidget) {
     super.didUpdateWidget(oldWidget);
-    _pageWidgets.clear();
+    if (oldWidget.pageSetKey != widget.pageSetKey ||
+        oldWidget.contentVersion != widget.contentVersion ||
+        oldWidget.backgroundColor != widget.backgroundColor ||
+        oldWidget.currentPageIndex != widget.currentPageIndex) {
+      _pageWidgets.clear();
+    }
     if (oldWidget.pageSetKey != widget.pageSetKey ||
         oldWidget.totalPages != widget.totalPages ||
         oldWidget.currentPageIndex != widget.currentPageIndex ||
@@ -120,7 +147,15 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   void turnToNextPage() => _turnPage(forward: true);
 
   void _turnPage({required bool forward, bool fromTop = false}) {
-    if (_isTurning || _activePointer != null || _viewSize.isEmpty) return;
+    if (widget.isSelectionActive?.call() == true) {
+      widget.onDismissSelection?.call();
+      return;
+    }
+    if (_isTurning || _touchPending || _awaitingCommit) {
+      _queuedDirection = forward;
+      return;
+    }
+    if (_viewSize.isEmpty) return;
     final target = widget.currentPageIndex + (forward ? 1 : -1);
     if (target < 0) {
       widget.onPreviousChapter?.call();
@@ -139,6 +174,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   }
 
   void _beginTurn({required bool forward, required bool fromTop}) {
+    widget.onTurnStarted?.call();
     _isForward = forward;
     _cornerPos = Offset(
       forward ? _viewSize.width : 0,
@@ -187,6 +223,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     required Offset from,
     required Offset to,
     required bool completePageTurn,
+    double? releaseVelocity,
   }) async {
     final generation = ++_animationGeneration;
     _isDragging = false;
@@ -198,6 +235,22 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     _animController.duration = Duration(
       milliseconds: (300 * remaining).round(),
     );
+    if (releaseVelocity == null) {
+      _curvedAnim.curve = Curves.easeOutCubic;
+    } else {
+      final distance = (to.dx - from.dx).abs().clamp(1.0, double.infinity);
+      final speed = (releaseVelocity * (to.dx - from.dx).sign).clamp(
+        0.0,
+        5000.0,
+      );
+      final milliseconds = speed > 350
+          ? (distance / speed * 1000).clamp(100.0, 300.0).round()
+          : (300 * remaining).round();
+      _animController.duration = Duration(milliseconds: milliseconds);
+      _curvedAnim.curve = _ReleaseCurve(
+        (speed * milliseconds / 1000 / distance).clamp(0.8, 3.0),
+      );
+    }
 
     try {
       await _animController.forward(from: 0).orCancel;
@@ -208,7 +261,12 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
 
     final target = _turnTargetIndex;
     setState(_resetTurn);
-    if (!completePageTurn || target == null) return;
+    _awaitingCommit = completePageTurn;
+    _drainQueuedTurn();
+    if (!completePageTurn || target == null) {
+      widget.onInteractionEnded?.call();
+      return;
+    }
     if (target >= 0 && target < widget.totalPages) {
       widget.onPageChanged(target);
     } else if (_isForward) {
@@ -227,7 +285,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     _turnTargetIndex = null;
     _cornerPos = null;
     _dragPos = null;
-    _activePointer = null;
+    _touchPending = false;
     _downPos = null;
     _geometry.value = null;
     final oldImage = _backImage;
@@ -244,24 +302,51 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
         DateTime.now().difference(lastTap) < const Duration(milliseconds: 400);
   }
 
-  void _onPointerDown(PointerDownEvent event) {
-    if (_isTurning || _activePointer != null) return;
-    _activePointer = event.pointer;
-    _downPos = event.localPosition;
-    _downTime = DateTime.now();
+  void _drainQueuedTurn() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || _isTurning || _touchPending) return;
+      _awaitingCommit = false;
+      final direction = _queuedDirection;
+      _queuedDirection = null;
+      if (direction != null) _turnPage(forward: direction);
+    });
   }
 
-  void _onPointerMove(PointerMoveEvent event) {
-    if (event.pointer != _activePointer || _downPos == null) return;
-    final movement = event.localPosition - _downPos!;
+  void _onDragDown(DragDownDetails details) {
+    _pointerCancelled = false;
+    _touchPending = true;
+    _gestureBlocked = _isTurning || widget.isSelectionActive?.call() == true;
+    _boundaryDirection = null;
+    _boundaryTravel = 0;
+    _downPos = details.localPosition;
+  }
+
+  void _onDragUpdate(DragUpdateDetails details) {
+    if (_gestureBlocked || _downPos == null) return;
+    final movement = details.localPosition - _downPos!;
+    if (_boundaryDirection != null) {
+      _boundaryTravel = movement.dx * (_boundaryDirection! ? -1 : 1);
+      return;
+    }
     if (!_isDragging) {
-      if (_wasBubbleTapped ||
-          movement.dx.abs() < kTouchSlop ||
-          movement.dx.abs() < movement.dy.abs() * 0.5) {
+      if (_wasBubbleTapped || widget.isSelectionActive?.call() == true) {
+        _gestureBlocked = true;
         return;
       }
+      if (movement.dx == 0) return;
+      final forward = movement.dx < 0;
+      final target = widget.currentPageIndex + (forward ? 1 : -1);
+      final preview = forward
+          ? widget.nextChapterPreview
+          : widget.previousChapterPreview;
+      if ((target < 0 || target >= widget.totalPages) && preview == null) {
+        _boundaryDirection = forward;
+        _boundaryTravel = movement.dx.abs();
+        return;
+      }
+      _queuedDirection = null;
       _beginTurn(
-        forward: movement.dx < 0,
+        forward: forward,
         fromTop: _downPos!.dy < _viewSize.height * 0.5,
       );
       _isDragging = true;
@@ -284,51 +369,84 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     _updateDragPosition(drag);
   }
 
-  void _onPointerUp(PointerUpEvent event) {
-    if (event.pointer != _activePointer || _downPos == null) return;
-    final movement = event.localPosition - _downPos!;
-    _activePointer = null;
+  void _onDragEnd(DragEndDetails details) {
+    if (_pointerCancelled) {
+      _onDragCancel();
+      return;
+    }
+    _touchPending = false;
     _downPos = null;
     if (!_isDragging) {
-      if (movement.distance < kTouchSlop &&
-          DateTime.now().difference(_downTime) <
-              const Duration(milliseconds: 500) &&
-          !_wasBubbleTapped) {
-        _handleTapAt(event.localPosition);
+      final boundary = _boundaryDirection;
+      _boundaryDirection = null;
+      final velocity = details.velocity.pixelsPerSecond.dx;
+      final directedVelocity = velocity * (boundary == true ? -1 : 1);
+      if (!_gestureBlocked &&
+          boundary != null &&
+          (directedVelocity > 350 ||
+              (_boundaryTravel > _viewSize.width * 0.18 &&
+                  directedVelocity > -350))) {
+        if (boundary) {
+          widget.onNextChapter?.call();
+        } else {
+          widget.onPreviousChapter?.call();
+        }
       }
+      _drainQueuedTurn();
       return;
     }
 
     final drag = _dragPos!;
     final distance = (drag.dx - _cornerPos!.dx).abs();
-    final shouldTurn = distance > _viewSize.width * 0.18;
+    final velocity = details.velocity.pixelsPerSecond.dx;
+    final directedVelocity = velocity * (_isForward ? -1 : 1);
+    final shouldTurn =
+        directedVelocity > 350 ||
+        (distance > _viewSize.width * 0.18 && directedVelocity > -350);
     _runAnimation(
       from: drag,
       to: shouldTurn ? _completedDragPosition : _cornerPos!,
       completePageTurn: shouldTurn,
+      releaseVelocity: velocity,
     );
   }
 
-  void _onPointerCancel(PointerCancelEvent event) {
-    if (event.pointer != _activePointer) return;
-    _activePointer = null;
+  void _onDragCancel() {
+    _touchPending = false;
     _downPos = null;
+    _boundaryDirection = null;
     if (_isDragging && _dragPos != null && _cornerPos != null) {
       _runAnimation(from: _dragPos!, to: _cornerPos!, completePageTurn: false);
+    } else {
+      _drainQueuedTurn();
     }
   }
 
   void _handleTapAt(Offset position) {
+    _touchPending = false;
+    if (_wasBubbleTapped) return;
+    if (widget.isSelectionActive?.call() == true) {
+      widget.onDismissSelection?.call();
+      return;
+    }
     final w = _viewSize.width;
-    if (position.dx < w * 0.28 || position.dx > w * 0.72) {
-      _turnPage(
-        forward: position.dx > w * 0.72,
-        fromTop: position.dy < _viewSize.height * 0.5,
-      );
+    if (position.dx < w * widget.previousTapFraction ||
+        position.dx > w * widget.nextTapFraction) {
+      final forward = position.dx > w * widget.nextTapFraction;
+      if (widget.onTurnRequested != null) {
+        widget.onTurnRequested!(forward);
+      } else {
+        _turnPage(
+          forward: forward,
+          fromTop: position.dy < _viewSize.height * 0.5,
+        );
+      }
     } else {
       widget.onCenterTap?.call();
     }
   }
+
+  void clearQueuedTurns() => _queuedDirection = null;
 
   Widget _buildCachedPage(BuildContext context, int index) {
     if (index >= 0 && index < widget.totalPages) {
@@ -369,102 +487,125 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
         );
 
         return Listener(
-          behavior: HitTestBehavior.translucent,
-          onPointerDown: _onPointerDown,
-          onPointerMove: _onPointerMove,
-          onPointerUp: _onPointerUp,
-          onPointerCancel: _onPointerCancel,
-          child: ClipRect(
-            child: Stack(
-              fit: StackFit.expand,
-              children: [
-                ExcludeSemantics(
-                  child: IgnorePointer(
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        // 只预排版相邻两页；静止时不绘制，不增加整屏 GPU 开销。
-                        for (final index in [sourceIndex - 1, sourceIndex + 1])
-                          Offstage(
-                            key: ValueKey(index),
-                            offstage: index != _turnTargetIndex,
-                            child: RepaintBoundary(
-                              child: _buildCachedPage(context, index),
+          onPointerCancel: (_) => _pointerCancelled = true,
+          child: GestureDetector(
+            behavior: HitTestBehavior.translucent,
+            dragStartBehavior: DragStartBehavior.down,
+            onHorizontalDragDown: _onDragDown,
+            onHorizontalDragStart: (_) {},
+            onHorizontalDragUpdate: _onDragUpdate,
+            onHorizontalDragEnd: _onDragEnd,
+            onHorizontalDragCancel: _onDragCancel,
+            onTapUp: (details) => _handleTapAt(details.localPosition),
+            child: ClipRect(
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  ExcludeSemantics(
+                    child: IgnorePointer(
+                      child: Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          // 只预排版相邻两页；静止时不绘制，不增加整屏 GPU 开销。
+                          for (final index in [
+                            sourceIndex - 1,
+                            sourceIndex + 1,
+                          ])
+                            Offstage(
+                              key: ValueKey(index),
+                              offstage: index != _turnTargetIndex,
+                              child: RepaintBoundary(
+                                child: _buildCachedPage(context, index),
+                              ),
                             ),
-                          ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
-                ),
-                AnimatedBuilder(
-                  animation: _geometry,
-                  child: frontPage,
-                  builder: (context, staticFrontPage) {
-                    final geometry = _geometry.value;
-                    return Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        CustomPaint(
-                          painter: _FoldShadowPainter(
-                            geometry: geometry,
-                            isDark: widget.isDark,
-                            isSpine: false,
+                  AnimatedBuilder(
+                    animation: _geometry,
+                    child: frontPage,
+                    builder: (context, staticFrontPage) {
+                      final geometry = _geometry.value;
+                      return Stack(
+                        fit: StackFit.expand,
+                        children: [
+                          CustomPaint(
+                            painter: _FoldShadowPainter(
+                              geometry: geometry,
+                              isDark: widget.isDark,
+                              isSpine: false,
+                            ),
                           ),
-                        ),
-                        ClipPath(
-                          clipper: _PolygonClipper(geometry?.frontPolygon),
-                          child: IgnorePointer(
-                            ignoring: _isTurning,
-                            child: staticFrontPage,
+                          ClipPath(
+                            clipper: _PolygonClipper(geometry?.frontPolygon),
+                            child: IgnorePointer(
+                              ignoring: _isTurning,
+                              child: staticFrontPage,
+                            ),
                           ),
-                        ),
-                        ExcludeSemantics(
-                          child: IgnorePointer(
-                            child: ClipPath(
-                              clipper: _PolygonClipper(
-                                geometry?.backPolygon ?? const [],
-                              ),
-                              child: Stack(
-                                fit: StackFit.expand,
-                                children: [
-                                  ColoredBox(
-                                    color: Color.lerp(
-                                      widget.backgroundColor,
-                                      widget.isDark
-                                          ? Colors.white
-                                          : const Color(0xFFE8DFC8),
-                                      widget.isDark ? 0.04 : 0.18,
-                                    )!,
-                                  ),
-                                  Transform(
-                                    transform:
-                                        geometry?.reflectionMatrix ??
-                                        Matrix4.identity(),
-                                    child: backPage,
-                                  ),
-                                  CustomPaint(
-                                    painter: _FoldShadowPainter(
-                                      geometry: geometry,
-                                      isDark: widget.isDark,
-                                      isSpine: true,
+                          ExcludeSemantics(
+                            child: IgnorePointer(
+                              child: ClipPath(
+                                clipper: _PolygonClipper(
+                                  geometry?.backPolygon ?? const [],
+                                ),
+                                child: Stack(
+                                  fit: StackFit.expand,
+                                  children: [
+                                    ColoredBox(
+                                      color: Color.lerp(
+                                        widget.backgroundColor,
+                                        widget.isDark
+                                            ? Colors.white
+                                            : const Color(0xFFE8DFC8),
+                                        widget.isDark ? 0.04 : 0.18,
+                                      )!,
                                     ),
-                                  ),
-                                ],
+                                    Transform(
+                                      transform:
+                                          geometry?.reflectionMatrix ??
+                                          Matrix4.identity(),
+                                      child: backPage,
+                                    ),
+                                    CustomPaint(
+                                      painter: _FoldShadowPainter(
+                                        geometry: geometry,
+                                        isDark: widget.isDark,
+                                        isSpine: true,
+                                      ),
+                                    ),
+                                  ],
+                                ),
                               ),
                             ),
                           ),
-                        ),
-                      ],
-                    );
-                  },
-                ),
-              ],
+                        ],
+                      );
+                    },
+                  ),
+                ],
+              ),
             ),
           ),
         );
       },
     );
   }
+}
+
+/// Hermite 收尾曲线：保留松手时的速度，并在目标处平滑停下。
+class _ReleaseCurve extends Curve {
+  final double initialSlope;
+
+  const _ReleaseCurve(this.initialSlope);
+
+  @override
+  double transformInternal(double t) =>
+      ((initialSlope - 2) * t * t * t +
+              (3 - 2 * initialSlope) * t * t +
+              initialSlope * t)
+          .clamp(0.0, 1.0);
 }
 
 /// 折痕不与视口相交时依然返回真实多边形，不能退回原页。

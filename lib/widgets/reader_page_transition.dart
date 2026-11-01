@@ -26,7 +26,7 @@ class ReaderPageTransition extends StatelessWidget {
     final page = RepaintBoundary(child: child);
 
     // 原生滑动不额外缩放正文，避免文字在拖动中反复栅格化、忽大忽小。
-    if (mode == 'slide') return page;
+    if (mode == 'slide' || mode == 'none') return page;
 
     return AnimatedBuilder(
       animation: controller,

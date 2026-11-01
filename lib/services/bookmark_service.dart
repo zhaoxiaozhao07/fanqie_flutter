@@ -40,7 +40,9 @@ class BookmarkService {
     if (raw != null && raw.isNotEmpty) {
       try {
         final List<dynamic> list = json.decode(raw);
-        final items = list.map((e) => Bookmark.fromJson(e as Map<String, dynamic>)).toList();
+        final items = list
+            .map((e) => Bookmark.fromJson(e as Map<String, dynamic>))
+            .toList();
         _bookmarksMap[bookId] = items;
         return List.unmodifiable(items);
       } catch (_) {}
@@ -59,6 +61,7 @@ class BookmarkService {
     required int chapterIndex,
     required String chapterTitle,
     int paragraphIndex = 0,
+    int characterOffset = 0,
     required String contentPreview,
   }) async {
     final bookmarks = List<Bookmark>.from(await getBookmarks(bookId));
@@ -71,7 +74,10 @@ class BookmarkService {
       chapterIndex: chapterIndex,
       chapterTitle: chapterTitle,
       paragraphIndex: paragraphIndex,
-      contentPreview: contentPreview.length > 80 ? '${contentPreview.substring(0, 80)}...' : contentPreview,
+      characterOffset: characterOffset,
+      contentPreview: contentPreview.length > 80
+          ? '${contentPreview.substring(0, 80)}...'
+          : contentPreview,
       createdAt: DateTime.now(),
     );
 
@@ -115,7 +121,9 @@ class BookmarkService {
     if (raw != null && raw.isNotEmpty) {
       try {
         final List<dynamic> list = json.decode(raw);
-        final items = list.map((e) => ReadingNote.fromJson(e as Map<String, dynamic>)).toList();
+        final items = list
+            .map((e) => ReadingNote.fromJson(e as Map<String, dynamic>))
+            .toList();
         _notesMap[bookId] = items;
         return List.unmodifiable(items);
       } catch (_) {}
@@ -134,10 +142,12 @@ class BookmarkService {
   }) async {
     final notes = List<ReadingNote>.from(await getNotes(bookId));
     // 避免同一段落重复划线同一文本
-    notes.removeWhere((n) =>
-        n.chapterIndex == chapterIndex &&
-        n.paragraphIndex == paragraphIndex &&
-        n.text.trim() == text.trim());
+    notes.removeWhere(
+      (n) =>
+          n.chapterIndex == chapterIndex &&
+          n.paragraphIndex == paragraphIndex &&
+          n.text.trim() == text.trim(),
+    );
 
     final newNote = ReadingNote(
       id: '${bookId}_${chapterIndex}_p${paragraphIndex}_${DateTime.now().millisecondsSinceEpoch}',
@@ -168,7 +178,12 @@ class BookmarkService {
   Future<void> removeNoteByText(String text, String bookId) async {
     final notes = List<ReadingNote>.from(await getNotes(bookId));
     final clean = text.trim();
-    notes.removeWhere((n) => n.text.trim() == clean || n.text.contains(clean) || clean.contains(n.text.trim()));
+    notes.removeWhere(
+      (n) =>
+          n.text.trim() == clean ||
+          n.text.contains(clean) ||
+          clean.contains(n.text.trim()),
+    );
     _notesMap[bookId] = notes;
     await _saveNotes(bookId, notes);
     changeNotifier.value++;
@@ -182,10 +197,14 @@ class BookmarkService {
   }) async {
     final notes = List<ReadingNote>.from(await getNotes(bookId));
     final clean = text.trim();
-    notes.removeWhere((n) =>
-        n.chapterIndex == chapterIndex &&
-        (paragraphIndex < 0 || n.paragraphIndex == paragraphIndex) &&
-        (n.text.trim() == clean || n.text.contains(clean) || clean.contains(n.text.trim())));
+    notes.removeWhere(
+      (n) =>
+          n.chapterIndex == chapterIndex &&
+          (paragraphIndex < 0 || n.paragraphIndex == paragraphIndex) &&
+          (n.text.trim() == clean ||
+              n.text.contains(clean) ||
+              clean.contains(n.text.trim())),
+    );
     _notesMap[bookId] = notes;
     await _saveNotes(bookId, notes);
     changeNotifier.value++;

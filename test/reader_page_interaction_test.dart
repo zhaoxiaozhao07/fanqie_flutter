@@ -115,7 +115,7 @@ void main() {
       await tester.pump(const Duration(milliseconds: 60));
       await tester.tapAt(right);
       await tester.pumpAndSettle();
-      expect(currentPage(tester, mode), 1);
+      expect(currentPage(tester, mode), 2);
       expect(find.text('排版设置'), findsNothing);
       expect(tester.takeException(), isNull);
 

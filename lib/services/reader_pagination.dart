@@ -1,0 +1,309 @@
+import 'dart:collection';
+import 'dart:math' as math;
+
+import 'package:flutter/material.dart';
+
+import '../models/reading_position.dart';
+
+class ReaderLayout {
+  final Size size;
+  final TextStyle bodyStyle;
+  final TextStyle titleStyle;
+  final TextScaler textScaler;
+  final double horizontalPadding;
+  final double paragraphSpacing;
+  final double commentGutter;
+
+  const ReaderLayout({
+    required this.size,
+    required this.bodyStyle,
+    required this.titleStyle,
+    required this.textScaler,
+    required this.horizontalPadding,
+    required this.paragraphSpacing,
+    this.commentGutter = 0,
+  });
+
+  Object get key => (
+    size,
+    bodyStyle,
+    titleStyle,
+    textScaler,
+    horizontalPadding,
+    paragraphSpacing,
+    commentGutter,
+  );
+}
+
+class ReaderPageFragment {
+  final int paragraphIndex;
+  final int startOffset;
+  final int endOffset;
+  final String text;
+  final double height;
+
+  const ReaderPageFragment({
+    required this.paragraphIndex,
+    required this.startOffset,
+    required this.endOffset,
+    required this.text,
+    required this.height,
+  });
+}
+
+class ReaderPage {
+  final List<ReaderPageFragment> fragments;
+  final double availableHeight;
+  final bool oversized;
+  final double titleHeight;
+
+  const ReaderPage({
+    required this.fragments,
+    required this.availableHeight,
+    this.oversized = false,
+    this.titleHeight = 0,
+  });
+
+  String get text => fragments.map((fragment) => fragment.text).join('\n\n');
+
+  ReadingPosition position(String chapterId) => ReadingPosition(
+    chapterId: chapterId,
+    paragraphIndex: fragments.isEmpty ? 0 : fragments.first.paragraphIndex,
+    characterOffset: fragments.isEmpty ? 0 : fragments.first.startOffset,
+  );
+}
+
+class ReaderChapterPages {
+  final Object key;
+  final String chapterId;
+  final List<ReaderPage> pages;
+
+  const ReaderChapterPages({
+    required this.key,
+    required this.chapterId,
+    required this.pages,
+  });
+
+  int pageFor(ReadingPosition position) {
+    for (var index = 0; index < pages.length; index++) {
+      for (final fragment in pages[index].fragments) {
+        if (fragment.paragraphIndex > position.paragraphIndex ||
+            (fragment.paragraphIndex == position.paragraphIndex &&
+                fragment.endOffset > position.characterOffset)) {
+          return index;
+        }
+      }
+    }
+    return pages.length - 1;
+  }
+}
+
+/// 限量缓存多章排版；原文段落和字符范围随分页保留，不再反向搜索段落。
+class ReaderPaginationCache {
+  final int capacity;
+  final LinkedHashMap<Object, ReaderChapterPages> _cache = LinkedHashMap();
+
+  ReaderPaginationCache({this.capacity = 7});
+
+  ReaderChapterPages? lookup(Object key) {
+    final value = _cache.remove(key);
+    if (value != null) _cache[key] = value;
+    return value;
+  }
+
+  int get length => _cache.length;
+
+  ReaderChapterPages paginate({
+    required String chapterId,
+    required String title,
+    required String content,
+    required ReaderLayout layout,
+    required bool indent,
+  }) {
+    final key = (chapterId, title, content, layout.key, indent);
+    final cached = lookup(key);
+    if (cached != null) return cached;
+    final result = _paginate(
+      key: key,
+      chapterId: chapterId,
+      title: title,
+      content: content,
+      layout: layout,
+      indent: indent,
+    );
+    _cache[key] = result;
+    while (_cache.length > capacity) {
+      _cache.remove(_cache.keys.first);
+    }
+    return result;
+  }
+
+  Object cacheKey({
+    required String chapterId,
+    required String title,
+    required String content,
+    required ReaderLayout layout,
+    required bool indent,
+  }) => (chapterId, title, content, layout.key, indent);
+
+  ReaderChapterPages _paginate({
+    required Object key,
+    required String chapterId,
+    required String title,
+    required String content,
+    required ReaderLayout layout,
+    required bool indent,
+  }) {
+    final width = math.max(
+      1.0,
+      layout.size.width - layout.horizontalPadding * 2 - layout.commentGutter,
+    );
+    final painter = TextPainter(
+      textDirection: TextDirection.ltr,
+      textScaler: layout.textScaler,
+    );
+    double measure(String text, TextStyle style, double maxWidth) {
+      painter.text = TextSpan(text: text, style: style);
+      painter.layout(maxWidth: maxWidth);
+      return painter.height;
+    }
+
+    final measuredTitleHeight = measure(
+      title,
+      layout.titleStyle,
+      math.max(1, layout.size.width - layout.horizontalPadding * 2).toDouble(),
+    );
+    final titleHeight = math.min(
+      measuredTitleHeight,
+      layout.size.height * 0.22,
+    );
+    final footerHeight = measure(
+      '第 1 / 1 页',
+      const TextStyle(fontSize: 11, height: 1, letterSpacing: 1),
+      layout.size.width,
+    );
+    final normalHeight = math.max(
+      1.0,
+      layout.size.height - 16 - footerHeight - 6,
+    );
+    final firstHeight = math.max(1.0, normalHeight - titleHeight - 10);
+    final pages = <ReaderPage>[];
+    final fragments = <ReaderPageFragment>[];
+    var usedHeight = 0.0;
+    var oversized = false;
+    double available() => pages.isEmpty ? firstHeight : normalHeight;
+    void flush() {
+      if (fragments.isEmpty) return;
+      pages.add(
+        ReaderPage(
+          fragments: List.unmodifiable(fragments),
+          availableHeight: available(),
+          oversized: oversized,
+          titleHeight: pages.isEmpty ? titleHeight : 0,
+        ),
+      );
+      fragments.clear();
+      usedHeight = 0;
+      oversized = false;
+    }
+
+    try {
+      final paragraphs = content.split('\n\n');
+      for (
+        var paragraphIndex = 0;
+        paragraphIndex < paragraphs.length;
+        paragraphIndex++
+      ) {
+        final original = paragraphs[paragraphIndex].trim();
+        var cursor = 0;
+        while (cursor < original.length) {
+          final spacing = fragments.isEmpty ? 0.0 : layout.paragraphSpacing;
+          final room = available() - usedHeight - spacing;
+          final prefix = indent && cursor == 0 ? '\u3000\u3000' : '';
+          final display = '$prefix${original.substring(cursor)}';
+          final fullHeight = measure(display, layout.bodyStyle, width);
+          var end = display.length;
+          var height = fullHeight;
+          if (height > room + 0.01) {
+            final lines = painter.computeLineMetrics();
+            var candidate = 0;
+            for (final line in lines) {
+              if (line.baseline + line.descent > room + 0.01) break;
+              final position = painter.getPositionForOffset(
+                Offset(0, line.baseline),
+              );
+              candidate = painter.getLineBoundary(position).end;
+            }
+            if (candidate <= prefix.length && fragments.isNotEmpty) {
+              flush();
+              continue;
+            }
+            if (candidate <= prefix.length) {
+              candidate =
+                  prefix.length +
+                  original.substring(cursor).characters.first.length;
+              oversized = true;
+            }
+            end = candidate.clamp(prefix.length + 1, display.length);
+            height = measure(
+              display.substring(0, end),
+              layout.bodyStyle,
+              width,
+            );
+            // 少数字体/词边界的独立续页重排可能多出一行，退回上一行再核对。
+            while (height > room + 0.01 &&
+                !oversized &&
+                end > prefix.length + 1) {
+              final remainingLines = painter.computeLineMetrics();
+              if (remainingLines.length <= 1) break;
+              final previous = remainingLines[remainingLines.length - 2];
+              end = painter
+                  .getLineBoundary(
+                    painter.getPositionForOffset(Offset(0, previous.baseline)),
+                  )
+                  .end;
+              height = measure(
+                display.substring(0, end),
+                layout.bodyStyle,
+                width,
+              );
+            }
+          }
+          final consumed = (end - prefix.length).clamp(
+            1,
+            original.length - cursor,
+          );
+          fragments.add(
+            ReaderPageFragment(
+              paragraphIndex: paragraphIndex,
+              startOffset: cursor,
+              endOffset: cursor + consumed,
+              text: '$prefix${original.substring(cursor, cursor + consumed)}',
+              height: height,
+            ),
+          );
+          usedHeight += spacing + height;
+          cursor += consumed;
+          if (cursor < original.length) flush();
+        }
+      }
+      flush();
+      if (pages.isEmpty) {
+        pages.add(
+          ReaderPage(
+            fragments: const [],
+            availableHeight: firstHeight,
+            titleHeight: titleHeight,
+          ),
+        );
+      }
+      return ReaderChapterPages(
+        key: key,
+        chapterId: chapterId,
+        pages: List.unmodifiable(pages),
+      );
+    } finally {
+      painter.dispose();
+    }
+  }
+}

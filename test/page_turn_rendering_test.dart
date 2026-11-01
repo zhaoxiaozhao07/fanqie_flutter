@@ -123,6 +123,44 @@ Path _backClip(WidgetTester tester) {
 
 void main() {
   group('Simulation rendering regressions', () {
+    testWidgets(
+      'a missing chapter boundary keeps the page for a cancelled short drag',
+      (tester) async {
+        var requests = 0;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 400,
+                height: 600,
+                child: SimulationPageTurn(
+                  totalPages: 1,
+                  currentPageIndex: 0,
+                  backgroundColor: Colors.white,
+                  pageBuilder: (context, index) =>
+                      const ColoredBox(color: Colors.white),
+                  onPageChanged: (_) {},
+                  onNextChapter: () => requests++,
+                ),
+              ),
+            ),
+          ),
+        );
+        final gesture = await tester.startGesture(const Offset(350, 300));
+        await gesture.moveBy(const Offset(-30, 0));
+        await tester.pump(const Duration(milliseconds: 200));
+        await gesture.up();
+        await tester.pumpAndSettle();
+        expect(requests, 0);
+        await tester.fling(
+          find.byType(SimulationPageTurn),
+          const Offset(-50, 0),
+          2000,
+        );
+        await tester.pumpAndSettle();
+        expect(requests, 1);
+      },
+    );
     testWidgets('animation reuses page content and paints it only once', (
       tester,
     ) async {
@@ -365,27 +403,80 @@ void main() {
       expect(key.currentState!.centerTaps, 0);
     });
 
-    testWidgets('rapid taps and volume calls do not interrupt a turn', (
-      tester,
-    ) async {
-      final key = GlobalKey<_SimulationHarnessState>();
-      final simulationKey = GlobalKey<SimulationPageTurnState>();
-      await tester.pumpWidget(
-        _SimulationHarness(key: key, simulationKey: simulationKey),
-      );
-      simulationKey.currentState!.turnToNextPage();
-      await tester.pump();
-      await tester.pump(const Duration(milliseconds: 60));
-      await tester.tapAt(const Offset(380, 400));
-      simulationKey.currentState!.turnToPreviousPage();
-      await tester.pumpAndSettle();
-      expect(key.currentState!.changes, [1]);
+    testWidgets(
+      'rapid taps keep one latest request without interrupting a turn',
+      (tester) async {
+        final key = GlobalKey<_SimulationHarnessState>();
+        final simulationKey = GlobalKey<SimulationPageTurnState>();
+        await tester.pumpWidget(
+          _SimulationHarness(key: key, simulationKey: simulationKey),
+        );
+        simulationKey.currentState!.turnToNextPage();
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 60));
+        await tester.tapAt(const Offset(380, 400));
+        simulationKey.currentState!.turnToPreviousPage();
+        await tester.pumpAndSettle();
+        expect(key.currentState!.changes, [1, 0]);
 
-      await tester.tapAt(const Offset(380, 400));
-      await tester.pumpAndSettle();
-      expect(key.currentState!.changes, [1, 2]);
-      expect(tester.takeException(), isNull);
-    });
+        await tester.tapAt(const Offset(380, 400));
+        await tester.pumpAndSettle();
+        expect(key.currentState!.changes, [1, 0, 1]);
+        expect(tester.takeException(), isNull);
+      },
+    );
+
+    testWidgets(
+      'fast short flick uses velocity, and long-press owns selection drag',
+      (tester) async {
+        final key = GlobalKey<_SimulationHarnessState>();
+        final simulationKey = GlobalKey<SimulationPageTurnState>();
+        await tester.pumpWidget(
+          _SimulationHarness(key: key, simulationKey: simulationKey),
+        );
+        await tester.fling(
+          find.byType(SimulationPageTurn),
+          const Offset(-50, 0),
+          2000,
+        );
+        await tester.pumpAndSettle();
+        expect(key.currentState!.changes, [1]);
+
+        var selected = false;
+        var page = 0;
+        await tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: SizedBox(
+                width: 400,
+                height: 600,
+                child: StatefulBuilder(
+                  builder: (context, setState) => SimulationPageTurn(
+                    totalPages: 2,
+                    currentPageIndex: page,
+                    backgroundColor: Colors.white,
+                    pageBuilder: (context, index) => GestureDetector(
+                      onLongPressStart: (_) => selected = true,
+                      onLongPressMoveUpdate: (_) {},
+                      child: Center(child: Text('selection-$index')),
+                    ),
+                    onPageChanged: (index) => setState(() => page = index),
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+        final gesture = await tester.startGesture(const Offset(200, 300));
+        await tester.pump(const Duration(milliseconds: 700));
+        expect(selected, isTrue);
+        await gesture.moveBy(const Offset(-120, 0));
+        await gesture.up();
+        await tester.pumpAndSettle();
+        expect(page, 0);
+        expect(tester.takeException(), isNull);
+      },
+    );
 
     testWidgets(
       'chapter update cancels an old turn even with same page index',

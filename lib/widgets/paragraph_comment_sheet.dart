@@ -103,6 +103,7 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
   void dispose() {
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
+    _apiService.dispose();
     super.dispose();
   }
 
