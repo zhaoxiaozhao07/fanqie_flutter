@@ -14,7 +14,7 @@
 3. **更可控**：查找正文、跳转后返回、看清离线可读范围。
 4. **更可靠**：本地文件正确解析，书签笔记可恢复，平台功能真正闭环。
 
-沿用上一版计划中已经落地的基础，不将已有功能重新列为“新增”。保留[上一版计划](/Users/xiuxiu/CodeProgram/fanqie_flutter/docs/NOVEL_READING_ENHANCEMENT_PLAN.md)作为历史规划。
+沿用上一版计划中已经落地的基础，不将已有功能重新列为“新增”。保留[上一版计划](../docs/NOVEL_READING_ENHANCEMENT_PLAN.md)作为历史规划。
 
 ## 二、现状与增量机会
 
@@ -31,11 +31,11 @@
 
 ### 代码核查中的关键依据
 
-- [阅读器](/Users/xiuxiu/CodeProgram/fanqie_flutter/lib/screens/reader_screen.dart)约 5,000 行，加载、状态、排版、目录、设置、选区和听书联动集中在同一组件中，新增功能应逐步抽离职责。
-- [阅读位置模型](/Users/xiuxiu/CodeProgram/fanqie_flutter/lib/models/reading_position.dart)已经是原文锚点，不需要重做为“页码记忆”。
-- [本地导入服务](/Users/xiuxiu/CodeProgram/fanqie_flutter/lib/services/local_book_service.dart)中，TXT 在 UTF-8 失败后使用 Latin-1；EPUB 按 HTML 文件名排序；本地书籍 ID 依赖书名的 `hashCode`。这些机制不能充分覆盖中文编码、EPUB spine 顺序及同名不同书。
-- [书签与笔记模型](/Users/xiuxiu/CodeProgram/fanqie_flutter/lib/models/bookmark.dart)仍依赖章节序号；笔记未保存选区起止偏移。[书签服务](/Users/xiuxiu/CodeProgram/fanqie_flutter/lib/services/bookmark_service.dart)添加书签时会替换同章旧书签。
-- [系统服务](/Users/xiuxiu/CodeProgram/fanqie_flutter/lib/services/reader_system_service.dart)与[听书服务](/Users/xiuxiu/CodeProgram/fanqie_flutter/lib/services/tts_service.dart)调用了 `updateMediaPlaybackState`、`setAudioVolume`，但[当前 Android 原生处理器](/Users/xiuxiu/CodeProgram/fanqie_flutter/android/app/src/main/kotlin/com/fanqie/fanqie_flutter/MainActivity.kt)没有对应分支；不能把 Dart 调用存在视为锁屏播控、音量淡出已经端到端实现。
+- [阅读器](../lib/screens/reader_screen.dart)约 5,000 行，加载、状态、排版、目录、设置、选区和听书联动集中在同一组件中，新增功能应逐步抽离职责。
+- [阅读位置模型](../lib/models/reading_position.dart)已经是原文锚点，不需要重做为“页码记忆”。
+- [本地导入服务](../lib/services/local_book_service.dart)中，TXT 在 UTF-8 失败后使用 Latin-1；EPUB 按 HTML 文件名排序；本地书籍 ID 依赖书名的 `hashCode`。这些机制不能充分覆盖中文编码、EPUB spine 顺序及同名不同书。
+- [书签与笔记模型](../lib/models/bookmark.dart)仍依赖章节序号；笔记未保存选区起止偏移。[书签服务](../lib/services/bookmark_service.dart)添加书签时会替换同章旧书签。
+- [系统服务](../lib/services/reader_system_service.dart)与[听书服务](../lib/services/tts_service.dart)调用了 `updateMediaPlaybackState`、`setAudioVolume`，但[当前 Android 原生处理器](../android/app/src/main/kotlin/com/fanqie/fanqie_flutter/MainActivity.kt)没有对应分支；不能把 Dart 调用存在视为锁屏播控、音量淡出已经端到端实现。
 
 ## 三、优先级总览
 
@@ -219,7 +219,7 @@ P0 为可靠性补齐，P1 为高频体验增强，P2 为可选增值能力；�
 - `ReaderSearchService`：本章和本地正文检索。
 - `TtsPlaybackSession`：实际播放引擎、切片状态、原文映射和平台回调。
 
-继续复用现有[分页引擎](/Users/xiuxiu/CodeProgram/fanqie_flutter/lib/services/reader_pagination.dart)、[翻页组件](/Users/xiuxiu/CodeProgram/fanqie_flutter/lib/widgets/reader_page_view.dart)和[位置服务](/Users/xiuxiu/CodeProgram/fanqie_flutter/lib/services/reader_position_service.dart)。先补接口测试再抽离，不同时重写 UI、分页和数据层。
+继续复用现有[分页引擎](../lib/services/reader_pagination.dart)、[翻页组件](../lib/widgets/reader_page_view.dart)和[位置服务](../lib/services/reader_position_service.dart)。先补接口测试再抽离，不同时重写 UI、分页和数据层。
 
 ### 5.2 数据与资源边界
 
@@ -253,7 +253,7 @@ P0 为可靠性补齐，P1 为高频体验增强，P2 为可选增值能力；�
 
 ### 功能回归
 
-- 保留并扩展已有[导航测试](/Users/xiuxiu/CodeProgram/fanqie_flutter/test/reader_navigation_test.dart)、[设置测试](/Users/xiuxiu/CodeProgram/fanqie_flutter/test/reader_controls_test.dart)、[分页测试](/Users/xiuxiu/CodeProgram/fanqie_flutter/test/reader_pagination_test.dart)、[翻页绘制测试](/Users/xiuxiu/CodeProgram/fanqie_flutter/test/page_turn_rendering_test.dart)、[选区测试](/Users/xiuxiu/CodeProgram/fanqie_flutter/test/reader_selection_and_pagination_test.dart)与[段评测试](/Users/xiuxiu/CodeProgram/fanqie_flutter/test/reader_comment_bubble_test.dart)。
+- 保留并扩展已有[导航测试](../test/reader_navigation_test.dart)、[设置测试](../test/reader_controls_test.dart)、[分页测试](../test/reader_pagination_test.dart)、[翻页绘制测试](../test/page_turn_rendering_test.dart)、[选区测试](../test/reader_selection_and_pagination_test.dart)与[段评测试](../test/reader_comment_bubble_test.dart)。
 - 新增会话状态、进度迁移、网络调度、导入格式与备份恢复测试；原生方法调用补契约测试和真机测试。
 - 矩阵覆盖两种阅读模式、五种翻页方式、浅色/深色、字体缩放、长段落/超长章节、目录变动、慢网/断网、进后台/进程终止。
 - 正文不能丢字或重复；新增状态不能破坏已经稳定的气泡命中、自由选词和跨章翻页。

@@ -1,131 +1,175 @@
-name: 构建并发布 Flutter APK
+name: 验证并发布 Android APK
 
 on:
   push:
-    branches:
-      - main
-      - master
-    tags:
-      - 'v*'  # 监听所有 v 开头的 tag，如 v1.0.0
-      - '[0-9]*'
-  workflow_dispatch:  # 支持手动触发
+    branches: [main, master]
+    tags: ['v*']
+  workflow_dispatch:
     inputs:
       version:
-        description: '版本号 (如 1.0.0)'
+        description: '发布版本（须与 pubspec.yaml 一致，如 3.2.0）'
         required: false
         default: ''
 
+permissions:
+  contents: read
+
+concurrency:
+  group: reader-release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build-and-release:
-    name: 构建发布版 APK
+  verify:
+    name: 静态分析与全套 Dart 测试
     runs-on: ubuntu-latest
-    permissions:
-      contents: write  # 允许创建 Release
-    
+    timeout-minutes: 25
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build: ${{ steps.version.outputs.build }}
+      publish: ${{ steps.version.outputs.publish }}
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-
-      - name: 设置 Java 环境
-        uses: actions/setup-java@v4
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
         with:
-          distribution: 'temurin'
+          distribution: temurin
           java-version: '21'
-
-      - name: 设置 Flutter 环境
-        uses: subosito/flutter-action@v2
+      - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.38.5'
-          channel: 'stable'
+          flutter-version: '3.47.4'
+          channel: stable
           cache: true
-
-      - name: 获取依赖
-        run: flutter pub get
-
-      - name: 创建 local.properties
-        run: |
-          echo "flutter.sdk=$FLUTTER_ROOT" > android/local.properties
-          echo "sdk.dir=$ANDROID_HOME" >> android/local.properties
-
-      - name: 解码签名密钥
+      - name: 校验版本与发布目标
+        id: version
         env:
-          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
-        if: env.KEYSTORE_BASE64 != ''
+          REQUESTED_VERSION: ${{ inputs.version }}
+        shell: bash
         run: |
-          echo "$KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          set -euo pipefail
+          FULL_VERSION=$(awk '/^version:/{print $2}' pubspec.yaml)
+          VERSION=${FULL_VERSION%%+*}
+          BUILD=${FULL_VERSION##*+}
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$BUILD" =~ ^[0-9]+$ ]]
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            [[ "$GITHUB_REF_NAME" == "v$VERSION" ]] || { echo '标签与代码版本不一致'; exit 1; }
+          fi
+          if [[ -n "$REQUESTED_VERSION" && "$REQUESTED_VERSION" != "$VERSION" ]]; then
+            echo '手动版本与代码版本不一致'; exit 1
+          fi
+          PUBLISH=false
+          if [[ "$GITHUB_REF" == refs/tags/* || "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then PUBLISH=true; fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "publish=$PUBLISH" >> "$GITHUB_OUTPUT"
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test --reporter expanded
 
-      - name: 创建 key.properties
+  device:
+    name: Android 平台与 30 分钟关屏验证
+    needs: verify
+    if: needs.verify.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: 启用模拟器硬件加速
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: default
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            bash scripts/test_android_platform.sh
+            PLATFORM_TEST_TARGET=integration_test/reader_soak_test.dart SOAK_SECONDS=1800 PLATFORM_TEST_LOG=/tmp/fanqie-soak.log bash scripts/test_android_platform.sh
+      - name: 保存平台测试证据
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-verification-${{ github.sha }}
+          if-no-files-found: ignore
+          path: |
+            /tmp/fanqie-platform-tests.log
+            /tmp/fanqie-platform-tests-*.log
+            /tmp/fanqie-platform-tests-settings.png
+            /tmp/fanqie-soak.log
+            /tmp/fanqie-soak-*.log
+          retention-days: 14
+
+  build-and-release:
+    name: 构建签名 APK 并发布
+    needs: [verify, device]
+    if: needs.verify.outputs.publish == 'true' && needs.device.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+      - run: flutter pub get
+      - name: 配置发布签名
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
-        if: env.KEYSTORE_BASE64 != ''
         run: |
-          cat > android/key.properties << EOF
-          storePassword=$KEYSTORE_PASSWORD
-          keyPassword=$KEY_PASSWORD
-          keyAlias=$KEY_ALIAS
-          storeFile=upload-keystore.jks
-          EOF
-
-      - name: 获取版本号
-        id: version
-        run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/v}
-          elif [[ "${GITHUB_REF}" == refs/tags/* ]]; then
-            VERSION=${GITHUB_REF#refs/tags/}
-          elif [ -n "${{ github.event.inputs.version }}" ]; then
-            VERSION=${{ github.event.inputs.version }}
-          else
-            VERSION=$(grep '^version:' pubspec.yaml | sed 's/version: //' | cut -d'+' -f1 | tr -d ' ')
-          fi
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PASSWORD" && test -n "$KEY_PASSWORD" && test -n "$KEY_ALIAS"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=upload-keystore.jks\n' "$KEYSTORE_PASSWORD" "$KEY_PASSWORD" "$KEY_ALIAS" > android/key.properties
       - name: 构建 Release APK
-        run: flutter build apk --release --build-name=${{ steps.version.outputs.version }} --build-number=${{ github.run_number }}
-
-      - name: 重命名 APK
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          BUILD_NUMBER: ${{ needs.verify.outputs.build }}
+        run: flutter build apk --release --build-name="$VERSION" --build-number="$BUILD_NUMBER"
+      - name: 命名产物并计算校验值
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
         run: |
-          mv build/app/outputs/flutter-apk/app-release.apk build/app/outputs/flutter-apk/fanqie-v${{ steps.version.outputs.version }}.apk
-
-      - name: 上传 APK 构建产物 (Artifacts)
-        uses: actions/upload-artifact@v4
+          cd build/app/outputs/flutter-apk
+          mv app-release.apk "fanqie-v$VERSION.apk"
+          sha256sum "fanqie-v$VERSION.apk" > "fanqie-v$VERSION.apk.sha256"
+      - uses: actions/upload-artifact@v4
         with:
-          name: fanqie-v${{ steps.version.outputs.version }}
-          path: build/app/outputs/flutter-apk/*.apk
+          name: fanqie-v${{ needs.verify.outputs.version }}
+          path: build/app/outputs/flutter-apk/fanqie-v*.*
           retention-days: 30
-
-      - name: 创建 Release
-        if: startsWith(github.ref, 'refs/tags/') || github.event_name == 'workflow_dispatch'
+      - name: 创建 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: "番茄Reader v${{ steps.version.outputs.version }}"
-          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('v{0}', steps.version.outputs.version) }}
-          body: |
-            ## 番茄Reader v${{ steps.version.outputs.version }}
-            
-            ### 🚀 核心新特性与改进 (v3.1.1 - 极致流畅滚屏与多模式翻页动画版)
-            - **上下滑屏 120fps 极致流畅优化**：重构为双向虚拟化段落级 `CustomScrollView` + `SliverList`，仅挂载视口内 15~25 个段落与微型 `RepaintBoundary`，向上追加章节天然零位移跳动；
-            - **按需瞬时激活自由选词**：日常阅读采用零开销 `Text.rich`，长按段落当帧无缝切换为 `SelectableText.rich` 并弹出暗色气泡菜单（复制 / 划线 / 取消划线）；
-            - **左右翻页阅读新增 4 种翻页动画**：支持「覆盖」「仿真（3D 书页卷曲高光与折痕暗影）」「滑动」「渐变」实时跟手与点击翻页动画，跨章翻页与上一章末页无缝衔接；
-            - **双阅读模式自由切换**：垂直无缝连续滚屏与左右仿真翻页（PageView + 点击热区翻页），畅享纸书手感与单手翻页；
-            - **精细排版定制与多字体**：首行缩进(2字符开关)、字间距、段落间距与页边距四维微调；支持系统默认、宋体、楷体、黑体自由切换；
-            - **沉浸式自动阅读 / 自动平缓滚屏**：支持 15~100 px/s 速度调节，悬浮胶囊控制条，轻触正文随时暂停与继续；
-            - **书签、划线高亮与阅读笔记系统**：顶栏一键书签，段落长按划线与写读后感悟，目录抽屉「目录/书签/笔记」三位一体管理并支持一键定位；
-            - **目录正反序与分卷折叠**：支持正序/倒序一键切换，原生分卷折叠展开，自动居中高亮当前阅读章节；
-            - **后续 3~5 章静默预加载流水线**：后台静默并发预热，彻底消除翻页骨架屏与 Loading，断网零等待；
-            - **连载书籍更新检测与书架红点**：书架下拉自动比对远端连载更新，封面右上角显眼「更新」红点提醒；
-            - **本地 TXT / EPUB 小说导入与阅读**：智能正则分章与 EPUB 解构清洗，直接并入书架本地秒开阅读；
-            - **听书进阶优化**：睡眠定时新增「读完本章后停止」选项；结束前 1 分钟音量平滑淡出；支持锁屏媒体中心播控联动与耳机线控；
-            - **官方原生段评与书评离线自愈**：保留段评气泡、原文引用高亮与楼中楼互动。
-            
-            ## 下载安装
-            
-            - 直接下载下方的 APK 文件安装即可。
+          name: 番茄Reader v${{ needs.verify.outputs.version }}
+          tag_name: v${{ needs.verify.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          body_path: docs/RELEASE_NOTES.md
           files: |
-            build/app/outputs/flutter-apk/fanqie-v${{ steps.version.outputs.version }}.apk
+            build/app/outputs/flutter-apk/fanqie-v${{ needs.verify.outputs.version }}.apk
+            build/app/outputs/flutter-apk/fanqie-v${{ needs.verify.outputs.version }}.apk.sha256
           draft: false
           prerelease: false
         env:

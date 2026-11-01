@@ -29,8 +29,8 @@
 - [x] E7 沉浸交互与无障碍
 - [x] E8 精确批注与数据备份
 - [x] E9 轻量阅读辅助
-- [ ] 全量静态分析、单元/组件/集成测试
-- [ ] Android 构建与设备测试
+- [x] 全量静态分析、单元/组件/集成测试（本地通过，发布 CI 复验）
+- [x] Android 构建与设备测试（Release APK + API 35 模拟器）
 - [ ] v3.2.0 发布 workflow 与产物验证
 
 后续各提交在此记录实现范围、测试和剩余限制。
@@ -139,4 +139,6 @@
 - 30 分钟关屏稳定性测试：通过。
 - 版本目标：`3.2.0+320`；上一正式 workflow build number 为 83，升级版本号保持递增。
 - 发布 workflow 增加版本一致性、Dart、Android 与长时测试门禁，签名配置缺失时拒绝正式发布。
-- 最终 Release 构建、CI 与 GitHub Release 结果待记录。
+- 本地 Release APK 构建通过，包版本核验为 `versionName=3.2.0`、`versionCode=320`、minSdk 24 / targetSdk 36。
+- Release 构建需允许 Flutter 刷新平台注册文件；不能在同一目录同时运行调试测试和 Release 构建，避免开发依赖注册文件相互覆盖。
+- 发布 CI 与 GitHub Release 结果待记录。
