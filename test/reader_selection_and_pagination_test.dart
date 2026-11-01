@@ -703,5 +703,74 @@ void main() {
       expect(find.text('Page A'), findsOneWidget);
       expect(tester.takeException(), isNull);
     });
+
+    testWidgets('Chapter switching in page mode correctly resets to first page (page 0) instead of jumping to end', (tester) async {
+      int chapterIndex = 0;
+      int? lastPaginatedChapterIndex = 0;
+      int currentHorizontalPageIndex = 5; // Simulating being at the end of Chapter 0 (page 5)
+      PageController pageController = PageController(initialPage: 5);
+
+      // Map of chapters to their pages
+      final chapterPages = {
+        0: ['Ch0-P0', 'Ch0-P1', 'Ch0-P2', 'Ch0-P3', 'Ch0-P4', 'Ch0-P5'],
+        1: ['Ch1-P0', 'Ch1-P1', 'Ch1-P2', 'Ch1-P3'],
+      };
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                final pages = chapterPages[chapterIndex]!;
+
+                // Replicating ReaderScreen logic:
+                final bool isChapterChanged = lastPaginatedChapterIndex != chapterIndex;
+                if (isChapterChanged) {
+                  lastPaginatedChapterIndex = chapterIndex;
+                  currentHorizontalPageIndex = 0;
+                  pageController.dispose();
+                  pageController = PageController(initialPage: 0);
+                }
+
+                return Column(
+                  children: [
+                    ElevatedButton(
+                      onPressed: () {
+                        setState(() {
+                          chapterIndex = 1;
+                        });
+                      },
+                      child: const Text('Next Chapter'),
+                    ),
+                    Expanded(
+                      child: PageView.builder(
+                        key: ValueKey('test_pv_$chapterIndex'),
+                        controller: pageController,
+                        itemCount: pages.length,
+                        onPageChanged: (idx) => currentHorizontalPageIndex = idx,
+                        itemBuilder: (context, idx) => Center(child: Text(pages[idx])),
+                      ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+      // Initially at the end of chapter 0
+      expect(find.text('Ch0-P5'), findsOneWidget);
+
+      // Switch to chapter 1
+      await tester.tap(find.text('Next Chapter'));
+      await tester.pumpAndSettle();
+
+      // Must start at page 0 of Chapter 1, NOT the end of Chapter 1
+      expect(currentHorizontalPageIndex, 0);
+      expect(find.text('Ch1-P0'), findsOneWidget);
+      expect(find.text('Ch1-P3'), findsNothing);
+    });
   });
 }

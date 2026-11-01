@@ -129,6 +129,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
   PageController _pageHorizontalController = PageController();
   final GlobalKey<SimulationPageTurnState> _simulationKey = GlobalKey<SimulationPageTurnState>();
   int _currentHorizontalPageIndex = 0;
+  int? _lastPaginatedChapterIndex;
+  bool _isSwitchingChapter = false;
   bool _pendingJumpToLastPage = false;
   double _horizontalOverscrollAccum = 0.0;
   DateTime _lastBubbleTapTime = DateTime.fromMillisecondsSinceEpoch(0);
@@ -538,7 +540,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
   /// 从指定章节重新开始连续阅读（重置滚动列表）
   Future<void> _startFromChapter(int index, {bool toLastPage = false}) async {
     if (index < 0 || index >= widget.chapters.length) return;
+    if (_isSwitchingChapter) return; // 防抖，防止手势瞬间多次触发导致逻辑卡死
+    _isSwitchingChapter = true;
 
+    final hasCache = _chapterCache.containsKey(index);
     setState(() {
       _currentActiveIndex = index;
       _activeChapterNotifier.value = index;
@@ -550,7 +555,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _displayedChapters.clear();
       _mountedParagraphs.clear();
       _activeSelectableParaNotifier.value = null;
-      _isLoadingHead = true;
+      // 若内存中已有该章缓存（预加载命中），翻页模式无需全屏 loading 转圈，保持当帧即刻展示
+      _isLoadingHead = !hasCache;
       _errorMessage = null;
     });
 
@@ -558,9 +564,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
       _scrollController.jumpTo(0);
     }
 
-    await _fetchChapterContent(index);
+    if (!hasCache) {
+      await _fetchChapterContent(index);
+    }
 
-    if (!mounted) return;
+    if (!mounted) {
+      _isSwitchingChapter = false;
+      return;
+    }
 
     if (_chapterCache.containsKey(index)) {
       setState(() {
@@ -580,6 +591,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
         _errorMessage = '本章内容加载失败，请检查网络后重试';
       });
     }
+    _isSwitchingChapter = false;
   }
 
   /// 滚动监听：节流局部检测活跃章节 + 双向无限滚动（极速丝滑不掉帧）
@@ -2901,15 +2913,31 @@ class _ReaderScreenState extends State<ReaderScreen> {
     return LayoutBuilder(
       builder: (context, constraints) {
         final pages = _paginateContent(content, constraints.biggest);
-        if (_pendingJumpToLastPage) {
+
+        // 准确判定章节是否切换：若切换到新章节，按方向重置为首页(0)或末页(pages.length - 1)
+        // 彻底根除“切换章节直接变到下一章末尾”的 Bug！
+        final bool isChapterChanged = _lastPaginatedChapterIndex != _currentActiveIndex;
+        if (isChapterChanged || _pendingJumpToLastPage) {
+          _lastPaginatedChapterIndex = _currentActiveIndex;
+          final targetPage = _pendingJumpToLastPage ? (pages.length - 1) : 0;
           _pendingJumpToLastPage = false;
-          _currentHorizontalPageIndex = pages.length - 1;
+          _currentHorizontalPageIndex = targetPage.clamp(0, pages.length - 1);
           _pageHorizontalController.dispose();
           _pageHorizontalController = PageController(initialPage: _currentHorizontalPageIndex);
         } else {
           _currentHorizontalPageIndex = _currentHorizontalPageIndex.clamp(0, pages.length - 1);
         }
         final chapterParas = _getChapterParagraphs(_currentActiveIndex);
+
+        // 构造上一章/下一章的优雅预览卡片
+        final nextChapterIndex = _currentActiveIndex + 1;
+        final prevChapterIndex = _currentActiveIndex - 1;
+        final nextChapterTitle = nextChapterIndex < widget.chapters.length
+            ? widget.chapters[nextChapterIndex].title
+            : '已是全书最后一章';
+        final prevChapterTitle = prevChapterIndex >= 0
+            ? widget.chapters[prevChapterIndex].title
+            : '已是第一章';
 
         // 1. 真实 3D 纸张四角仿真翻页模式（支持四角随手指拖拽、背面镜像文字反转、立体光影渲染）
         if (_pageTurnAnimation == 'simulation') {
@@ -2920,6 +2948,20 @@ class _ReaderScreenState extends State<ReaderScreen> {
             backgroundColor: theme.backgroundColor,
             isDark: theme.systemBrightness == Brightness.dark,
             lastBubbleTapTimeGetter: () => _lastBubbleTapTime,
+            nextChapterPreview: _buildChapterPlaceholderCard(
+              theme: theme,
+              constraints: constraints,
+              label: '翻页进入下一章',
+              chapterTitle: nextChapterTitle,
+              isNext: true,
+            ),
+            previousChapterPreview: _buildChapterPlaceholderCard(
+              theme: theme,
+              constraints: constraints,
+              label: '翻页返回上一章',
+              chapterTitle: prevChapterTitle,
+              isNext: false,
+            ),
             onPageChanged: (newPage) {
               if (_activeSelectableParaNotifier.value != null) {
                 _activeSelectableParaNotifier.value = null;
@@ -2968,19 +3010,19 @@ class _ReaderScreenState extends State<ReaderScreen> {
                   _horizontalOverscrollAccum += notification.overscroll;
                 } else if (notification is ScrollUpdateNotification) {
                   final pos = notification.metrics;
-                  if (pos.pixels < pos.minScrollExtent - 52 && _currentActiveIndex > 0) {
-                    _horizontalOverscrollAccum = -60;
-                  } else if (pos.pixels > pos.maxScrollExtent + 52 &&
+                  if (pos.pixels < pos.minScrollExtent - 24 && _currentActiveIndex > 0) {
+                    _horizontalOverscrollAccum = -35;
+                  } else if (pos.pixels > pos.maxScrollExtent + 24 &&
                       _currentActiveIndex < widget.chapters.length - 1) {
-                    _horizontalOverscrollAccum = 60;
+                    _horizontalOverscrollAccum = 35;
                   }
                 } else if (notification is ScrollEndNotification) {
-                  if (_horizontalOverscrollAccum < -45 &&
+                  if (_horizontalOverscrollAccum < -25 &&
                       _currentHorizontalPageIndex == 0 &&
                       _currentActiveIndex > 0) {
                     _horizontalOverscrollAccum = 0;
                     _startFromChapter(_currentActiveIndex - 1, toLastPage: true);
-                  } else if (_horizontalOverscrollAccum > 45 &&
+                  } else if (_horizontalOverscrollAccum > 25 &&
                       _currentHorizontalPageIndex >= pages.length - 1 &&
                       _currentActiveIndex < widget.chapters.length - 1) {
                     _horizontalOverscrollAccum = 0;
@@ -2991,6 +3033,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 return false;
               },
               child: PageView.builder(
+                key: ValueKey('pageview_chapter_$_currentActiveIndex'),
                 controller: _pageHorizontalController,
                 itemCount: pages.length,
                 physics: const BouncingScrollPhysics(),
@@ -3104,6 +3147,55 @@ class _ReaderScreenState extends State<ReaderScreen> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  /// 跨章翻页时的优雅占位卡片
+  Widget _buildChapterPlaceholderCard({
+    required ReaderTheme theme,
+    required BoxConstraints constraints,
+    required String label,
+    required String chapterTitle,
+    required bool isNext,
+  }) {
+    return Container(
+      width: constraints.maxWidth,
+      height: constraints.maxHeight,
+      color: theme.backgroundColor,
+      padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 24),
+      child: Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              isNext ? Icons.arrow_forward_rounded : Icons.arrow_back_rounded,
+              size: 28,
+              color: theme.secondaryColor.withValues(alpha: 0.6),
+            ),
+            const SizedBox(height: 12),
+            Text(
+              label,
+              style: TextStyle(
+                fontSize: 12,
+                color: theme.secondaryColor.withValues(alpha: 0.7),
+                letterSpacing: 1.2,
+              ),
+            ),
+            const SizedBox(height: 8),
+            Text(
+              chapterTitle,
+              textAlign: TextAlign.center,
+              style: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.bold,
+                color: theme.textColor,
+              ),
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+            ),
+          ],
+        ),
       ),
     );
   }

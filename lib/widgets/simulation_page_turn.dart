@@ -3,11 +3,14 @@ import 'package:flutter/material.dart';
 
 /// 真实仿真翻页组件
 /// 支持四个角（右上、右下、左上、左下）随手指拖拽实时弯曲折叠翻页，
-/// 严格满足折纸几何学、背面镜像反转文字展示与立体光影渲染。
+/// 严格满足折纸几何学、Sutherland-Hodgman 无闪烁凸多边形裁剪、
+/// 翻页背面镜像反转文字展示与立体光影渲染。
 class SimulationPageTurn extends StatefulWidget {
   final int totalPages;
   final int currentPageIndex;
   final Widget Function(BuildContext context, int pageIndex) pageBuilder;
+  final Widget? nextChapterPreview;
+  final Widget? previousChapterPreview;
   final ValueChanged<int> onPageChanged;
   final VoidCallback? onPreviousChapter;
   final VoidCallback? onNextChapter;
@@ -21,6 +24,8 @@ class SimulationPageTurn extends StatefulWidget {
     required this.totalPages,
     required this.currentPageIndex,
     required this.pageBuilder,
+    this.nextChapterPreview,
+    this.previousChapterPreview,
     required this.onPageChanged,
     this.onPreviousChapter,
     this.onNextChapter,
@@ -44,6 +49,7 @@ enum _TurnCorner {
 class SimulationPageTurnState extends State<SimulationPageTurn>
     with SingleTickerProviderStateMixin {
   late AnimationController _animController;
+  late CurvedAnimation _curvedAnim;
   Animation<Offset>? _dragAnimation;
 
   // 翻页状态
@@ -52,6 +58,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   _TurnCorner _corner = _TurnCorner.bottomRight;
   Offset? _cornerPos; // 原始角点 C
   Offset? _dragPos; // 当前手指拖拽点 A
+  Size _viewSize = Size.zero;
 
   // 触控判定
   Offset? _downPos;
@@ -70,10 +77,12 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
           });
         }
       });
+    _curvedAnim = CurvedAnimation(parent: _animController, curve: Curves.easeOutCubic);
   }
 
   @override
   void dispose() {
+    _curvedAnim.dispose();
     _animController.dispose();
     super.dispose();
   }
@@ -99,24 +108,26 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   }
 
   void _startAutoTurn({required bool forward, required bool fromTop}) {
-    final size = MediaQuery.of(context).size;
-    final w = size.width;
-    final h = size.height;
+    final w = _viewSize.width > 0 ? _viewSize.width : MediaQuery.of(context).size.width;
+    final h = _viewSize.height > 0 ? _viewSize.height : MediaQuery.of(context).size.height;
 
     _isForward = forward;
+    _isDragging = false;
     if (forward) {
       _corner = fromTop ? _TurnCorner.topRight : _TurnCorner.bottomRight;
       _cornerPos = fromTop ? Offset(w, 0) : Offset(w, h);
       _dragPos = _cornerPos! - Offset(4.0, fromTop ? -4.0 : 4.0);
 
-      final endPos = fromTop ? Offset(-w * 0.45, 0) : Offset(-w * 0.45, h);
+      // 折痕为中垂线 Mx = (Cx + Ax)/2，Ax 须移动至 -w * 1.2 以使折痕完全移出左边界
+      final endPos = fromTop ? Offset(-w * 1.25, 0) : Offset(-w * 1.25, h);
       _runAnimation(from: _dragPos!, to: endPos, completePageTurn: true);
     } else {
       _corner = fromTop ? _TurnCorner.topLeft : _TurnCorner.bottomLeft;
       _cornerPos = fromTop ? const Offset(0, 0) : Offset(0, h);
       _dragPos = _cornerPos! + Offset(4.0, fromTop ? 4.0 : -4.0);
 
-      final endPos = fromTop ? Offset(w * 1.45, 0) : Offset(w * 1.45, h);
+      // 折痕为中垂线 Mx = Ax/2，Ax 须移动至 w * 2.25 以使折痕完全移出右边界
+      final endPos = fromTop ? Offset(w * 2.25, 0) : Offset(w * 2.25, h);
       _runAnimation(from: _dragPos!, to: endPos, completePageTurn: true);
     }
   }
@@ -126,26 +137,21 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     required Offset to,
     required bool completePageTurn,
   }) {
-    _animController.stop();
-    _dragAnimation = Tween<Offset>(begin: from, end: to).animate(
-      CurvedAnimation(parent: _animController, curve: Curves.easeOutCubic),
-    );
+    _animController.reset();
+    _dragAnimation = Tween<Offset>(begin: from, end: to).animate(_curvedAnim);
 
-    _animController.forward(from: 0.0).then((_) {
+    _animController.forward().then((_) {
       if (!mounted) return;
       if (completePageTurn) {
-        if (_isForward) {
-          if (widget.currentPageIndex < widget.totalPages - 1) {
-            widget.onPageChanged(widget.currentPageIndex + 1);
-          } else {
-            widget.onNextChapter?.call();
-          }
+        final targetIndex = _isForward
+            ? widget.currentPageIndex + 1
+            : widget.currentPageIndex - 1;
+        if (targetIndex >= 0 && targetIndex < widget.totalPages) {
+          widget.onPageChanged(targetIndex);
+        } else if (_isForward) {
+          widget.onNextChapter?.call();
         } else {
-          if (widget.currentPageIndex > 0) {
-            widget.onPageChanged(widget.currentPageIndex - 1);
-          } else {
-            widget.onPreviousChapter?.call();
-          }
+          widget.onPreviousChapter?.call();
         }
       }
       setState(() {
@@ -173,10 +179,9 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
 
     final moveDist = (pos - _downPos!).distance;
     if (!_isDragging) {
-      // 达到初始微滑动阈值（4px）即启动折角，极致灵敏零迟滞
       if (moveDist < 4.0) return;
 
-      // 中间区域不启动翻页拖拽，留给点击呼出菜单
+      // 屏幕中央留给呼出菜单
       if (_downPos!.dx > w * 0.28 && _downPos!.dx < w * 0.72) {
         return;
       }
@@ -264,7 +269,6 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     final h = constraints.maxHeight;
 
     if (!_isDragging) {
-      // 未发生明显拖拽（位移 < 12px 且时间 < 500ms），按点击处理
       final tapDist = (pos - _downPos!).distance;
       if (tapDist < 12.0 && DateTime.now().difference(_downTime).inMilliseconds < 500) {
         _handleTapAt(pos, constraints);
@@ -286,7 +290,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
 
       if (shouldTurn) {
         final targetY = _corner == _TurnCorner.topRight ? 0.0 : h;
-        _runAnimation(from: currentPos, to: Offset(-w * 0.45, targetY), completePageTurn: true);
+        _runAnimation(from: currentPos, to: Offset(-w * 1.25, targetY), completePageTurn: true);
       } else {
         _runAnimation(from: currentPos, to: _cornerPos!, completePageTurn: false);
       }
@@ -296,7 +300,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
 
       if (shouldTurn) {
         final targetY = _corner == _TurnCorner.topLeft ? 0.0 : h;
-        _runAnimation(from: currentPos, to: Offset(w * 1.45, targetY), completePageTurn: true);
+        _runAnimation(from: currentPos, to: Offset(w * 2.25, targetY), completePageTurn: true);
       } else {
         _runAnimation(from: currentPos, to: _cornerPos!, completePageTurn: false);
       }
@@ -347,12 +351,14 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
       builder: (context, constraints) {
         final w = constraints.maxWidth;
         final h = constraints.maxHeight;
+        _viewSize = Size(w, h);
 
         final isCurling = (_isDragging || _animController.isAnimating) &&
             _dragPos != null &&
             _cornerPos != null &&
             (_dragPos! - _cornerPos!).distance > 2.0;
 
+        // 未发生翻折静止状态：直接渲染当前页，保证 100% 准确呈现当前页正文
         if (!isCurling) {
           return Listener(
             behavior: HitTestBehavior.translucent,
@@ -368,8 +374,8 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
           );
         }
 
-        final corner = _cornerPos!;
-        final drag = _dragPos!;
+        final corner = _cornerPos ?? Offset.zero;
+        final drag = _dragPos ?? Offset.zero;
 
         final curlGeometry = _computeCurlGeometry(
           corner: corner,
@@ -377,6 +383,21 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
           viewWidth: w,
           viewHeight: h,
         );
+
+        if (curlGeometry == null) {
+          return Listener(
+            behavior: HitTestBehavior.translucent,
+            onPointerDown: (e) => _onPointerDown(e, constraints),
+            onPointerMove: (e) => _onPointerMove(e, constraints),
+            onPointerUp: (e) => _onPointerUp(e, constraints),
+            onPointerCancel: _onPointerCancel,
+            child: SizedBox(
+              width: w,
+              height: h,
+              child: widget.pageBuilder(context, widget.currentPageIndex),
+            ),
+          );
+        }
 
         final int bottomPageIndex;
         final int topPageIndex;
@@ -391,11 +412,15 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
 
         final topPageWidget = topPageIndex >= 0 && topPageIndex < widget.totalPages
             ? widget.pageBuilder(context, topPageIndex)
-            : widget.pageBuilder(context, widget.currentPageIndex);
+            : (topPageIndex < 0 && widget.previousChapterPreview != null
+                ? widget.previousChapterPreview!
+                : widget.pageBuilder(context, widget.currentPageIndex));
 
         final bottomPageWidget = bottomPageIndex >= 0 && bottomPageIndex < widget.totalPages
             ? widget.pageBuilder(context, bottomPageIndex)
-            : Container(color: widget.backgroundColor);
+            : (bottomPageIndex >= widget.totalPages && widget.nextChapterPreview != null
+                ? widget.nextChapterPreview!
+                : Container(color: widget.backgroundColor));
 
         return Listener(
           behavior: HitTestBehavior.translucent,
@@ -409,56 +434,50 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
             child: Stack(
               fit: StackFit.expand,
               children: [
-                // 1. 底层页（即将露出的那一页）
+                // 1. 底层页（露出的下一页或当前页）
                 bottomPageWidget,
 
-                // 1.1 底层页落影
-                if (curlGeometry != null)
-                  CustomPaint(
-                    painter: _DropShadowPainter(
-                      p1: curlGeometry.p1,
-                      p2: curlGeometry.p2,
-                      normal: curlGeometry.normal,
-                      isDark: widget.isDark,
-                    ),
+                // 1.1 底层页落影（被翻起书页投射在底页上的柔和暗影，营造悬浮立体深度）
+                CustomPaint(
+                  painter: _DropShadowPainter(
+                    p1: curlGeometry.p1,
+                    p2: curlGeometry.p2,
+                    normal: curlGeometry.normal,
+                    isDark: widget.isDark,
                   ),
+                ),
 
-                // 2. 当前页正面（未被折起部分）
-                if (curlGeometry != null)
-                  ClipPath(
-                    clipper: _PolygonClipper(curlGeometry.frontPolygon),
-                    child: topPageWidget,
-                  )
-                else
-                  topPageWidget,
+                // 2. 当前页正面（未被折起部分，通过精确 Sutherland-Hodgman 算法裁剪）
+                ClipPath(
+                  clipper: _PolygonClipper(curlGeometry.frontPolygon),
+                  child: topPageWidget,
+                ),
 
-                // 3. 当前页翻转背面（文字镜像翻转 + 纸背半透质感 + 脊部高光暗影）
-                if (curlGeometry != null)
-                  ClipPath(
-                    clipper: _PolygonClipper(curlGeometry.backPolygon),
-                    child: Stack(
-                      fit: StackFit.expand,
-                      children: [
-                        // 3.1 真实对称反射矩阵：当前页正文文字与排版完全镜像反转！
-                        Transform(
-                          transform: curlGeometry.reflectionMatrix,
-                          child: topPageWidget,
+                // 3. 当前页翻转背面（彻底消除重影：不透明纸质底色 + 淡墨反向微显 + 脊线高光暗影）
+                ClipPath(
+                  clipper: _PolygonClipper(curlGeometry.backPolygon),
+                  child: Stack(
+                    fit: StackFit.expand,
+                    children: [
+                      // 3.1 彻底遮盖底页的不透明纸质底色（彻底消灭两页文字叠加造成的重影！！）
+                      ColoredBox(color: widget.backgroundColor),
+
+                        // 3.2 纸背温润纸质微色调
+                        ColoredBox(
+                          color: (widget.isDark ? Colors.white10 : const Color(0xFFE8DFC8))
+                              .withValues(alpha: widget.isDark ? 0.06 : 0.20),
                         ),
 
-                        // 3.2 纸背微透墨迹层
-                        Container(
-                          color: widget.backgroundColor.withValues(
-                            alpha: widget.isDark ? 0.92 : 0.88,
+                        // 3.3 真实对称反射矩阵：当前页正文字符完全水平翻转（镜像），以透光微墨呈现
+                        Opacity(
+                          opacity: widget.isDark ? 0.22 : 0.16,
+                          child: Transform(
+                            transform: curlGeometry.reflectionMatrix,
+                            child: topPageWidget,
                           ),
                         ),
 
-                        // 3.3 纸背温润质感底色
-                        Container(
-                          color: (widget.isDark ? Colors.black : const Color(0xFFE8DFC8))
-                              .withValues(alpha: 0.12),
-                        ),
-
-                        // 3.4 沿折痕脊线的立体卷曲高光与暗影
+                        // 3.4 沿折痕脊线的立体卷曲高光与凹折暗影（展现自然拱起弯曲）
                         CustomPaint(
                           painter: _SpineLightPainter(
                             p1: curlGeometry.p1,
@@ -478,7 +497,8 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     );
   }
 
-  /// 核心折纸几何与反射矩阵求解
+  /// 计算机图形学 Sutherland-Hodgman 凸多边形严谨裁剪算法
+  /// 保证绝不产生自相交折点，绝不丢失交点，彻底消灭拉拽闪烁
   _CurlGeometry? _computeCurlGeometry({
     required Offset corner,
     required Offset drag,
@@ -497,55 +517,8 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     final ux = nx / len;
     final uy = ny / len;
 
-    // 屏幕 4 条边交点
-    final K = nx * mid.dx + ny * mid.dy;
-    final intersections = <Offset>[];
-
-    // 顶边 y = 0
-    if (nx.abs() > 1e-4) {
-      final x = K / nx;
-      if (x >= -0.5 && x <= viewWidth + 0.5) {
-        intersections.add(Offset(x.clamp(0.0, viewWidth), 0.0));
-      }
-    }
-
-    // 底边 y = viewHeight
-    if (nx.abs() > 1e-4) {
-      final x = (K - ny * viewHeight) / nx;
-      if (x >= -0.5 && x <= viewWidth + 0.5) {
-        intersections.add(Offset(x.clamp(0.0, viewWidth), viewHeight));
-      }
-    }
-
-    // 左边 x = 0
-    if (ny.abs() > 1e-4) {
-      final y = K / ny;
-      if (y >= -0.5 && y <= viewHeight + 0.5) {
-        intersections.add(Offset(0.0, y.clamp(0.0, viewHeight)));
-      }
-    }
-
-    // 右边 x = viewWidth
-    if (ny.abs() > 1e-4) {
-      final y = (K - nx * viewWidth) / ny;
-      if (y >= -0.5 && y <= viewHeight + 0.5) {
-        intersections.add(Offset(viewWidth, y.clamp(0.0, viewHeight)));
-      }
-    }
-
-    final uniquePoints = <Offset>[];
-    for (final p in intersections) {
-      if (!uniquePoints.any((u) => (u - p).distance < 2.0)) {
-        uniquePoints.add(p);
-      }
-    }
-
-    if (uniquePoints.length < 2) return null;
-
-    final p1 = uniquePoints[0];
-    final p2 = uniquePoints[1];
-
-    final corners = [
+    // 屏幕顺时针 4 个顶点
+    final rectCorners = [
       const Offset(0, 0),
       Offset(viewWidth, 0),
       Offset(viewWidth, viewHeight),
@@ -554,33 +527,45 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
 
     double eval(Offset p) => nx * (p.dx - mid.dx) + ny * (p.dy - mid.dy);
 
-    final frontPoints = <Offset>[];
-    final curledPoints = <Offset>[];
+    final frontPolygon = <Offset>[];
+    final curledPolygon = <Offset>[];
+    final lineIntersections = <Offset>[];
 
+    // Sutherland-Hodgman 顺时针边割循环
     for (int i = 0; i < 4; i++) {
-      final cA = corners[i];
-      final cB = corners[(i + 1) % 4];
-      final valA = eval(cA);
-      final valB = eval(cB);
+      final s = rectCorners[i];
+      final e = rectCorners[(i + 1) % 4];
+      final valS = eval(s);
+      final valE = eval(e);
 
-      if (valA >= 0) {
-        frontPoints.add(cA);
-      } else {
-        curledPoints.add(cA);
-      }
+      final isSInsideFront = valS >= 0;
+      final isEInsideFront = valE >= 0;
 
-      if ((valA > 0 && valB < 0) || (valA < 0 && valB > 0)) {
-        final t = valA / (valA - valB);
-        final ip = cA + (cB - cA) * t;
-        frontPoints.add(ip);
-        curledPoints.add(ip);
+      if (isSInsideFront && isEInsideFront) {
+        frontPolygon.add(e);
+      } else if (isSInsideFront && !isEInsideFront) {
+        final t = valS / (valS - valE);
+        final ip = s + (e - s) * t;
+        frontPolygon.add(ip);
+        curledPolygon.add(ip);
+        lineIntersections.add(ip);
+      } else if (!isSInsideFront && !isEInsideFront) {
+        curledPolygon.add(e);
+      } else if (!isSInsideFront && isEInsideFront) {
+        final t = valS / (valS - valE);
+        final ip = s + (e - s) * t;
+        curledPolygon.add(ip);
+        frontPolygon.add(ip);
+        frontPolygon.add(e);
+        lineIntersections.add(ip);
       }
     }
 
-    final sortedFront = _sortPolygon(frontPoints);
-    final sortedCurled = _sortPolygon(curledPoints);
+    if (lineIntersections.length < 2) return null;
+    final p1 = lineIntersections[0];
+    final p2 = lineIntersections[1];
 
-    // 对称反射矩阵
+    // 计算对称反射矩阵：点关于折痕直线的反射变换
     final reflectionMatrix = Matrix4.identity();
     reflectionMatrix.setEntry(0, 0, 1.0 - 2.0 * ux * ux);
     reflectionMatrix.setEntry(0, 1, -2.0 * ux * uy);
@@ -590,65 +575,38 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     reflectionMatrix.setEntry(1, 1, 1.0 - 2.0 * uy * uy);
     reflectionMatrix.setEntry(1, 3, 2.0 * uy * (ux * mid.dx + uy * mid.dy));
 
-    // 计算被翻起区域反射到背面的顶点
-    final backPoints = <Offset>[];
-    for (final p in sortedCurled) {
+    // 计算翻折背面的多边形：将被翻起的凸多边形顶点映射至反射侧
+    final backPolygon = <Offset>[];
+    for (final p in curledPolygon) {
       final distToLine = (p - mid).dx * ux + (p - mid).dy * uy;
       final reflected = p - Offset(2.0 * distToLine * ux, 2.0 * distToLine * uy);
-      backPoints.add(reflected);
+      backPolygon.add(reflected);
     }
-    final sortedBack = _sortPolygon(backPoints);
 
     return _CurlGeometry(
       p1: p1,
       p2: p2,
-      mid: mid,
       normal: Offset(ux, uy),
-      frontPolygon: sortedFront,
-      curledPolygon: sortedCurled,
-      backPolygon: sortedBack,
+      frontPolygon: frontPolygon,
+      backPolygon: backPolygon,
       reflectionMatrix: reflectionMatrix,
     );
-  }
-
-  List<Offset> _sortPolygon(List<Offset> points) {
-    if (points.length <= 2) return points;
-    double cx = 0, cy = 0;
-    for (final p in points) {
-      cx += p.dx;
-      cy += p.dy;
-    }
-    cx /= points.length;
-    cy /= points.length;
-    final center = Offset(cx, cy);
-
-    final list = List<Offset>.from(points);
-    list.sort((a, b) {
-      final angleA = math.atan2(a.dy - center.dy, a.dx - center.dx);
-      final angleB = math.atan2(b.dy - center.dy, b.dx - center.dx);
-      return angleA.compareTo(angleB);
-    });
-    return list;
   }
 }
 
 class _CurlGeometry {
   final Offset p1;
   final Offset p2;
-  final Offset mid;
   final Offset normal;
   final List<Offset> frontPolygon;
-  final List<Offset> curledPolygon;
   final List<Offset> backPolygon;
   final Matrix4 reflectionMatrix;
 
   const _CurlGeometry({
     required this.p1,
     required this.p2,
-    required this.mid,
     required this.normal,
     required this.frontPolygon,
-    required this.curledPolygon,
     required this.backPolygon,
     required this.reflectionMatrix,
   });
@@ -678,6 +636,7 @@ class _PolygonClipper extends CustomClipper<Path> {
   bool shouldReclip(covariant _PolygonClipper oldClipper) => true;
 }
 
+/// 底层页落影
 class _DropShadowPainter extends CustomPainter {
   final Offset p1;
   final Offset p2;
@@ -725,6 +684,7 @@ class _DropShadowPainter extends CustomPainter {
   bool shouldRepaint(covariant _DropShadowPainter oldDelegate) => true;
 }
 
+/// 脊线立体卷曲高光与暗影
 class _SpineLightPainter extends CustomPainter {
   final Offset p1;
   final Offset p2;
