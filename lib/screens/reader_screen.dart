@@ -17,6 +17,9 @@ import '../models/reader_theme.dart';
 import '../services/reader_settings_repository.dart';
 import '../services/reader_route_observer.dart';
 import '../widgets/reader_settings_sheet.dart';
+import '../widgets/reader_search_sheet.dart';
+import '../services/reader_search_service.dart';
+import '../services/reader_navigation_history.dart';
 
 export '../models/reader_theme.dart';
 import 'book_detail_screen.dart';
@@ -71,6 +74,10 @@ class _ReaderScreenState extends State<ReaderScreen>
   PageRoute<dynamic>? _observedRoute;
   bool _readerRouteActive = true;
   bool _dependenciesReady = false;
+  final ReaderNavigationHistory _jumpHistory = ReaderNavigationHistory();
+  bool _navigationLoading = false;
+  int _navigationGeneration = 0;
+  ReaderSearchHit? _searchHighlight;
   final ApiService _apiService = ApiService();
   final BookshelfService _bookshelfService = BookshelfService();
   final ReadingHistoryService _readingHistoryService = ReadingHistoryService();
@@ -376,6 +383,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void dispose() {
+    _navigationGeneration++;
     readerRouteObserver.unsubscribe(this);
     ReaderSystemService.restoreWindowBrightness(this);
     _prefetchGeneration++;
@@ -443,7 +451,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _ttsPaintKey = key;
     ReaderSystemService.setVolumeKeyScrollEnabled(_canUseVolumeKeys, owner: this);
     _ttsHighlightNotifier.value++;
-    if (_readerRouteActive && _ttsService.isPlaying &&
+    if (_readerRouteActive && !_navigationLoading && _ttsService.isPlaying &&
         !_isAutoScrolling &&
         !_showControls &&
         !_restoringPosition &&
@@ -764,6 +772,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (!mounted ||
         !_canUseVolumeKeys ||
         !(ModalRoute.of(context)?.isCurrent ?? true)) {
+      return;
+    }
+    if (_navigationLoading) {
+      _cancelNavigation();
       return;
     }
     if (_isPageMode) {
@@ -1179,6 +1191,160 @@ class _ReaderScreenState extends State<ReaderScreen>
       _resumeAutoAfterLifecycle = _autoScrollTicker?.isActive ?? false;
       _pauseAutoScroll();
     }
+  }
+
+  void _cancelNavigation() {
+    _navigationGeneration++;
+    if (!_navigationLoading || !mounted) return;
+    _chapterOpenGeneration++;
+    _requestedChapterIndex = null;
+    if (_pageViewKey.currentState?.isBusy != true) _chapterTransition = null;
+    _readingPosition = _captureReadingPosition() ?? _readingPosition;
+    setState(() {
+      _navigationLoading = false;
+      _positionNeedsReflow = true;
+    });
+  }
+
+  Future<bool> _navigateTo(
+    ReadingPosition target, {
+    bool remember = true,
+    String? locateText,
+    ReaderSearchHit? searchHit,
+  }) async {
+    if (!mounted) return false;
+    final index = _chapterIndexById[target.chapterId];
+    if (index == null) return false;
+    final generation = ++_navigationGeneration;
+    final origin = _captureReadingPosition() ?? _readingPosition;
+    _stopAutoScroll();
+    _chapterOpenGeneration++;
+    _requestedChapterIndex = index;
+    _chapterWaitTimer?.cancel();
+    _chapterWaitingNotifier.value = false;
+    _pageViewKey.currentState?.clearQueuedTurns();
+    setState(() {
+      _readingPosition = origin;
+      _searchHighlight = null;
+      _navigationLoading = true;
+      _positionNeedsReflow = true;
+    });
+    try {
+      // Explicit jumps stop this book's speech rather than letting a later
+      // spoken chunk pull the reader back. The next play starts at the new view.
+      if (_ttsService.isActive && _ttsService.currentBookId == widget.book.bookId) {
+        await _ttsService.stop();
+      }
+      await _fetchChapterContent(index);
+      if (!mounted || generation != _navigationGeneration) return false;
+      if (!_chapterCache.containsKey(index)) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(_chapterErrors[index] ?? '章节暂未就绪，原阅读位置已保留'),
+        ));
+        return false;
+      }
+      if (searchHit != null) {
+        final paragraphs = _getChapterParagraphs(index);
+        final paragraph = target.paragraphIndex < paragraphs.length
+            ? paragraphs[target.paragraphIndex].trim() : '';
+        if (target.characterOffset > paragraph.length ||
+            searchHit.endOffset > paragraph.length ||
+            paragraph.substring(target.characterOffset, searchHit.endOffset) != searchHit.quote) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('正文已有变化，请重新搜索；原阅读位置已保留')),
+          );
+          return false;
+        }
+      }
+      // The return toolbar has a stable place in layout, never covers text.
+      await SchedulerBinding.instance.endOfFrame;
+      if (!mounted || generation != _navigationGeneration) return false;
+      _requestedChapterIndex = null;
+      await _startFromChapter(index, position: target, locateText: locateText);
+      if (!mounted || generation != _navigationGeneration) return false;
+      if (remember && origin != null) {
+        setState(() => _jumpHistory.record(origin, target));
+      }
+      _showControls = false;
+      if (searchHit != null) _searchHighlight = searchHit;
+      if (locateText == null) _highlightPosition(target);
+      return true;
+    } finally {
+      if (mounted && generation == _navigationGeneration) {
+        _requestedChapterIndex = null;
+        setState(() => _navigationLoading = false);
+      }
+    }
+  }
+
+  Future<void> _returnFromJump() async {
+    final target = _jumpHistory.previous;
+    if (target == null) return;
+    if (await _navigateTo(target, remember: false) && mounted) {
+      setState(() {
+        _jumpHistory.returnedTo(target);
+        _readingPosition = target;
+        _positionNeedsReflow = true;
+      });
+      if (!_isPageMode) _restoreVerticalPosition();
+    }
+  }
+
+  Widget _buildJumpBar(ReaderTheme theme) => SizedBox(
+    height: math.max(48, MediaQuery.textScalerOf(context).scale(13) * 1.5 + 12),
+    child: Material(color: theme.backgroundColor, child: Row(children: [
+      Expanded(child: _navigationLoading
+        ? Padding(padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Row(children: [
+              const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2)),
+              const SizedBox(width: 8),
+              Expanded(child: Text('正在准备章节，点击正文可取消',
+                maxLines: 1, overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 13, color: theme.secondaryColor))),
+            ]))
+        : TextButton.icon(
+            key: const ValueKey('reader_jump_back'),
+            onPressed: _returnFromJump, icon: Icon(Icons.undo, color: theme.textColor),
+            label: Text('返回原阅读位置', maxLines: 1, overflow: TextOverflow.ellipsis,
+              style: TextStyle(color: theme.textColor, fontSize: 13)),
+          )),
+      IconButton(
+        tooltip: _navigationLoading ? '取消跳转' : '清空跳转记录',
+        icon: Icon(Icons.close, color: theme.secondaryColor),
+        onPressed: _navigationLoading ? _cancelNavigation : () {
+          _readingPosition = _captureReadingPosition() ?? _readingPosition;
+          setState(() { _jumpHistory.clear(); _positionNeedsReflow = true; });
+        },
+      ),
+    ])),
+  );
+
+  Future<void> _showReaderSearch() async {
+    if (_readerPanels > 0) return;
+    _beginReaderPanel();
+    ReaderSearchHit? hit;
+    try {
+      final position = _captureReadingPosition();
+      hit = await showModalBottomSheet<ReaderSearchHit>(
+        context: context, isScrollControlled: true,
+        backgroundColor: _themes[_themeIndex].backgroundColor,
+        builder: (context) => Padding(
+          padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+          child: FractionallySizedBox(heightFactor: .9, child: ReaderSearchSheet(
+            bookId: widget.book.bookId, chapters: widget.chapters,
+            chapterIndex: _chapterIndexById[position?.chapterId] ?? _currentActiveIndex,
+            canonicalMemory: {
+              for (final entry in _chapterCache.entries)
+                widget.chapters[entry.key].itemId: entry.value,
+            },
+            theme: _themes[_themeIndex],
+          )),
+        ),
+      );
+    } finally {
+      _endReaderPanel();
+    }
+    if (mounted && hit != null) await _navigateTo(hit.position, searchHit: hit);
   }
 
   /// 从指定章节重新开始连续阅读（重置滚动列表）
@@ -1960,7 +2126,9 @@ class _ReaderScreenState extends State<ReaderScreen>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (sheetContext) => theme.wrap(StatefulBuilder(
+      builder: (sheetContext) => theme.wrap(_ReaderSheetLifetime(
+        onDispose: () { searchTimer?.cancel(); search.dispose(); _endReaderPanel(); },
+        child: StatefulBuilder(
         builder: (context, update) {
           final filter = search.text.trim();
           final all = reverse
@@ -2011,7 +2179,7 @@ class _ReaderScreenState extends State<ReaderScreen>
               onTap: () {
                 _showControls = false;
                 Navigator.pop(sheetContext);
-                _startFromChapter(index);
+                _navigateTo(ReadingPosition(chapterId: chapter.itemId));
               },
             );
           }
@@ -2211,9 +2379,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                                   }
                                   _showControls = false;
                                   Navigator.pop(sheetContext);
-                                  _startFromChapter(
-                                    bookmark.chapterIndex,
-                                    position: ReadingPosition(
+                                  _navigateTo(
+                                    ReadingPosition(
                                       chapterId: widget
                                           .chapters[bookmark.chapterIndex]
                                           .itemId,
@@ -2254,9 +2421,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                               }
                               _showControls = false;
                               Navigator.pop(sheetContext);
-                              _startFromChapter(
-                                note.chapterIndex,
-                                position: ReadingPosition(
+                              _navigateTo(
+                                ReadingPosition(
                                   chapterId:
                                       widget.chapters[note.chapterIndex].itemId,
                                   paragraphIndex: math.max(
@@ -2278,11 +2444,8 @@ class _ReaderScreenState extends State<ReaderScreen>
         },
         ),
       ),
-    ).whenComplete(() {
-      searchTimer?.cancel();
-      search.dispose();
-      _endReaderPanel();
-    });
+      ),
+    );
   }
 
   Widget _settingChoices<T>(
@@ -2433,7 +2596,16 @@ class _ReaderScreenState extends State<ReaderScreen>
                       ),
                     ),
                     // 正文滚屏（支持无限下拉追加后续章节）
-                    Expanded(child: _buildReaderBody(theme)),
+                    Expanded(child: Stack(fit: StackFit.expand, children: [
+                      _buildReaderBody(theme),
+                      if (_navigationLoading) Positioned.fill(child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTap: _cancelNavigation,
+                        onPanStart: (_) => _cancelNavigation(),
+                      )),
+                    ])),
+                    if (_navigationLoading || _jumpHistory.canGoBack)
+                      _buildJumpBar(theme),
                     // 底部常驻微型状态栏（时间、电量、总进度）
                     _buildBottomStatusBar(theme),
                   ],
@@ -3226,7 +3398,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           paragraphIndex: math.max(0, paraIndex),
         );
     _highlightPosition(anchor);
-    _startFromChapter(index, position: anchor);
+    _navigateTo(anchor);
   }
 
   void _highlightPosition(ReadingPosition position) {
@@ -3237,7 +3409,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     _highlightTimer?.cancel();
     _highlightTimer = Timer(const Duration(milliseconds: 2500), () {
-      if (mounted) setState(() => _highlightedParagraphKey = null);
+      if (mounted) {
+        setState(() {
+        _highlightedParagraphKey = null;
+        _searchHighlight = null;
+      });
+      }
     });
   }
 
@@ -3414,6 +3591,9 @@ class _ReaderScreenState extends State<ReaderScreen>
                 color: theme.backgroundColor,
                 onSelected: (val) {
                   switch (val) {
+                    case 'search':
+                      _showReaderSearch();
+                      break;
                     case 'bookshelf':
                       _toggleBookshelf();
                       break;
@@ -3429,6 +3609,11 @@ class _ReaderScreenState extends State<ReaderScreen>
                   }
                 },
                 itemBuilder: (context) => [
+                  PopupMenuItem(value: 'search', child: Row(children: [
+                    Icon(Icons.search, size: 18, color: theme.textColor),
+                    const SizedBox(width: 12),
+                    Text('正文搜索', style: TextStyle(color: theme.textColor)),
+                  ])),
                   PopupMenuItem(
                     value: 'bookshelf',
                     child: Row(
@@ -3802,6 +3987,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                   _themeIndex,
                   layoutKey,
                   _highlightedParagraphKey,
+                  _searchHighlight?.position.characterOffset,
+                  _searchHighlight?.endOffset,
                 ),
                 mode: MediaQuery.disableAnimationsOf(context)
                     ? 'none'
@@ -3885,7 +4072,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   ) {
     final chapter = widget.chapters[address.chapterIndex];
     final page = address.page;
-    final paragraphs = _getChapterParagraphs(address.chapterIndex);
+    final paragraphs = address.layout.sourceParagraphs;
     return ColoredBox(
       color: theme.backgroundColor,
       child: Padding(
@@ -4088,11 +4275,29 @@ class _ReaderScreenState extends State<ReaderScreen>
     String chapterId, int paragraphIndex, {
     required int sourceStart, required int sourceEnd,
   }) {
-    final range = _ttsService.spokenRange(widget.book.bookId, chapterId, paragraphIndex);
-    if (range == null) return spans;
+    final spoken = _ttsService.spokenRange(widget.book.bookId, chapterId, paragraphIndex);
+    var result = spans;
     final prefix = math.max(0, text.length - (sourceEnd - sourceStart));
-    final start = (range.start - sourceStart + prefix).clamp(prefix, text.length);
-    final end = (range.end - sourceStart + prefix).clamp(prefix, text.length);
+    if (spoken != null) {
+      result = _paintSpanRange(result,
+        (spoken.start - sourceStart + prefix).clamp(prefix, text.length),
+        (spoken.end - sourceStart + prefix).clamp(prefix, text.length),
+        TextStyle(backgroundColor: theme.highlightColor));
+    }
+    final hit = _searchHighlight;
+    if (hit != null && hit.position.chapterId == chapterId &&
+        hit.position.paragraphIndex == paragraphIndex) {
+      result = _paintSpanRange(result,
+        (hit.position.characterOffset - sourceStart + prefix).clamp(prefix, text.length),
+        (hit.endOffset - sourceStart + prefix).clamp(prefix, text.length),
+        TextStyle(backgroundColor: theme.highlightColor, decoration: TextDecoration.underline,
+          decorationColor: theme.textColor, decorationThickness: 2,
+          decorationStyle: TextDecorationStyle.solid));
+    }
+    return result;
+  }
+
+  List<InlineSpan> _paintSpanRange(List<InlineSpan> spans, int start, int end, TextStyle paint) {
     if (start >= end) return spans;
     var cursor = 0;
     final result = <InlineSpan>[];
@@ -4110,7 +4315,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       } else {
         if (left > 0) result.add(TextSpan(text: value.substring(0, left), style: span.style));
         result.add(TextSpan(text: value.substring(left, right),
-          style: (span.style ?? const TextStyle()).copyWith(backgroundColor: theme.highlightColor)));
+          style: (span.style ?? const TextStyle()).merge(paint)));
         if (right < value.length) result.add(TextSpan(text: value.substring(right), style: span.style));
       }
       cursor += value.length;
@@ -4620,6 +4825,21 @@ class _ViewportParagraphTrackerState extends State<_ViewportParagraphTracker> {
     super.dispose();
   }
 
+  @override
+  Widget build(BuildContext context) => widget.child;
+}
+
+
+class _ReaderSheetLifetime extends StatefulWidget {
+  final Widget child;
+  final VoidCallback onDispose;
+  const _ReaderSheetLifetime({required this.child, required this.onDispose});
+  @override
+  State<_ReaderSheetLifetime> createState() => _ReaderSheetLifetimeState();
+}
+class _ReaderSheetLifetimeState extends State<_ReaderSheetLifetime> {
+  @override
+  void dispose() { widget.onDispose(); super.dispose(); }
   @override
   Widget build(BuildContext context) => widget.child;
 }

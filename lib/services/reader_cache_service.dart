@@ -175,6 +175,25 @@ class ReaderCacheService {
     return total;
   }
 
+  /// Enumerate filenames once before a cached-book search; don't stat every
+  /// uncached chapter in a 10,000-chapter directory. Contents are validated on read.
+  Future<Set<String>> cachedChapterKeys(String bookId) async {
+    final base = await documents();
+    final keys = <String>{};
+    for (final directory in [
+      Directory('${base.path}/offline_books/${segment(bookId)}'),
+      Directory('${base.path}/reader_cache_v2/${segment(bookId)}'),
+    ]) {
+      if (!await directory.exists()) continue;
+      await for (final entry in directory.list(followLinks: false)) {
+        if (entry is! File || !entry.path.endsWith('.txt')) continue;
+        final name = entry.uri.pathSegments.last;
+        keys.add(name.substring(0, name.length - 4));
+      }
+    }
+    return keys;
+  }
+
   /// Returns bytes remaining. Pinned reading books can temporarily exceed the
   /// limit, but imported/downloaded books are never even enumerated.
   Future<int> trim(int maxBytes, {bool includePinned = false}) async {

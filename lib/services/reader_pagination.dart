@@ -95,11 +95,13 @@ class ReaderChapterPages {
   final Object key;
   final String chapterId;
   final List<ReaderPage> pages;
+  final List<String> sourceParagraphs;
 
   const ReaderChapterPages({
     required this.key,
     required this.chapterId,
     required this.pages,
+    required this.sourceParagraphs,
   });
 
   int pageFor(ReadingPosition position) {
@@ -370,6 +372,9 @@ class ReaderPaginationCache {
         key: key,
         chapterId: chapterId,
         pages: List.unmodifiable(pages),
+        sourceParagraphs: List.unmodifiable(
+          content.split('\n\n').map((paragraph) => paragraph.trim()),
+        ),
       );
     } finally {
       painter.dispose();
