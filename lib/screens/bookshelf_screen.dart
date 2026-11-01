@@ -14,6 +14,7 @@ import '../widgets/book_cover_widget.dart';
 import '../widgets/download_action_button.dart';
 import 'book_detail_screen.dart';
 import 'reader_screen.dart';
+import '../services/reader_settings_repository.dart';
 
 enum BookshelfSortType {
   recentRead, // 最近阅读
@@ -453,6 +454,8 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     }
 
     final targetIndex = (shelfBook.lastReadChapterIndex ?? 0).clamp(0, chapters.length - 1);
+    final readerSettings = await ReaderSettingsRepository().load(book.bookId);
+    if (!mounted) return;
 
     Navigator.push(
       context,
@@ -461,6 +464,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
           book: book,
           chapters: chapters,
           initialChapterIndex: targetIndex,
+          initialSettings: readerSettings,
         ),
       ),
     ).then((_) => _loadData(silent: true));
@@ -515,7 +519,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     final prefs = await SharedPreferences.getInstance();
     final savedIndex = prefs.getInt('read_progress_index_${book.bookId}') ?? 0;
     final targetIndex = savedIndex.clamp(0, chapters.length - 1);
-
+    final readerSettings = await ReaderSettingsRepository().load(book.bookId);
     if (!mounted) return;
 
     Navigator.push(
@@ -525,6 +529,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
           book: book,
           chapters: chapters,
           initialChapterIndex: targetIndex,
+          initialSettings: readerSettings,
         ),
       ),
     ).then((_) => _loadData(silent: true));

@@ -5,6 +5,8 @@ import 'package:fanqie_flutter/models/chapter.dart';
 import 'package:fanqie_flutter/models/reading_position.dart';
 import 'package:fanqie_flutter/screens/reader_screen.dart';
 import 'package:fanqie_flutter/services/reader_position_service.dart';
+import 'package:fanqie_flutter/services/reader_settings_repository.dart';
+import 'package:fanqie_flutter/services/reader_route_observer.dart';
 import 'package:fanqie_flutter/widgets/reader_page_view.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -48,10 +50,15 @@ Future<Book> openReader(
 }) async {
   tester.view.physicalSize = const Size(400, 800);
   tester.view.devicePixelRatio = 1;
-  final prefs = await SharedPreferences.getInstance();
-  await prefs.setBool('reader_is_page_mode', true);
-  await prefs.setBool('reader_show_comment_bubbles', false);
-  await prefs.setString('reader_page_turn_animation', mode);
+  final settings = ReaderSettingsRepository();
+  final current = (await settings.load()).settings;
+  await settings.save(
+    current.copyWith(
+      pageMode: true,
+      pageAnimation: mode,
+      commentBubbles: false,
+    ),
+  );
   final selectedBook =
       book ??
       Book(
@@ -61,6 +68,7 @@ Future<Book> openReader(
       );
   await tester.pumpWidget(
     MaterialApp(
+      navigatorObservers: [readerRouteObserver],
       builder: (context, child) => MediaQuery(
         data: MediaQuery.of(
           context,

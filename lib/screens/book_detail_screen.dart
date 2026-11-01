@@ -13,6 +13,7 @@ import '../widgets/download_dialog.dart';
 import '../widgets/loading_widget.dart';
 import '../widgets/paragraph_comment_sheet.dart';
 import 'reader_screen.dart';
+import '../services/reader_settings_repository.dart';
 
 /// 书籍详情页面
 class BookDetailScreen extends StatefulWidget {
@@ -162,7 +163,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     }
   }
 
-  void _openReader(int chapterIndex, {bool resume = false}) {
+  Future<void> _openReader(int chapterIndex, {bool resume = false}) async {
     if (_chapters == null || _chapters!.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('正在加载章节目录，请稍候...')),
@@ -171,6 +172,8 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     }
 
     final targetIndex = chapterIndex.clamp(0, _chapters!.length - 1);
+    final readerSettings = await ReaderSettingsRepository().load(widget.book.bookId);
+    if (!mounted) return;
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -179,6 +182,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
           chapters: _chapters!,
           initialChapterIndex: targetIndex,
           resumeSavedPosition: resume,
+          initialSettings: readerSettings,
         ),
       ),
     ).then((_) {

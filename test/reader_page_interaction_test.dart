@@ -143,6 +143,7 @@ void main() {
         'fade': '渐变',
         'cover': '覆盖',
       }.entries) {
+        await tester.ensureVisible(find.text(entry.value));
         await tester.tap(find.text(entry.value));
         await tester.pumpAndSettle();
         expect(currentPage(tester, entry.key), 1);

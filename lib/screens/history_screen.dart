@@ -14,6 +14,7 @@ import '../widgets/loading_widget.dart';
 import '../widgets/download_action_button.dart';
 import 'book_detail_screen.dart';
 import 'reader_screen.dart';
+import '../services/reader_settings_repository.dart';
 
 /// 历史页面 - 分为“阅读历史”与“下载历史”
 class HistoryScreen extends StatefulWidget {
@@ -274,6 +275,8 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
     }
 
     final targetIndex = item.lastReadChapterIndex.clamp(0, chapters.length - 1);
+    final readerSettings = await ReaderSettingsRepository().load(book.bookId);
+    if (!mounted) return;
     Navigator.push(
       context,
       MaterialPageRoute(
@@ -281,6 +284,7 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
           book: book,
           chapters: chapters,
           initialChapterIndex: targetIndex,
+          initialSettings: readerSettings,
         ),
       ),
     ).then((_) => _loadReadingHistory(silent: true));

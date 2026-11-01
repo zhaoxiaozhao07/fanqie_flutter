@@ -14,6 +14,7 @@ import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.view.WindowManager
+import android.view.Window
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugin.common.MethodChannel
@@ -30,13 +31,27 @@ object ReaderRuntime {
     private var cachedEngine: FlutterEngine? = null
     private var activity: WeakReference<MainActivity>? = null
     private var channel: MethodChannel? = null
+    private var brightnessWindow: WeakReference<Window>? = null
+    private var originalBrightness: Float? = null
     private val main = Handler(Looper.getMainLooper())
     private val files = Executors.newSingleThreadExecutor()
     var volumeKeyScrollEnabled = false
 
     fun attach(value: MainActivity) { activity = WeakReference(value) }
     fun detach(value: MainActivity) {
-        if (activity?.get() === value) activity = null
+        if (activity?.get() === value) {
+            restoreBrightness()
+            activity = null
+        }
+    }
+    private fun restoreBrightness() {
+        val window = brightnessWindow?.get()
+        val original = originalBrightness
+        if (window != null && original != null) {
+            window.attributes = window.attributes.apply { screenBrightness = original }
+        }
+        brightnessWindow = null
+        originalBrightness = null
     }
     fun emit(method: String, args: Any? = null) {
         main.post { channel?.invokeMethod(method, args) }
@@ -50,6 +65,22 @@ object ReaderRuntime {
         channel!!.setMethodCallHandler { call, result ->
             try {
                 when (call.method) {
+                    "setReaderBrightness" -> {
+                        val window = activity?.get()?.window
+                        if (window == null) result.success(false)
+                        else {
+                            if (brightnessWindow?.get() !== window) {
+                                originalBrightness = window.attributes.screenBrightness
+                                brightnessWindow = WeakReference(window)
+                            }
+                            val value = (call.argument<Number>("value")?.toFloat() ?: -1f)
+                            window.attributes = window.attributes.apply {
+                                screenBrightness = if (value < 0) -1f else value.coerceIn(.05f, 1f)
+                            }
+                            result.success(true)
+                        }
+                    }
+                    "restoreReaderBrightness" -> { restoreBrightness(); result.success(true) }
                     "setKeepScreenOn" -> {
                         val window = activity?.get()?.window
                         if (call.argument<Boolean>("enabled") == true) window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -82,6 +113,7 @@ object ReaderRuntime {
                             "ttsEngines" to engines.size,
                             "sdk" to Build.VERSION.SDK_INT,
                             "foreground" to (activity?.get()?.hasWindowFocus() == true),
+                            "windowBrightness" to (activity?.get()?.window?.attributes?.screenBrightness ?: -1f),
                             "interactive" to (app.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
                         ))
                     }

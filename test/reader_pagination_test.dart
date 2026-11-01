@@ -26,6 +26,28 @@ ReaderLayout layout(double scale, {double width = 400, bool comments = true}) =>
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('theme colors do not invalidate pagination metrics or cached pages', () {
+    final original = layout(1);
+    final dark = ReaderLayout(
+      size: original.size,
+      bodyStyle: original.bodyStyle.copyWith(color: Colors.white),
+      titleStyle: original.titleStyle.copyWith(color: Colors.white),
+      textScaler: original.textScaler,
+      horizontalPadding: original.horizontalPadding,
+      paragraphSpacing: original.paragraphSpacing,
+      inlineCommentSize: original.inlineCommentSize,
+    );
+    final cache = ReaderPaginationCache();
+    ReaderChapterPages prepare(ReaderLayout value) => cache.paginate(
+      chapterId: 'theme',
+      title: '章节',
+      content: '正文内容。' * 300,
+      layout: value,
+      indent: true,
+    );
+    expect(identical(prepare(original), prepare(dark)), true);
+  });
+
   for (final scale in [1.0, 1.4, 2.0]) {
     test('scaled $scale pages fit and retain every source character', () {
       final paragraphs = [

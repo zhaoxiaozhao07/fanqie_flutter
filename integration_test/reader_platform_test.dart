@@ -1,8 +1,15 @@
+import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:fanqie_flutter/services/tts_service.dart';
+import 'package:fanqie_flutter/models/book.dart';
+import 'package:fanqie_flutter/models/chapter.dart';
+import 'package:fanqie_flutter/models/reader_settings.dart';
+import 'package:fanqie_flutter/screens/reader_screen.dart';
+import 'package:fanqie_flutter/services/reader_route_observer.dart';
+import 'package:fanqie_flutter/services/reader_settings_repository.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -166,6 +173,106 @@ void main() {
       expect(started, true);
     }
   });
+
+  testWidgets(
+    'reader window brightness survives popups and restores outside reading',
+    (tester) async {
+      final before = await native.invokeMapMethod('getReaderCapabilities');
+      final original = (before!['windowBrightness'] as num).toDouble();
+      const preferences = ReaderSettings(
+        themeIndex: 3,
+        systemBrightness: false,
+        brightness: .23,
+        commentBubbles: false,
+      );
+      await ReaderSettingsRepository().save(
+        preferences,
+        bookId: 'local_platform_brightness',
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorObservers: [readerRouteObserver],
+          home: ReaderScreen(
+            book: Book(
+              bookId: 'local_platform_brightness',
+              bookName: '亮度测试',
+              author: '测试',
+            ),
+            chapters: [
+              Chapter(
+                itemId: 'brightness-chapter',
+                title: '章节',
+                content: '阅读窗口亮度与系统设置互不干扰。\n\n' * 20,
+              ),
+            ],
+            initialSettings: const ReaderSettingsRecord(
+              ReaderSettings(
+                themeIndex: 3,
+                systemBrightness: false,
+                brightness: .23,
+                commentBubbles: false,
+              ),
+              bookOverride: true,
+            ),
+          ),
+        ),
+      );
+      expect(
+        tester.widget<Scaffold>(find.byType(Scaffold)).backgroundColor,
+        const Color(0xFF18181A),
+      );
+      await tester.pumpAndSettle();
+      Future<double> brightness() async =>
+          ((await native.invokeMapMethod(
+                    'getReaderCapabilities',
+                  ))!['windowBrightness']
+                  as num)
+              .toDouble();
+      expect(await brightness(), closeTo(.23, .001));
+      await tester.tapAt(tester.getCenter(find.byType(CustomScrollView)));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('排版设置'));
+      await tester.pumpAndSettle();
+      debugPrint('FANQIE_READER_SETTINGS_CAPTURE');
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(seconds: 2)),
+      );
+      await tester.tap(find.byTooltip('关闭设置'));
+      await tester.pumpAndSettle();
+      expect(await brightness(), closeTo(.23, .001));
+      final context = tester.element(find.byType(ReaderScreen));
+      final navigator = Navigator.of(context);
+      unawaited(
+        showModalBottomSheet<void>(
+          context: context,
+          backgroundColor: Colors.black,
+          builder: (_) => const SizedBox(height: 100, child: Text('阅读弹层')),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(await brightness(), closeTo(.23, .001));
+      navigator.pop();
+      await tester.pumpAndSettle();
+      unawaited(
+        navigator.push(
+          MaterialPageRoute<void>(
+            builder: (_) => const Scaffold(body: Text('阅读器之外')),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+      expect(await brightness(), closeTo(original, .001));
+      navigator.pop();
+      await tester.pumpAndSettle();
+      expect(await brightness(), closeTo(.23, .001));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pumpAndSettle();
+      expect(await brightness(), closeTo(original, .001));
+      await ReaderSettingsRepository().clearBookOverride(
+        'local_platform_brightness',
+      );
+    },
+  );
 
   // Run via scripts/test_android_platform.sh, which backgrounds and locks the
   // test emulator after READY, and restores it only after VERIFIED.

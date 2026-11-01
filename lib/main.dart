@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'app_theme.dart';
 import 'screens/main_screen.dart';
+import 'services/reader_route_observer.dart';
 
 void main() {
   // 确保 Flutter 绑定已初始化
@@ -41,6 +42,7 @@ class FanqieApp extends StatelessWidget {
       title: '番茄Reader',
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
+      navigatorObservers: [readerRouteObserver],
       home: const MainScreen(),
     );
   }

@@ -52,19 +52,31 @@ class ParagraphCommentSheet extends StatefulWidget {
       context: context,
       isScrollControlled: true,
       backgroundColor: Colors.transparent,
-      builder: (ctx) => ParagraphCommentSheet(
-        bookId: bookId,
-        chapterId: chapterId,
-        paraIndex: paraIndex,
-        paraText: paraText,
-        chapterTitle: chapterTitle,
-        isBookReview: isBookReview,
-        isChapterComment: isChapterComment,
-        backgroundColor: backgroundColor,
-        textColor: textColor,
-        secondaryColor: secondaryColor,
-        highlightColor: highlightColor,
-        onLocateParagraph: onLocateParagraph,
+      builder: (ctx) => Theme(
+        data: ThemeData(
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: textColor,
+            brightness: backgroundColor.computeLuminance() < .2
+                ? Brightness.dark
+                : Brightness.light,
+            surface: backgroundColor,
+            onSurface: textColor,
+          ),
+        ),
+        child: ParagraphCommentSheet(
+          bookId: bookId,
+          chapterId: chapterId,
+          paraIndex: paraIndex,
+          paraText: paraText,
+          chapterTitle: chapterTitle,
+          isBookReview: isBookReview,
+          isChapterComment: isChapterComment,
+          backgroundColor: backgroundColor,
+          textColor: textColor,
+          secondaryColor: secondaryColor,
+          highlightColor: highlightColor,
+          onLocateParagraph: onLocateParagraph,
+        ),
       ),
     );
   }
@@ -268,7 +280,10 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
     });
 
     try {
-      final result = await _apiService.getCommentReplies(commentId, cursor: cursor);
+      final result = await _apiService.getCommentReplies(
+        commentId,
+        cursor: cursor,
+      );
       if (mounted && result != null) {
         setState(() {
           _repliesLoadingMap[commentId] = false;
@@ -317,7 +332,10 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
                   errorBuilder: (context, error, stackTrace) => Container(
                     padding: const EdgeInsets.all(24),
                     color: Colors.black87,
-                    child: const Text('图片加载失败', style: TextStyle(color: Colors.white)),
+                    child: const Text(
+                      '图片加载失败',
+                      style: TextStyle(color: Colors.white),
+                    ),
                   ),
                 ),
               ),
@@ -362,7 +380,10 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
     final isDark = widget.backgroundColor.computeLuminance() < 0.2;
     final cardColor = isDark
         ? widget.backgroundColor.withValues(alpha: 0.9)
-        : Color.alphaBlend(Colors.black.withValues(alpha: 0.04), widget.backgroundColor);
+        : Color.alphaBlend(
+            Colors.black.withValues(alpha: 0.04),
+            widget.backgroundColor,
+          );
 
     return Container(
       height: sheetHeight,
@@ -404,8 +425,10 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
                     widget.isBookReview
                         ? '书籍评价'
                         : (widget.isChapterComment
-                            ? '本章评论'
-                            : (widget.paraIndex == null ? '本章段评' : '第 ${widget.paraIndex! + 1} 段评论')),
+                              ? '本章评论'
+                              : (widget.paraIndex == null
+                                    ? '本章段评'
+                                    : '第 ${widget.paraIndex! + 1} 段评论')),
                     style: TextStyle(
                       fontSize: 18,
                       fontWeight: FontWeight.bold,
@@ -436,7 +459,11 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
                       ),
                     ),
                   IconButton(
-                    icon: Icon(Icons.close, size: 20, color: widget.secondaryColor),
+                    icon: Icon(
+                      Icons.close,
+                      size: 20,
+                      color: widget.secondaryColor,
+                    ),
                     onPressed: () => Navigator.of(context).pop(),
                     visualDensity: VisualDensity.compact,
                   ),
@@ -447,16 +474,24 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             // 原文引用卡片（如果是段评则显示引用的段落原文）
             if (widget.paraText.trim().isNotEmpty)
               Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 4,
+                ),
                 child: Container(
                   width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
                   decoration: BoxDecoration(
                     color: widget.highlightColor.withValues(alpha: 0.5),
                     borderRadius: BorderRadius.circular(8),
                     border: Border(
                       left: BorderSide(
-                        color: Theme.of(context).primaryColor.withValues(alpha: 0.8),
+                        color: Theme.of(
+                          context,
+                        ).primaryColor.withValues(alpha: 0.8),
                         width: 3,
                       ),
                     ),
@@ -497,9 +532,7 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             const Divider(height: 1, thickness: 0.5),
 
             // 评论列表主体
-            Expanded(
-              child: _buildListContent(cardColor, isDark),
-            ),
+            Expanded(child: _buildListContent(cardColor, isDark)),
           ],
         ),
       ),
@@ -530,7 +563,9 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
           style: TextStyle(
             fontSize: 12,
             fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-            color: isSelected ? Colors.white : widget.textColor.withValues(alpha: 0.8),
+            color: isSelected
+                ? Colors.white
+                : widget.textColor.withValues(alpha: 0.8),
           ),
         ),
       ),
@@ -564,7 +599,11 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.chat_bubble_outline, size: 48, color: widget.secondaryColor.withValues(alpha: 0.5)),
+              Icon(
+                Icons.chat_bubble_outline,
+                size: 48,
+                color: widget.secondaryColor.withValues(alpha: 0.5),
+              ),
               const SizedBox(height: 12),
               Text(
                 _errorMessage!,
@@ -592,7 +631,11 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(Icons.chat_bubble_outline, size: 48, color: widget.secondaryColor.withValues(alpha: 0.4)),
+            Icon(
+              Icons.chat_bubble_outline,
+              size: 48,
+              color: widget.secondaryColor.withValues(alpha: 0.4),
+            ),
             const SizedBox(height: 10),
             Text(
               '该段落暂无段评',
@@ -696,7 +739,8 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
                         else if (comment.isVip)
                           _buildBadge('VIP', Colors.amber.shade700),
                         for (final t in comment.titles)
-                          if (t != '作者' && t != 'VIP') _buildBadge(t, widget.secondaryColor),
+                          if (t != '作者' && t != 'VIP')
+                            _buildBadge(t, widget.secondaryColor),
                       ],
                     ),
                     const SizedBox(height: 2),
@@ -723,7 +767,10 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
                   const SizedBox(width: 4),
                   Text(
                     comment.diggCount > 0 ? '${comment.diggCount}' : '赞',
-                    style: TextStyle(fontSize: 12, color: widget.secondaryColor),
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: widget.secondaryColor,
+                    ),
                   ),
                 ],
               ),
@@ -781,14 +828,15 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
                 onTap: () => _toggleReplies(comment.id),
                 borderRadius: BorderRadius.circular(4),
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 4, horizontal: 2),
+                  padding: const EdgeInsets.symmetric(
+                    vertical: 4,
+                    horizontal: 2,
+                  ),
                   child: Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
                       Text(
-                        isExpanded
-                            ? '收起回复'
-                            : '查看 ${comment.replyCount} 条回复',
+                        isExpanded ? '收起回复' : '查看 ${comment.replyCount} 条回复',
                         style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.w600,
@@ -796,7 +844,9 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
                         ),
                       ),
                       Icon(
-                        isExpanded ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                        isExpanded
+                            ? Icons.keyboard_arrow_up
+                            : Icons.keyboard_arrow_down,
                         size: 16,
                         color: Theme.of(context).primaryColor,
                       ),
@@ -868,7 +918,9 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             CircleAvatar(
               radius: 10,
               backgroundColor: widget.secondaryColor.withValues(alpha: 0.2),
-              backgroundImage: reply.avatar.isNotEmpty ? NetworkImage(reply.avatar) : null,
+              backgroundImage: reply.avatar.isNotEmpty
+                  ? NetworkImage(reply.avatar)
+                  : null,
               child: reply.avatar.isEmpty
                   ? Text(
                       reply.userName.isNotEmpty ? reply.userName[0] : '友',
@@ -896,13 +948,19 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             const SizedBox(width: 6),
             Text(
               _formatTime(reply.createTime),
-              style: TextStyle(fontSize: 10, color: widget.secondaryColor.withValues(alpha: 0.7)),
+              style: TextStyle(
+                fontSize: 10,
+                color: widget.secondaryColor.withValues(alpha: 0.7),
+              ),
             ),
             const Spacer(),
             if (reply.diggCount > 0)
               Text(
                 '${reply.diggCount}赞',
-                style: TextStyle(fontSize: 10, color: widget.secondaryColor.withValues(alpha: 0.8)),
+                style: TextStyle(
+                  fontSize: 10,
+                  color: widget.secondaryColor.withValues(alpha: 0.8),
+                ),
               ),
           ],
         ),

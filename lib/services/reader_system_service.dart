@@ -7,9 +7,35 @@ class ReaderSystemService {
   static const MethodChannel _channel = MethodChannel('com.fanqie.fanqie_flutter/download');
 
   static void Function(String direction)? _volumeKeyCallback;
+  static Object? _volumeOwner;
   static void Function(String method, dynamic args)? _ttsCallback;
   static void Function(String method)? _mediaCallback;
   static bool _handlerInitialized = false;
+  static Object? _brightnessOwner;
+  static Object? _screenOwner;
+
+  static Future<void> setWindowBrightness(Object owner, double? value) async {
+    _brightnessOwner = owner;
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('setReaderBrightness', {
+        'value': value == null ? -1.0 : value.clamp(.05, 1.0),
+      });
+    } catch (_) {
+      // Unsupported platforms never change global brightness as a fallback.
+    }
+  }
+
+  static Future<void> restoreWindowBrightness(Object owner) async {
+    if (!identical(_brightnessOwner, owner)) return;
+    _brightnessOwner = null;
+    // Non-reader routes currently use the application's light theme.
+    SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle.dark);
+    if (!Platform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('restoreReaderBrightness');
+    } catch (_) {}
+  }
 
   /// A hint for prefetch policy, never proof that a request will succeed.
   static Future<String> getNetworkType() async {
@@ -38,9 +64,13 @@ class ReaderSystemService {
   }
 
   /// 注册音量键物理滚动回调
-  static void registerVolumeKeyListener(void Function(String direction)? callback) {
+  static void registerVolumeKeyListener(
+    void Function(String direction)? callback, {Object? owner}
+  ) {
     _ensureGlobalHandler();
+    if (callback == null && owner != null && !identical(owner, _volumeOwner)) return;
     _volumeKeyCallback = callback;
+    _volumeOwner = callback == null ? null : owner;
   }
 
   /// 注册全局 TTS/音频完成事件回调
@@ -55,7 +85,8 @@ class ReaderSystemService {
   }
 
   /// 开启或关闭音量键按键拦截
-  static Future<void> setVolumeKeyScrollEnabled(bool enabled) async {
+  static Future<void> setVolumeKeyScrollEnabled(bool enabled, {Object? owner}) async {
+    if (owner != null && !identical(owner, _volumeOwner)) return;
     if (!Platform.isAndroid) return;
     try {
       await _channel.invokeMethod('setVolumeKeyScrollEnabled', {'enabled': enabled});
@@ -65,7 +96,13 @@ class ReaderSystemService {
   }
 
   /// 设置阅读时屏幕常亮
-  static Future<void> setKeepScreenOn(bool enabled) async {
+  static Future<void> setKeepScreenOn(bool enabled, {Object? owner}) async {
+    if (enabled) {
+      _screenOwner = owner;
+    } else {
+      if (owner != null && !identical(owner, _screenOwner)) return;
+      _screenOwner = null;
+    }
     if (!Platform.isAndroid) return;
     try {
       await _channel.invokeMethod('setKeepScreenOn', {'enabled': enabled});

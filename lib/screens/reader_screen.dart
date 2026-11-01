@@ -7,12 +7,18 @@ import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import '../models/book.dart';
 import '../models/chapter.dart';
 import '../models/comment.dart';
 import '../models/bookmark.dart';
 import '../models/reading_position.dart';
+import '../models/reader_settings.dart';
+import '../models/reader_theme.dart';
+import '../services/reader_settings_repository.dart';
+import '../services/reader_route_observer.dart';
+import '../widgets/reader_settings_sheet.dart';
+
+export '../models/reader_theme.dart';
 import 'book_detail_screen.dart';
 import '../services/api_service.dart';
 import '../services/bookshelf_service.dart';
@@ -32,30 +38,12 @@ import '../widgets/reader_page_view.dart';
 import '../widgets/reader_comment_bubble.dart';
 import '../widgets/reader_cache_sheet.dart';
 
-/// 阅读器主题配置
-class ReaderTheme {
-  final String name;
-  final Color backgroundColor;
-  final Color textColor;
-  final Color secondaryColor;
-  final Color highlightColor; // 主题专属同色系温和高亮底色
-  final Brightness systemBrightness;
-
-  const ReaderTheme({
-    required this.name,
-    required this.backgroundColor,
-    required this.textColor,
-    required this.secondaryColor,
-    required this.highlightColor,
-    required this.systemBrightness,
-  });
-}
-
 class ReaderScreen extends StatefulWidget {
   final Book book;
   final List<Chapter> chapters;
   final int initialChapterIndex;
   final bool resumeSavedPosition;
+  final ReaderSettingsRecord? initialSettings;
   final Future<String?> Function(Chapter chapter)? chapterContentLoader;
   final Future<ChapterCommentStats?> Function(Chapter chapter)?
   chapterCommentStatsLoader;
@@ -66,6 +54,7 @@ class ReaderScreen extends StatefulWidget {
     required this.chapters,
     this.initialChapterIndex = 0,
     this.resumeSavedPosition = true,
+    this.initialSettings,
     this.chapterContentLoader,
     this.chapterCommentStatsLoader,
   });
@@ -75,7 +64,13 @@ class ReaderScreen extends StatefulWidget {
 }
 
 class _ReaderScreenState extends State<ReaderScreen>
-    with SingleTickerProviderStateMixin, WidgetsBindingObserver {
+    with SingleTickerProviderStateMixin, WidgetsBindingObserver, RouteAware {
+  final ReaderSettingsRepository _settingsRepository = ReaderSettingsRepository();
+  ReaderSettings _readerPreferences = const ReaderSettings();
+  bool _bookSettingsOverride = false;
+  PageRoute<dynamic>? _observedRoute;
+  bool _readerRouteActive = true;
+  bool _dependenciesReady = false;
   final ApiService _apiService = ApiService();
   final BookshelfService _bookshelfService = BookshelfService();
   final ReadingHistoryService _readingHistoryService = ReadingHistoryService();
@@ -132,7 +127,6 @@ class _ReaderScreenState extends State<ReaderScreen>
   int? _requestedChapterIndex;
   Timer? _chapterWaitTimer;
   final ValueNotifier<bool> _chapterWaitingNotifier = ValueNotifier(false);
-  final ValueNotifier<int> _settingsVersion = ValueNotifier(0);
   final List<VoidCallback> _pendingSettings = [];
   bool _preferencesDirty = false;
   int _verticalRestoreGeneration = 0;
@@ -200,7 +194,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   double _horizontalPadding = 20.0; // 页面边距：14 紧凑, 20 适中, 28 宽松
   bool _volumeKeyScroll = false; // 音量物理键翻页滚动
   bool get _canUseVolumeKeys =>
-      _volumeKeyScroll && !_ttsService.isActive && _readerPanels == 0;
+      _readerRouteActive && _volumeKeyScroll && !_ttsService.isActive && _readerPanels == 0;
   bool _showCommentBubbles = true; // 是否显示段评气泡
   bool _indentTwoChars = true; // 首行缩进两字符
   double _letterSpacing = 0.5; // 字间距
@@ -212,7 +206,6 @@ class _ReaderScreenState extends State<ReaderScreen>
   DateTime _lastBubbleTapTime = DateTime.fromMillisecondsSinceEpoch(0);
   List<ReadingNote> _cachedNotes = [];
   String _tapLayout = 'balanced';
-  int _fontLoadGeneration = 0;
   int _ttsStartGeneration = 0;
   int _readerPanels = 0;
   Completer<void>? _panelsClosed;
@@ -236,52 +229,85 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  static const List<ReaderTheme> _themes = [
-    ReaderTheme(
-      name: '白昼',
-      backgroundColor: Color(0xFFFAF9F6),
-      textColor: Color(0xFF222222),
-      secondaryColor: Color(0xFF757575),
-      highlightColor: Color(0xFFE8E2D2), // 淡雅米暖底色，温润不刺眼
-      systemBrightness: Brightness.light,
-    ),
-    ReaderTheme(
-      name: '羊皮纸',
-      backgroundColor: Color(0xFFF5EEDC),
-      textColor: Color(0xFF3B2F2F),
-      secondaryColor: Color(0xFF7E7265),
-      highlightColor: Color(0xFFE5DAC4), // 羊皮纸同色系浅茶色，浑然一体
-      systemBrightness: Brightness.light,
-    ),
-    ReaderTheme(
-      name: '护眼绿',
-      backgroundColor: Color(0xFFE2EED9),
-      textColor: Color(0xFF233621),
-      secondaryColor: Color(0xFF5D7058),
-      highlightColor: Color(0xFFCEE0C3), // 护眼绿同色系浅春草色，清爽柔和
-      systemBrightness: Brightness.light,
-    ),
-    ReaderTheme(
-      name: '暗夜',
-      backgroundColor: Color(0xFF18181A),
-      textColor: Color(0xFFB8B8B8),
-      secondaryColor: Color(0xFF5C5C60),
-      highlightColor: Color(0xFF28282C), // 沉稳深碳灰，夜晚完全不眩光
-      systemBrightness: Brightness.dark,
-    ),
-    ReaderTheme(
-      name: '纯黑',
-      backgroundColor: Color(0xFF000000),
-      textColor: Color(0xFFC7C7CC),
-      secondaryColor: Color(0xFF636366),
-      highlightColor: Color(0xFF222224), // 哑光低对比深灰，OLED 省电柔和
-      systemBrightness: Brightness.dark,
-    ),
-  ];
+  static const List<ReaderTheme> _themes = ReaderTheme.presets;
+
+  bool get _systemDark => _dependenciesReady
+      ? MediaQuery.platformBrightnessOf(context) == Brightness.dark
+      : WidgetsBinding.instance.platformDispatcher.platformBrightness == Brightness.dark;
+
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    _dependenciesReady = true;
+    final route = ModalRoute.of(context);
+    if (route is PageRoute && !identical(route, _observedRoute)) {
+      readerRouteObserver.unsubscribe(this);
+      _observedRoute = route;
+      readerRouteObserver.subscribe(this, route);
+    }
+    _refreshAutomaticTheme();
+    _applyWindowBrightness();
+  }
+
+  @override
+  void didPush() {
+    _readerRouteActive = true;
+    ReaderSystemService.setKeepScreenOn(true, owner: this);
+    ReaderSystemService.registerVolumeKeyListener(_onVolumeScroll, owner: this);
+    ReaderSystemService.setVolumeKeyScrollEnabled(_canUseVolumeKeys, owner: this);
+    _applyWindowBrightness();
+  }
+  @override
+  void didPushNext() {
+    _readerRouteActive = false;
+    ReaderSystemService.setKeepScreenOn(false, owner: this);
+    _pauseAutoScroll();
+    ReaderSystemService.setVolumeKeyScrollEnabled(false, owner: this);
+    ReaderSystemService.restoreWindowBrightness(this);
+  }
+  @override
+  void didPopNext() {
+    didPush();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_readerRouteActive) return;
+      _ttsPaintKey = null;
+      _onTtsStateChanged();
+    });
+  }
+  @override
+  void didPop() {
+    _readerRouteActive = false;
+    ReaderSystemService.setKeepScreenOn(false, owner: this);
+    _pauseAutoScroll();
+    ReaderSystemService.setVolumeKeyScrollEnabled(false, owner: this);
+    ReaderSystemService.restoreWindowBrightness(this);
+  }
+  @override
+  void didChangePlatformBrightness() => _refreshAutomaticTheme();
+
+  void _applyWindowBrightness() {
+    if (!mounted || !_readerRouteActive) return;
+    ReaderSystemService.setWindowBrightness(
+      this, _readerPreferences.systemBrightness ? null : _readerPreferences.brightness,
+    );
+  }
+
+  void _refreshAutomaticTheme() {
+    if (!mounted) return;
+    final next = _readerPreferences.effectiveTheme(systemDark: _systemDark, now: DateTime.now());
+    if (next != _themeIndex) {
+      _applyReaderSetting(() => _themeIndex = next, layoutChanged: false, persist: false);
+    }
+  }
 
   @override
   void initState() {
     super.initState();
+    final initial = widget.initialSettings;
+    if (initial != null) {
+      _bookSettingsOverride = initial.bookOverride;
+      _assignReaderSettings(initial.settings);
+    }
     _currentActiveIndex = widget.initialChapterIndex.clamp(
       0,
       widget.chapters.length - 1,
@@ -331,7 +357,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             SnackBar(content: Text(target!.notice!)),
           );
         }
-        ReaderSystemService.setVolumeKeyScrollEnabled(_canUseVolumeKeys);
+        ReaderSystemService.setVolumeKeyScrollEnabled(_canUseVolumeKeys, owner: this);
       }
     });
     _scrollController.addListener(_onScroll);
@@ -339,8 +365,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     _ttsService.addListener(_onTtsStateChanged);
 
     // 启用阅读屏幕常亮与定时电量/时间更新
-    ReaderSystemService.setKeepScreenOn(true);
-    ReaderSystemService.registerVolumeKeyListener(_onVolumeScroll);
+    ReaderSystemService.setKeepScreenOn(true, owner: this);
+    ReaderSystemService.registerVolumeKeyListener(_onVolumeScroll, owner: this);
     _updateStatusInfo();
     _statusTimer = Timer.periodic(
       const Duration(seconds: 30),
@@ -350,6 +376,8 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void dispose() {
+    readerRouteObserver.unsubscribe(this);
+    ReaderSystemService.restoreWindowBrightness(this);
     _prefetchGeneration++;
     _prefetchQueue.clear();
     ReaderCacheService.unpinBook(widget.book.bookId);
@@ -388,11 +416,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     _ttsHighlightNotifier.dispose();
     _positionVersion.dispose();
     _chapterWaitingNotifier.dispose();
-    _settingsVersion.dispose();
     _restorationImage?.dispose();
-    ReaderSystemService.setKeepScreenOn(false);
-    ReaderSystemService.setVolumeKeyScrollEnabled(false);
-    ReaderSystemService.registerVolumeKeyListener(null);
+    ReaderSystemService.setKeepScreenOn(false, owner: this);
+    ReaderSystemService.setVolumeKeyScrollEnabled(false, owner: this);
+    ReaderSystemService.registerVolumeKeyListener(null, owner: this);
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
     _apiService.dispose();
@@ -414,9 +441,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     if (key == _ttsPaintKey) return;
     _ttsPaintKey = key;
-    ReaderSystemService.setVolumeKeyScrollEnabled(_canUseVolumeKeys);
+    ReaderSystemService.setVolumeKeyScrollEnabled(_canUseVolumeKeys, owner: this);
     _ttsHighlightNotifier.value++;
-    if (_ttsService.isPlaying &&
+    if (_readerRouteActive && _ttsService.isPlaying &&
         !_isAutoScrolling &&
         !_showControls &&
         !_restoringPosition &&
@@ -493,6 +520,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       _currentTimeStr = '$hour:$minute';
       _batteryLevel = battery;
       _statusTextNotifier.value = '$_currentTimeStr|$_batteryLevel';
+      _refreshAutomaticTheme();
     }
   }
 
@@ -639,30 +667,64 @@ class _ReaderScreenState extends State<ReaderScreen>
     _checkBookmarkStatus();
   }
 
+  ReaderSettings _captureReaderSettings() => _readerPreferences.copyWith(
+    fontSize: _fontSize, lineHeight: _lineHeight, letterSpacing: _letterSpacing,
+    paragraphSpacing: _paragraphSpacing, horizontalPadding: _horizontalPadding,
+    fontFamily: _fontFamily, indent: _indentTwoChars, pageMode: _isPageMode,
+    pageAnimation: _pageTurnAnimation, commentBubbles: _showCommentBubbles,
+    volumeKeys: _volumeKeyScroll, tapLayout: _tapLayout,
+  );
+
+  void _assignReaderSettings(ReaderSettings value) {
+    _readerPreferences = value;
+    _fontSize = value.fontSize;
+    _lineHeight = value.lineHeight;
+    _letterSpacing = value.letterSpacing;
+    _paragraphSpacing = value.paragraphSpacing;
+    _horizontalPadding = value.horizontalPadding;
+    _fontFamily = value.fontFamily;
+    _indentTwoChars = value.indent;
+    _isPageMode = value.pageMode;
+    _pageTurnAnimation = value.pageAnimation;
+    _showCommentBubbles = value.commentBubbles;
+    _volumeKeyScroll = value.volumeKeys;
+    _tapLayout = value.tapLayout;
+    _themeIndex = value.effectiveTheme(systemDark: _systemDark, now: DateTime.now());
+  }
+
+  Object _layoutPreferences(ReaderSettings value) => (
+    value.fontSize, value.lineHeight, value.letterSpacing, value.paragraphSpacing,
+    value.horizontalPadding, value.fontFamily, value.indent,
+    value.pageMode, value.commentBubbles,
+  );
+
+  Future<void> _receiveSettings(ReaderSettings value, bool bookOverride) async {
+    if (!mounted) return;
+    final before = _captureReaderSettings();
+    final changedLayout = _layoutPreferences(before) != _layoutPreferences(value);
+    final changedPaint = _themeIndex != value.effectiveTheme(systemDark: _systemDark, now: DateTime.now()) ||
+        before.pageAnimation != value.pageAnimation || before.tapLayout != value.tapLayout;
+    void apply() {
+      _assignReaderSettings(value);
+      _bookSettingsOverride = bookOverride;
+      _applyWindowBrightness();
+      ReaderSystemService.setVolumeKeyScrollEnabled(_canUseVolumeKeys, owner: this);
+    }
+    if (changedLayout || changedPaint) {
+      _applyReaderSetting(apply, layoutChanged: changedLayout, persist: false);
+    } else {
+      // Brightness slider previews must not rebuild or re-paginate the text.
+      apply();
+    }
+  }
+
   Future<void> _loadPreferences() async {
     _cachePolicy = await ReaderCachePolicy.load();
-    final prefs = await SharedPreferences.getInstance();
+    final record = widget.initialSettings ?? await _settingsRepository.load(widget.book.bookId);
     if (!mounted) return;
-    setState(() {
-      _fontSize = prefs.getDouble('reader_font_size') ?? 18.0;
-      _lineHeight = prefs.getDouble('reader_line_height') ?? 1.8;
-      _themeIndex = (prefs.getInt('reader_theme_index') ?? 1).clamp(
-        0,
-        _themes.length - 1,
-      );
-      _horizontalPadding = prefs.getDouble('reader_horizontal_padding') ?? 20.0;
-      _volumeKeyScroll = prefs.getBool('reader_volume_key_scroll') ?? false;
-      _showCommentBubbles =
-          prefs.getBool('reader_show_comment_bubbles') ?? true;
-      _indentTwoChars = prefs.getBool('reader_indent_two_chars') ?? true;
-      _letterSpacing = prefs.getDouble('reader_letter_spacing') ?? 0.5;
-      _paragraphSpacing = prefs.getDouble('reader_paragraph_spacing') ?? 14.0;
-      _fontFamily = prefs.getString('reader_font_family') ?? 'system';
-      _isPageMode = prefs.getBool('reader_is_page_mode') ?? false;
-      _pageTurnAnimation =
-          prefs.getString('reader_page_turn_animation') ?? 'cover';
-      _tapLayout = prefs.getString('reader_tap_layout') ?? 'balanced';
-    });
+    _bookSettingsOverride = record.bookOverride;
+    setState(() => _assignReaderSettings(record.settings));
+    _applyWindowBrightness();
     try {
       await ReaderFontService.ensureLoaded(_fontFamily);
     } catch (_) {
@@ -683,34 +745,16 @@ class _ReaderScreenState extends State<ReaderScreen>
     _preferencesTimer?.cancel();
     if (!_preferencesDirty) return _preferencesWrites;
     _preferencesDirty = false;
-    final values = <String, Object>{
-      'reader_font_size': _fontSize,
-      'reader_line_height': _lineHeight,
-      'reader_theme_index': _themeIndex,
-      'reader_horizontal_padding': _horizontalPadding,
-      'reader_volume_key_scroll': _volumeKeyScroll,
-      'reader_show_comment_bubbles': _showCommentBubbles,
-      'reader_indent_two_chars': _indentTwoChars,
-      'reader_letter_spacing': _letterSpacing,
-      'reader_paragraph_spacing': _paragraphSpacing,
-      'reader_font_family': _fontFamily,
-      'reader_is_page_mode': _isPageMode,
-      'reader_page_turn_animation': _pageTurnAnimation,
-      'reader_tap_layout': _tapLayout,
-    };
+    final settings = _captureReaderSettings();
+    final scope = _bookSettingsOverride ? widget.book.bookId : null;
     _preferencesWrites = _preferencesWrites.catchError((_) {}).then((_) async {
-      final prefs = await SharedPreferences.getInstance();
-      for (final entry in values.entries) {
-        final value = entry.value;
-        if (value is bool) {
-          await prefs.setBool(entry.key, value);
-        } else if (value is int) {
-          await prefs.setInt(entry.key, value);
-        } else if (value is double) {
-          await prefs.setDouble(entry.key, value);
-        } else if (value is String) {
-          await prefs.setString(entry.key, value);
-        }
+      await _settingsRepository.save(settings, bookId: scope);
+    }).catchError((_) {
+      _preferencesDirty = true;
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('阅读设置暂未保存，请检查存储空间')),
+      );
       }
     });
     return _preferencesWrites;
@@ -1075,10 +1119,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
-  void _applyReaderSetting(VoidCallback action, {bool layoutChanged = true}) {
+  void _applyReaderSetting(VoidCallback action, {bool layoutChanged = true, bool persist = true}) {
+    if (!mounted) return;
     if (_pageViewKey.currentState?.isBusy == true) {
       _pendingSettings.add(
-        () => _applyReaderSetting(action, layoutChanged: layoutChanged),
+        () => _applyReaderSetting(action, layoutChanged: layoutChanged, persist: persist),
       );
       return;
     }
@@ -1113,8 +1158,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (previousMode && !_isPageMode) {
       _captureRestorationImage(fromPage: true);
     }
-    _settingsVersion.value++;
-    _savePreferences();
+    if (persist) _savePreferences();
     if (layoutChanged && !_isPageMode) _restoreVerticalPosition();
     if (_isPageMode) _dropRestorationImage();
   }
@@ -1122,9 +1166,12 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
+      if (_readerRouteActive) ReaderSystemService.setKeepScreenOn(true, owner: this);
+      _refreshAutomaticTheme();
+      _applyWindowBrightness();
       _ttsPaintKey = null;
       _onTtsStateChanged();
-      if (_resumeAutoAfterLifecycle && _isAutoScrolling) _startAutoScroll();
+      if (_readerRouteActive && _resumeAutoAfterLifecycle && _isAutoScrolling) _startAutoScroll();
       _resumeAutoAfterLifecycle = false;
     } else {
       _savePositionNow();
@@ -1799,7 +1846,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   void _beginReaderPanel() {
     _pageViewKey.currentState?.clearQueuedTurns();
     if (_readerPanels++ == 0) _panelsClosed = Completer<void>();
-    ReaderSystemService.setVolumeKeyScrollEnabled(false);
+    ReaderSystemService.setVolumeKeyScrollEnabled(false, owner: this);
   }
 
   void _endReaderPanel() {
@@ -1809,23 +1856,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _panelsClosed!.complete();
       }
       if (mounted) {
-        ReaderSystemService.setVolumeKeyScrollEnabled(_canUseVolumeKeys);
-      }
-    }
-  }
-
-  Future<void> _selectReaderFont(String value) async {
-    final generation = ++_fontLoadGeneration;
-    try {
-      await ReaderFontService.ensureLoaded(value);
-      if (mounted && generation == _fontLoadGeneration) {
-        _applyReaderSetting(() => _fontFamily = value);
-      }
-    } catch (_) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('字体加载失败，已保留当前字体与阅读位置')));
+        ReaderSystemService.setVolumeKeyScrollEnabled(_canUseVolumeKeys, owner: this);
       }
     }
   }
@@ -1929,7 +1960,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
-      builder: (sheetContext) => StatefulBuilder(
+      builder: (sheetContext) => theme.wrap(StatefulBuilder(
         builder: (context, update) {
           final filter = search.text.trim();
           final all = reverse
@@ -2245,6 +2276,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             },
           );
         },
+        ),
       ),
     ).whenComplete(() {
       searchTimer?.cancel();
@@ -2280,288 +2312,42 @@ class _ReaderScreenState extends State<ReaderScreen>
     ],
   );
 
-  void _showSettingsModal() {
+  Future<void> _showSettingsModal() async {
+    if (_readerPanels > 0) return;
     _activeSelectableParaNotifier.value = null;
     _beginReaderPanel();
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      barrierColor: Colors.black.withValues(alpha: 0.12),
-      backgroundColor: Colors.transparent,
-      builder: (context) => ValueListenableBuilder<int>(
-        valueListenable: _settingsVersion,
-        builder: (context, _, _) {
-          final theme = _themes[_themeIndex];
-          Widget section(String label, Widget control) => Padding(
-            padding: const EdgeInsets.only(bottom: 14),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  label,
-                  style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: theme.secondaryColor,
-                  ),
-                ),
-                const SizedBox(height: 6),
-                control,
-              ],
-            ),
-          );
-          return Container(
-            height: math.min(650, MediaQuery.sizeOf(context).height * 0.8),
-            decoration: BoxDecoration(
-              color: theme.backgroundColor,
-              borderRadius: const BorderRadius.vertical(
-                top: Radius.circular(20),
-              ),
-            ),
-            padding: const EdgeInsets.fromLTRB(20, 14, 20, 16),
-            child: Material(
-              color: Colors.transparent,
-              child: SingleChildScrollView(
-                physics: const BouncingScrollPhysics(),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Center(
-                      child: Container(
-                        width: 36,
-                        height: 4,
-                        margin: const EdgeInsets.only(bottom: 14),
-                        decoration: BoxDecoration(
-                          color: theme.secondaryColor.withValues(alpha: 0.3),
-                          borderRadius: BorderRadius.circular(2),
-                        ),
-                      ),
-                    ),
-                    Container(
-                      width: double.infinity,
-                      padding: const EdgeInsets.all(12),
-                      margin: const EdgeInsets.only(bottom: 14),
-                      decoration: BoxDecoration(
-                        color: theme.highlightColor,
-                        borderRadius: BorderRadius.circular(10),
-                      ),
-                      child: Text(
-                        '春风轻拂书页，故事从这里继续。',
-                        maxLines: 2,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: _fontSize,
-                          height: _lineHeight,
-                          letterSpacing: _letterSpacing,
-                          fontFamily: _resolveFontFamily(_fontFamily),
-                          color: theme.textColor,
-                        ),
-                      ),
-                    ),
-                    section(
-                      '翻页模式',
-                      _settingChoices<bool>(
-                        {false: '上下滚动', true: '左右翻页'},
-                        _isPageMode,
-                        (value) =>
-                            _applyReaderSetting(() => _isPageMode = value),
-                      ),
-                    ),
-                    section(
-                      '翻页动画',
-                      _settingChoices<String>(
-                        {
-                          'cover': '覆盖',
-                          'simulation': '仿真',
-                          'slide': '滑动',
-                          'fade': '渐变',
-                          'none': '无动画',
-                        },
-                        _pageTurnAnimation,
-                        (value) {
-                          final changingMode = !_isPageMode;
-                          _applyReaderSetting(() {
-                            _pageTurnAnimation = value;
-                            _isPageMode = true;
-                          }, layoutChanged: changingMode);
-                        },
-                      ),
-                    ),
-                    section(
-                      '字号大小',
-                      Row(
-                        children: [
-                          OutlinedButton(
-                            onPressed: _fontSize > 13
-                                ? () => _applyReaderSetting(
-                                    () =>
-                                        _fontSize = math.max(13, _fontSize - 1),
-                                  )
-                                : null,
-                            child: const Text('A -'),
-                          ),
-                          Padding(
-                            padding: const EdgeInsets.symmetric(horizontal: 18),
-                            child: Text(
-                              '${_fontSize.toInt()}',
-                              style: TextStyle(color: theme.textColor),
-                            ),
-                          ),
-                          OutlinedButton(
-                            onPressed: _fontSize < 28
-                                ? () => _applyReaderSetting(
-                                    () =>
-                                        _fontSize = math.min(28, _fontSize + 1),
-                                  )
-                                : null,
-                            child: const Text('A +'),
-                          ),
-                        ],
-                      ),
-                    ),
-                    section(
-                      '行间距',
-                      _settingChoices<double>(
-                        {1.5: '紧凑 1.5', 1.8: '适中 1.8', 2.2: '宽松 2.2'},
-                        _lineHeight,
-                        (value) =>
-                            _applyReaderSetting(() => _lineHeight = value),
-                      ),
-                    ),
-                    section(
-                      '字间距',
-                      _settingChoices<double>(
-                        {0: '紧凑 0.0', 0.5: '适中 0.5', 1.2: '宽松 1.2'},
-                        _letterSpacing,
-                        (value) =>
-                            _applyReaderSetting(() => _letterSpacing = value),
-                      ),
-                    ),
-                    section(
-                      '段间距',
-                      _settingChoices<double>(
-                        {8: '紧凑', 14: '适中', 20: '宽松'},
-                        _paragraphSpacing,
-                        (value) => _applyReaderSetting(
-                          () => _paragraphSpacing = value,
-                        ),
-                      ),
-                    ),
-                    section(
-                      '页边距',
-                      _settingChoices<double>(
-                        {14: '紧凑', 20: '适中', 28: '宽松'},
-                        _horizontalPadding,
-                        (value) => _applyReaderSetting(
-                          () => _horizontalPadding = value,
-                        ),
-                      ),
-                    ),
-                    section(
-                      '正文字体',
-                      _settingChoices<String>(
-                        {
-                          'system': '默认',
-                          'kaiti': '楷体',
-                          'serif': '宋体',
-                          'sans-serif': '黑体',
-                        },
-                        _fontFamily,
-                        _selectReaderFont,
-                      ),
-                    ),
-                    section(
-                      '阅读背景',
-                      Wrap(
-                        spacing: 8,
-                        children: [
-                          for (var index = 0; index < _themes.length; index++)
-                            ChoiceChip(
-                              label: Text(
-                                _themes[index].name,
-                                style: TextStyle(
-                                  color: _themes[index].textColor,
-                                ),
-                              ),
-                              backgroundColor: _themes[index].backgroundColor,
-                              selectedColor: _themes[index].backgroundColor,
-                              selected: _themeIndex == index,
-                              onSelected: (selected) {
-                                if (selected) {
-                                  _applyReaderSetting(
-                                    () => _themeIndex = index,
-                                    layoutChanged: false,
-                                  );
-                                }
-                              },
-                            ),
-                        ],
-                      ),
-                    ),
-                    section(
-                      '点击热区',
-                      _settingChoices<String>(
-                        {'balanced': '左右均衡', 'right_hand': '右手单手'},
-                        _tapLayout,
-                        (value) => _applyReaderSetting(
-                          () => _tapLayout = value,
-                          layoutChanged: false,
-                        ),
-                      ),
-                    ),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(
-                        '首行缩进 (2字符)',
-                        style: TextStyle(color: theme.textColor, fontSize: 13),
-                      ),
-                      value: _indentTwoChars,
-                      onChanged: (value) =>
-                          _applyReaderSetting(() => _indentTwoChars = value),
-                    ),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(
-                        '段评气泡',
-                        style: TextStyle(color: theme.textColor, fontSize: 13),
-                      ),
-                      value: _showCommentBubbles,
-                      onChanged: (value) => _applyReaderSetting(
-                        () => _showCommentBubbles = value,
-                      ),
-                    ),
-                    SwitchListTile(
-                      contentPadding: EdgeInsets.zero,
-                      title: Text(
-                        '音量键翻页',
-                        style: TextStyle(color: theme.textColor, fontSize: 13),
-                      ),
-                      value: _volumeKeyScroll,
-                      onChanged: (value) => _applyReaderSetting(() {
-                        _volumeKeyScroll = value;
-                        ReaderSystemService.setVolumeKeyScrollEnabled(
-                          _canUseVolumeKeys,
-                        );
-                      }, layoutChanged: false),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    ).whenComplete(() {
+    try {
+      await _flushPreferences();
+      if (!mounted) return;
+      await showModalBottomSheet<void>(
+        context: context, isScrollControlled: true,
+        barrierColor: Colors.black.withValues(alpha: .12),
+        backgroundColor: _themes[_themeIndex].backgroundColor,
+        builder: (context) => FractionallySizedBox(
+          heightFactor: .85,
+          child: ReaderSettingsSheet(
+            bookId: widget.book.bookId,
+            settings: _captureReaderSettings(), bookOverride: _bookSettingsOverride,
+            onChanged: _receiveSettings,
+          ),
+        ),
+      );
+      if (mounted) {
+        final saved = await _settingsRepository.load(widget.book.bookId);
+        await _receiveSettings(saved.settings, saved.bookOverride);
+      }
+    } finally {
       _endReaderPanel();
-      _flushPreferences();
-    });
+    }
   }
 
   @override
   Widget build(BuildContext context) {
     final theme = _themes[_themeIndex];
 
-    return PopScope(
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: theme.systemUiStyle,
+      child: PopScope(
       onPopInvokedWithResult: (didPop, result) {
         if (didPop) _savePositionNow();
       },
@@ -2713,6 +2499,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             if (_isAutoScrolling) _buildAutoScrollControlBar(theme),
           ],
         ),
+      ),
       ),
     );
   }
@@ -2870,7 +2657,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                     child: CircularProgressIndicator(
                       strokeWidth: 2,
                       valueColor: AlwaysStoppedAnimation<Color>(
-                        theme.secondaryColor.withValues(alpha: 0.6),
+                        theme.secondaryColor,
                       ),
                     ),
                   )
@@ -2896,7 +2683,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             '— 已是第一章 —',
             style: TextStyle(
               fontSize: 12,
-              color: theme.secondaryColor.withValues(alpha: 0.6),
+              color: theme.secondaryColor,
             ),
           ),
         ),
@@ -2981,7 +2768,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                   ch.title,
                   style: TextStyle(
                     fontSize: 10,
-                    color: theme.secondaryColor.withValues(alpha: 0.75),
+                    color: theme.secondaryColor,
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
@@ -2992,7 +2779,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 '${_currentTimeStr.isNotEmpty ? '$_currentTimeStr  |  ' : ''}${_batteryLevel >= 0 ? '$_batteryLevel%  |  ' : ''}$percentStr%',
                 style: TextStyle(
                   fontSize: 10,
-                  color: theme.secondaryColor.withValues(alpha: 0.75),
+                  color: theme.secondaryColor,
                 ),
               ),
             ],
@@ -3494,7 +3281,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 '本章完',
                 style: TextStyle(
                   fontSize: 12,
-                  color: theme.secondaryColor.withValues(alpha: 0.75),
+                  color: theme.secondaryColor,
                   letterSpacing: 2.0,
                 ),
               ),
@@ -3750,16 +3537,8 @@ class _ReaderScreenState extends State<ReaderScreen>
       context: context,
       isScrollControlled: true,
       backgroundColor: currentTheme.backgroundColor,
-      builder: (context) => Theme(
-        data: ThemeData(
-          brightness: currentTheme.systemBrightness,
-          colorScheme: ColorScheme.fromSeed(
-            seedColor: currentTheme.textColor,
-            brightness: currentTheme.systemBrightness,
-            surface: currentTheme.backgroundColor,
-          ),
-        ),
-        child: FractionallySizedBox(
+      builder: (context) => currentTheme.wrap(
+        FractionallySizedBox(
           heightFactor: .85,
           child: ReaderCacheSheet(
             bookId: widget.book.bookId,
@@ -3802,67 +3581,30 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Widget _buildBottomBar(ReaderTheme theme) {
-    return Container(
-      decoration: BoxDecoration(
-        color: theme.backgroundColor.withValues(alpha: 0.96),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.12),
-            blurRadius: 8,
-            offset: const Offset(0, -2),
-          ),
-        ],
+    Widget item(String label, IconData icon, VoidCallback action) => Expanded(
+      child: TextButton(
+        onPressed: action,
+        style: TextButton.styleFrom(padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 10)),
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Icon(icon, color: theme.textColor, size: 22),
+          const SizedBox(height: 4),
+          Text(label, textAlign: TextAlign.center, style: TextStyle(color: theme.textColor, fontSize: 13)),
+        ]),
       ),
-      child: SafeArea(
-        top: false,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-          child: Row(
-            mainAxisAlignment: MainAxisAlignment.spaceAround,
-            children: [
-              TextButton.icon(
-                onPressed: _showDirectoryDrawer,
-                icon: Icon(
-                  Icons.menu_book_outlined,
-                  color: theme.textColor,
-                  size: 20,
-                ),
-                label: Text('目录', style: TextStyle(color: theme.textColor)),
-              ),
-              TextButton.icon(
-                onPressed: () {
-                  setState(() {
-                    _showControls = false;
-                  });
-                  _toggleAutoScroll();
-                },
-                icon: Icon(
-                  _isAutoScrolling
-                      ? Icons.pause_circle_outline
-                      : Icons.play_circle_outline,
-                  color: _isAutoScrolling
-                      ? Theme.of(context).primaryColor
-                      : theme.textColor,
-                  size: 20,
-                ),
-                label: Text(
-                  _isAutoScrolling ? '停止' : '自动阅读',
-                  style: TextStyle(
-                    color: _isAutoScrolling
-                        ? Theme.of(context).primaryColor
-                        : theme.textColor,
-                  ),
-                ),
-              ),
-              TextButton.icon(
-                onPressed: _showSettingsModal,
-                icon: Icon(Icons.text_format, color: theme.textColor, size: 20),
-                label: Text('排版设置', style: TextStyle(color: theme.textColor)),
-              ),
-            ],
-          ),
-        ),
-      ),
+    );
+    return Material(
+      color: theme.backgroundColor,
+      elevation: 6,
+      child: SafeArea(top: false, child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 12),
+        child: Row(children: [
+          item('目录', Icons.menu_book_outlined, _showDirectoryDrawer),
+          item(_isAutoScrolling ? '停止' : '自动阅读',
+            _isAutoScrolling ? Icons.pause_circle_outline : Icons.play_circle_outline,
+            () { _showControls = false; _toggleAutoScroll(); }),
+          item('排版设置', Icons.text_format, _showSettingsModal),
+        ]),
+      )),
     );
   }
 
@@ -3877,7 +3619,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     ),
     textScaler: MediaQuery.textScalerOf(context),
     horizontalPadding: _horizontalPadding,
-    paragraphSpacing: _paragraphSpacing.clamp(4.0, 14.0),
+    paragraphSpacing: _paragraphSpacing,
     inlineCommentSize: _showCommentBubbles
         ? ReaderCommentBubble.sizeFor(MediaQuery.textScalerOf(context))
         : Size.zero,
@@ -4195,7 +3937,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                         ) ...[
                           if (index > 0)
                             SizedBox(
-                              height: _paragraphSpacing.clamp(4.0, 14.0),
+                              height: _paragraphSpacing,
                             ),
                           _buildParagraphWithUnderlines(
                             page.fragments[index].text,
@@ -4228,7 +3970,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                       fontSize: 11,
                       height: 1,
                       letterSpacing: 1,
-                      color: theme.secondaryColor.withValues(alpha: 0.65),
+                      color: theme.secondaryColor,
                     ),
                   ),
                 ),

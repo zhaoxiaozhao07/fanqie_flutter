@@ -26,12 +26,30 @@ class ReaderLayout {
 
   Object get key => (
     size,
-    bodyStyle,
-    titleStyle,
+    _metrics(bodyStyle),
+    _metrics(titleStyle),
     textScaler,
     horizontalPadding,
     paragraphSpacing,
     inlineCommentSize,
+  );
+
+  // Paint-only changes (night theme, highlights) must reuse measured pages.
+  static TextStyle _metrics(TextStyle style) => TextStyle(
+    inherit: style.inherit,
+    fontSize: style.fontSize,
+    fontFamily: style.fontFamily,
+    fontFamilyFallback: style.fontFamilyFallback,
+    fontWeight: style.fontWeight,
+    fontStyle: style.fontStyle,
+    letterSpacing: style.letterSpacing,
+    wordSpacing: style.wordSpacing,
+    textBaseline: style.textBaseline,
+    height: style.height,
+    leadingDistribution: style.leadingDistribution,
+    locale: style.locale,
+    fontFeatures: style.fontFeatures,
+    fontVariations: style.fontVariations,
   );
 }
 
