@@ -30,6 +30,7 @@ class SimulationPageTurn extends StatefulWidget {
   final ValueChanged<bool>? onTurnRequested;
   final double previousTapFraction;
   final double nextTapFraction;
+  final bool reverseTapSides;
 
   const SimulationPageTurn({
     super.key,
@@ -55,6 +56,7 @@ class SimulationPageTurn extends StatefulWidget {
     this.onTurnRequested,
     this.previousTapFraction = 0.28,
     this.nextTapFraction = 0.72,
+    this.reverseTapSides = false,
   });
 
   @override
@@ -505,7 +507,8 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     final w = _viewSize.width;
     if (position.dx < w * widget.previousTapFraction ||
         position.dx > w * widget.nextTapFraction) {
-      final forward = position.dx > w * widget.nextTapFraction;
+      final right = position.dx > w * widget.nextTapFraction;
+      final forward = widget.reverseTapSides ? !right : right;
       if (widget.onTurnRequested != null) {
         widget.onTurnRequested!(forward);
       } else {

@@ -95,8 +95,7 @@ class TtsPlayerPanel extends StatelessWidget {
                     const SizedBox(width: 4),
                     IconButton(
                       icon: Icon(Icons.close, size: 18, color: secondaryColor),
-                      padding: EdgeInsets.zero,
-                      constraints: const BoxConstraints(),
+                      tooltip: '停止听书',
                       onPressed: () {
                         ttsService.stop().catchError((_) {});
                         onClose();
@@ -508,7 +507,7 @@ class TtsPlayerPanel extends StatelessWidget {
                         ),
                         const SizedBox(height: 6),
                         Text(
-                          '网络语音会将当前和后续两段正文发送到所配置的服务。密钥仅保存在设备安全存储。系统语音暂停后从当前段重新开始。',
+                          '网络语音会将当前和后续两段正文发送到所配置的服务。密钥仅保存在设备安全存储。系统语音暂停后从当前段重新开始。手动翻页或滚动正文会停止听书，可从新位置开播。',
                           style: TextStyle(
                             fontSize: 11,
                             color: AppTheme.textHint,

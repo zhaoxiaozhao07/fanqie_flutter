@@ -23,6 +23,13 @@ class ReaderSettings {
   final bool commentBubbles;
   final bool volumeKeys;
   final String tapLayout;
+  final bool pureMode;
+  final bool showHeader;
+  final bool showStatus;
+  final bool keepScreenOn;
+  final bool haptics;
+  final bool restReminder;
+  final int restMinutes;
 
   const ReaderSettings({
     this.fontSize = 18,
@@ -45,6 +52,13 @@ class ReaderSettings {
     this.commentBubbles = true,
     this.volumeKeys = false,
     this.tapLayout = 'balanced',
+    this.pureMode = false,
+    this.showHeader = true,
+    this.showStatus = true,
+    this.keepScreenOn = true,
+    this.haptics = false,
+    this.restReminder = false,
+    this.restMinutes = 30,
   });
 
   int effectiveTheme({required bool systemDark, required DateTime now}) {
@@ -80,6 +94,13 @@ class ReaderSettings {
     'commentBubbles': commentBubbles,
     'volumeKeys': volumeKeys,
     'tapLayout': tapLayout,
+    'pureMode': pureMode,
+    'showHeader': showHeader,
+    'showStatus': showStatus,
+    'keepScreenOn': keepScreenOn,
+    'haptics': haptics,
+    'restReminder': restReminder,
+    'restMinutes': restMinutes,
   };
 
   factory ReaderSettings.fromJson(Map<String, dynamic> json) {
@@ -134,6 +155,13 @@ class ReaderSettings {
       brightness: number('brightness', .5, .05, 1),
       commentBubbles: flag('commentBubbles', true),
       volumeKeys: flag('volumeKeys', false),
+      pureMode: flag('pureMode', false),
+      showHeader: flag('showHeader', true),
+      showStatus: flag('showStatus', true),
+      keepScreenOn: flag('keepScreenOn', true),
+      haptics: flag('haptics', false),
+      restReminder: flag('restReminder', false),
+      restMinutes: number('restMinutes', 30, 10, 120).toInt(),
       tapLayout: choice('tapLayout', {
         'balanced',
         'right_hand',
@@ -163,6 +191,13 @@ class ReaderSettings {
     bool? commentBubbles,
     bool? volumeKeys,
     String? tapLayout,
+    bool? pureMode,
+    bool? showHeader,
+    bool? showStatus,
+    bool? keepScreenOn,
+    bool? haptics,
+    bool? restReminder,
+    int? restMinutes,
   }) => ReaderSettings.fromJson({
     ...toJson(),
     if (fontSize != null) 'fontSize': fontSize,
@@ -185,6 +220,13 @@ class ReaderSettings {
     if (commentBubbles != null) 'commentBubbles': commentBubbles,
     if (volumeKeys != null) 'volumeKeys': volumeKeys,
     if (tapLayout != null) 'tapLayout': tapLayout,
+    if (pureMode != null) 'pureMode': pureMode,
+    if (showHeader != null) 'showHeader': showHeader,
+    if (showStatus != null) 'showStatus': showStatus,
+    if (keepScreenOn != null) 'keepScreenOn': keepScreenOn,
+    if (haptics != null) 'haptics': haptics,
+    if (restReminder != null) 'restReminder': restReminder,
+    if (restMinutes != null) 'restMinutes': restMinutes,
   });
 
   ReaderSettings typographyFrom(ReaderSettings preset) => copyWith(

@@ -13,6 +13,7 @@ class ReaderLayout {
   final double horizontalPadding;
   final double paragraphSpacing;
   final Size inlineCommentSize;
+  final bool showPageNumber;
 
   const ReaderLayout({
     required this.size,
@@ -22,6 +23,7 @@ class ReaderLayout {
     required this.horizontalPadding,
     required this.paragraphSpacing,
     this.inlineCommentSize = Size.zero,
+    this.showPageNumber = true,
   });
 
   Object get key => (
@@ -32,6 +34,7 @@ class ReaderLayout {
     horizontalPadding,
     paragraphSpacing,
     inlineCommentSize,
+    showPageNumber,
   );
 
   // Paint-only changes (night theme, highlights) must reuse measured pages.
@@ -223,14 +226,16 @@ class ReaderPaginationCache {
       measuredTitleHeight,
       layout.size.height * 0.22,
     );
-    final footerHeight = measure(
-      '第 1 / 1 页',
-      const TextStyle(fontSize: 11, height: 1, letterSpacing: 1),
-      layout.size.width,
-    );
+    final footerHeight = layout.showPageNumber
+        ? measure(
+            '第 1 / 1 页',
+            const TextStyle(fontSize: 11, height: 1, letterSpacing: 1),
+            layout.size.width,
+          )
+        : 0.0;
     final normalHeight = math.max(
       1.0,
-      layout.size.height - 16 - footerHeight - 6,
+      layout.size.height - 16 - footerHeight - (layout.showPageNumber ? 6 : 0),
     );
     final firstHeight = math.max(1.0, normalHeight - titleHeight - 10);
     final pages = <ReaderPage>[];

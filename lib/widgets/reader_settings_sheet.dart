@@ -352,6 +352,17 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                           value: _bookOverride,
                           onChanged: _busy ? null : _scope,
                         ),
+                        SwitchListTile(
+                          contentPadding: EdgeInsets.zero,
+                          title: const Text('纯净阅读'),
+                          subtitle: const Text('暂时隐藏评论与状态信息，关闭后恢复原设置'),
+                          value: _settings.pureMode,
+                          onChanged: _busy
+                              ? null
+                              : (value) => _change(
+                                  _settings.copyWith(pureMode: value),
+                                ),
+                        ),
                         _section(
                           '排版预设',
                           Wrap(
@@ -621,13 +632,86 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                             _section(
                               '点击热区',
                               _choices(
-                                {'balanced': '左右均衡', 'right_hand': '右手单手'},
+                                {
+                                  'balanced': '左右均衡',
+                                  'right_hand': '右手单手',
+                                  'left_hand': '左手单手',
+                                },
                                 _settings.tapLayout,
                                 (value) => _change(
                                   _settings.copyWith(tapLayout: value),
                                 ),
                               ),
                             ),
+                            Padding(
+                              padding: const EdgeInsets.only(bottom: 12),
+                              child: Text(
+                                _settings.tapLayout == 'left_hand'
+                                    ? '左侧 45%：下一页 · 中间：菜单 · 右侧 18%：上一页'
+                                    : _settings.tapLayout == 'right_hand'
+                                    ? '左侧 18%：上一页 · 中间：菜单 · 右侧 45%：下一页'
+                                    : '左侧 28%：上一页 · 中间：菜单 · 右侧 28%：下一页',
+                              ),
+                            ),
+                            SwitchListTile(
+                              contentPadding: EdgeInsets.zero,
+                              title: const Text('显示顶部章节信息'),
+                              value: _settings.showHeader,
+                              onChanged: _busy
+                                  ? null
+                                  : (value) => _change(
+                                      _settings.copyWith(showHeader: value),
+                                    ),
+                            ),
+                            SwitchListTile(
+                              contentPadding: EdgeInsets.zero,
+                              title: const Text('显示时间、电量与进度'),
+                              value: _settings.showStatus,
+                              onChanged: _busy
+                                  ? null
+                                  : (value) => _change(
+                                      _settings.copyWith(showStatus: value),
+                                    ),
+                            ),
+                            SwitchListTile(
+                              contentPadding: EdgeInsets.zero,
+                              title: const Text('阅读时屏幕常亮'),
+                              value: _settings.keepScreenOn,
+                              onChanged: _busy
+                                  ? null
+                                  : (value) => _change(
+                                      _settings.copyWith(keepScreenOn: value),
+                                    ),
+                            ),
+                            SwitchListTile(
+                              contentPadding: EdgeInsets.zero,
+                              title: const Text('翻页触感反馈'),
+                              value: _settings.haptics,
+                              onChanged: _busy
+                                  ? null
+                                  : (value) => _change(
+                                      _settings.copyWith(haptics: value),
+                                    ),
+                            ),
+                            SwitchListTile(
+                              contentPadding: EdgeInsets.zero,
+                              title: const Text('休息提醒'),
+                              subtitle: const Text('只在前台阅读时计时，不弹窗打断'),
+                              value: _settings.restReminder,
+                              onChanged: _busy
+                                  ? null
+                                  : (value) => _change(
+                                      _settings.copyWith(restReminder: value),
+                                    ),
+                            ),
+                            if (_settings.restReminder)
+                              _choices<int>(
+                                {20: '20 分钟', 30: '30 分钟', 60: '60 分钟'},
+                                _settings.restMinutes,
+                                (value) => _change(
+                                  _settings.copyWith(restMinutes: value),
+                                ),
+                              ),
                             SwitchListTile(
                               contentPadding: EdgeInsets.zero,
                               title: const Text('首行缩进 (2字符)'),

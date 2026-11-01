@@ -47,8 +47,10 @@ Future<Book> openReader(
   Book? book,
   Key? readerKey,
   bool resume = true,
+  double width = 400,
+  double height = 800,
 }) async {
-  tester.view.physicalSize = const Size(400, 800);
+  tester.view.physicalSize = Size(width, height);
   tester.view.devicePixelRatio = 1;
   final settings = ReaderSettingsRepository();
   final current = (await settings.load()).settings;

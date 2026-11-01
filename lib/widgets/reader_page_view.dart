@@ -30,6 +30,9 @@ class ReaderPageView extends StatefulWidget {
   final DateTime Function() lastBubbleTap;
   final double previousTapFraction;
   final double nextTapFraction;
+  final bool reverseTapSides;
+  final VoidCallback? onUserPageTurn;
+  final String semanticLabel;
 
   const ReaderPageView({
     super.key,
@@ -50,6 +53,9 @@ class ReaderPageView extends StatefulWidget {
     this.onInteractionEnded,
     this.previousTapFraction = 0.28,
     this.nextTapFraction = 0.72,
+    this.reverseTapSides = false,
+    this.onUserPageTurn,
+    this.semanticLabel = '小说阅读页',
   });
 
   @override
@@ -57,6 +63,8 @@ class ReaderPageView extends StatefulWidget {
 }
 
 class ReaderPageViewState extends State<ReaderPageView> {
+  Offset? _pointerStart;
+  bool _reportedPointer = false;
   final _simulationKey = GlobalKey<SimulationPageTurnState>();
   late PageController _controller;
   late List<ReaderPageItem> _pages;
@@ -249,9 +257,11 @@ class ReaderPageViewState extends State<ReaderPageView> {
     if (widget.selection.value != null) {
       widget.onDismissSelection();
     } else if (position.dx < width * widget.previousTapFraction) {
-      turnToPreviousPage();
+      widget.onUserPageTurn?.call();
+      widget.reverseTapSides ? turnToNextPage() : turnToPreviousPage();
     } else if (position.dx > width * widget.nextTapFraction) {
-      turnToNextPage();
+      widget.onUserPageTurn?.call();
+      widget.reverseTapSides ? turnToPreviousPage() : turnToNextPage();
     } else {
       widget.onCenterTap();
     }
@@ -290,61 +300,99 @@ class ReaderPageViewState extends State<ReaderPageView> {
 
   @override
   Widget build(BuildContext context) {
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        if (_mode == 'simulation') {
-          return SimulationPageTurn(
-            key: _simulationKey,
-            totalPages: _pages.length,
-            currentPageIndex: _index,
-            pageSetKey: _pageSetVersion,
-            contentVersion: _contentVersion,
-            pageContentChanges: widget.pageContentChanges,
-            backgroundColor: widget.backgroundColor,
-            isDark: widget.isDark,
-            isSelectionActive: () => widget.selection.value != null,
-            onDismissSelection: widget.onDismissSelection,
-            lastBubbleTapTimeGetter: widget.lastBubbleTap,
-            previousTapFraction: widget.previousTapFraction,
-            nextTapFraction: widget.nextTapFraction,
-            pageBuilder: (context, index) => _pages[index].builder(context),
-            onPageChanged: _finish,
-            onInteractionEnded: () => _finish(_index),
-            onTurnRequested: (forward) => _turn(forward: forward),
-            onTurnStarted: clearQueuedTurns,
-            onPreviousChapter: widget.onPreviousBoundary,
-            onNextChapter: widget.onNextBoundary,
-            onCenterTap: widget.onCenterTap,
-          );
-        }
-        return GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTapUp: (details) =>
-              _tap(details.localPosition, constraints.maxWidth),
-          child: NotificationListener<ScrollNotification>(
-            onNotification: _scroll,
-            child: PageView.builder(
-              key: ValueKey(_controllerRevision),
-              controller: _controller,
-              itemCount: _pages.length,
-              allowImplicitScrolling: true,
-              physics: widget.selection.value != null
-                  ? const NeverScrollableScrollPhysics()
-                  : const BouncingScrollPhysics(
-                      parent: AlwaysScrollableScrollPhysics(),
-                    ),
-              itemBuilder: (context, index) => ReaderPageTransition(
-                controller: _controller,
-                pageIndex: index,
-                width: constraints.maxWidth,
-                mode: _mode,
-                isDark: widget.isDark,
-                child: _pages[index].builder(context),
-              ),
-            ),
-          ),
-        );
+    return Semantics(
+      container: true,
+      explicitChildNodes: true,
+      label: widget.semanticLabel,
+      onIncrease: () {
+        widget.onUserPageTurn?.call();
+        turnToNextPage();
       },
+      onDecrease: () {
+        widget.onUserPageTurn?.call();
+        turnToPreviousPage();
+      },
+      child: Listener(
+        onPointerDown: (event) {
+          _pointerStart = event.localPosition;
+          _reportedPointer = false;
+        },
+        onPointerMove: (event) {
+          final start = _pointerStart;
+          if (start == null ||
+              _reportedPointer ||
+              widget.selection.value != null) {
+            return;
+          }
+          final delta = event.localPosition - start;
+          if (delta.dx.abs() > 8 && delta.dx.abs() > delta.dy.abs()) {
+            _reportedPointer = true;
+            widget.onUserPageTurn?.call();
+          }
+        },
+        onPointerUp: (_) => _pointerStart = null,
+        onPointerCancel: (_) => _pointerStart = null,
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            if (_mode == 'simulation') {
+              return SimulationPageTurn(
+                key: _simulationKey,
+                totalPages: _pages.length,
+                currentPageIndex: _index,
+                pageSetKey: _pageSetVersion,
+                contentVersion: _contentVersion,
+                pageContentChanges: widget.pageContentChanges,
+                backgroundColor: widget.backgroundColor,
+                isDark: widget.isDark,
+                isSelectionActive: () => widget.selection.value != null,
+                onDismissSelection: widget.onDismissSelection,
+                lastBubbleTapTimeGetter: widget.lastBubbleTap,
+                previousTapFraction: widget.previousTapFraction,
+                nextTapFraction: widget.nextTapFraction,
+                reverseTapSides: widget.reverseTapSides,
+                pageBuilder: (context, index) => _pages[index].builder(context),
+                onPageChanged: _finish,
+                onInteractionEnded: () => _finish(_index),
+                onTurnRequested: (forward) {
+                  widget.onUserPageTurn?.call();
+                  _turn(forward: forward);
+                },
+                onTurnStarted: clearQueuedTurns,
+                onPreviousChapter: widget.onPreviousBoundary,
+                onNextChapter: widget.onNextBoundary,
+                onCenterTap: widget.onCenterTap,
+              );
+            }
+            return GestureDetector(
+              behavior: HitTestBehavior.translucent,
+              onTapUp: (details) =>
+                  _tap(details.localPosition, constraints.maxWidth),
+              child: NotificationListener<ScrollNotification>(
+                onNotification: _scroll,
+                child: PageView.builder(
+                  key: ValueKey(_controllerRevision),
+                  controller: _controller,
+                  itemCount: _pages.length,
+                  allowImplicitScrolling: true,
+                  physics: widget.selection.value != null
+                      ? const NeverScrollableScrollPhysics()
+                      : const BouncingScrollPhysics(
+                          parent: AlwaysScrollableScrollPhysics(),
+                        ),
+                  itemBuilder: (context, index) => ReaderPageTransition(
+                    controller: _controller,
+                    pageIndex: index,
+                    width: constraints.maxWidth,
+                    mode: _mode,
+                    isDark: widget.isDark,
+                    child: _pages[index].builder(context),
+                  ),
+                ),
+              ),
+            );
+          },
+        ),
+      ),
     );
   }
 }
