@@ -175,6 +175,67 @@ void main() {
   });
 
   testWidgets(
+    'native GB18030 conversion preserves Chinese and four-byte emoji',
+    (tester) async {
+      final source = await File('${directory.path}/gb18030.txt').writeAsBytes([
+        181,
+        218,
+        210,
+        187,
+        213,
+        194,
+        10,
+        196,
+        227,
+        186,
+        195,
+        148,
+        57,
+        252,
+        54,
+      ]);
+      final result = await native.invokeMapMethod<String, dynamic>(
+        'normalizeTextFile',
+        {'path': source.path, 'encoding': 'auto', 'id': 'gb18030-probe'},
+      );
+      expect(result!['encoding'], 'GB18030');
+      final decoded = File(result['path'] as String);
+      try {
+        expect(await decoded.readAsString(), '第一章\n你好😀');
+      } finally {
+        if (await decoded.exists()) await decoded.delete();
+      }
+    },
+  );
+
+  testWidgets('native large-file conversion supports cancellation', (
+    tester,
+  ) async {
+    final source = File('${directory.path}/large.txt');
+    final file = await source.open(mode: FileMode.write);
+    await file.truncate(64 * 1024 * 1024);
+    await file.close();
+    final conversion = native.invokeMapMethod<String, dynamic>(
+      'normalizeTextFile',
+      {'path': source.path, 'encoding': 'UTF-8', 'id': 'cancel-decode-probe'},
+    );
+    final expectation = expectLater(
+      conversion,
+      throwsA(
+        isA<PlatformException>().having(
+          (error) => error.code,
+          'code',
+          'IMPORT_CANCELLED',
+        ),
+      ),
+    );
+    await native.invokeMethod('cancelTextDecode', {
+      'id': 'cancel-decode-probe',
+    });
+    await expectation;
+  });
+
+  testWidgets(
     'reader window brightness survives popups and restores outside reading',
     (tester) async {
       final before = await native.invokeMapMethod('getReaderCapabilities');

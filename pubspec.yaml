@@ -54,6 +54,10 @@ dependencies:
   crypto: ^3.0.8
   pointycastle: ^3.9.1
   characters: ^1.4.1
+  xml: ^7.1.0
+  html: ^0.15.7
+  file_picker: ^13.3.1
+  path: ^1.9.1
 
 
 dev_dependencies:

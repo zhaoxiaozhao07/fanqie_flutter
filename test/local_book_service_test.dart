@@ -40,7 +40,9 @@ void main() {
 ''';
       await txtFile.writeAsString(rawBookContent);
 
-      final service = LocalBookService();
+      final service = LocalBookService.forTesting(
+        documents: () async => tempDir,
+      );
       final result = await service.importLocalTxt(txtFile);
 
       expect(result.book.bookName, '诛仙传');
@@ -56,17 +58,22 @@ void main() {
       expect(inShelf, true);
     });
 
-    test('Parse plain TXT file without chapter markers into automatic chunks', () async {
-      final txtFile = File('${tempDir.path}/散文短篇.txt');
-      final longContent = '这是一篇没有传统章节标识的长文小说段落。' * 200; // 约 4200 字
-      await txtFile.writeAsString(longContent);
+    test(
+      'Parse plain TXT file without chapter markers into automatic chunks',
+      () async {
+        final txtFile = File('${tempDir.path}/散文短篇.txt');
+        final longContent = '这是一篇没有传统章节标识的长文小说段落。' * 200; // 约 4200 字
+        await txtFile.writeAsString(longContent);
 
-      final service = LocalBookService();
-      final result = await service.importLocalTxt(txtFile);
+        final service = LocalBookService.forTesting(
+          documents: () async => tempDir,
+        );
+        final result = await service.importLocalTxt(txtFile);
 
-      expect(result.book.bookName, '散文短篇');
-      expect(result.chapterCount >= 2, true);
-      expect(result.chapters.first.title.contains('第 1 部分'), true);
-    });
+        expect(result.book.bookName, '散文短篇');
+        expect(result.chapterCount >= 2, true);
+        expect(result.chapters.first.title.contains('第 1 部分'), true);
+      },
+    );
   });
 }

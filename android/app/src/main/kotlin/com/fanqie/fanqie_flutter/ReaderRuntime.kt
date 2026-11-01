@@ -104,6 +104,14 @@ object ReaderRuntime {
                         })
                     }
                     "readTtsSecret" -> result.success(ReaderSecrets.read(app))
+                    "normalizeTextFile" -> ReaderTextDecoder.normalize(
+                        app, call.argument<String>("path") ?: "",
+                        call.argument<String>("encoding") ?: "auto",
+                        call.argument<String>("id") ?: "", result)
+                    "cancelTextDecode" -> {
+                        ReaderTextDecoder.cancel(call.argument<String>("id") ?: "")
+                        result.success(true)
+                    }
                     "getReaderCapabilities" -> {
                         val engines = app.packageManager.queryIntentServices(
                             android.content.Intent(android.speech.tts.TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE), 0)
