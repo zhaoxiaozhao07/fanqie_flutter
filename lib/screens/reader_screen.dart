@@ -16,6 +16,7 @@ import '../services/reader_system_service.dart';
 import '../services/tts_service.dart';
 import '../widgets/tts_player_panel.dart';
 import '../widgets/paragraph_comment_sheet.dart';
+import '../widgets/reader_page_transition.dart';
 import '../widgets/simulation_page_turn.dart';
 
 /// 阅读器主题配置
@@ -126,7 +127,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
   bool _isPageMode = false; // 双模式切换：水平翻页 vs 连续滚屏
   String _pageTurnAnimation = 'cover'; // 左右翻页动画：cover(覆盖), simulation(仿真), slide(滑动), fade(渐变)
   PageController? _pageController;
-  PageController _pageHorizontalController = PageController();
+  PageController _pageHorizontalController = PageController(keepPage: false);
+  bool _isAnimatingHorizontalPage = false;
   final GlobalKey<SimulationPageTurnState> _simulationKey = GlobalKey<SimulationPageTurnState>();
   int _currentHorizontalPageIndex = 0;
   int? _lastPaginatedChapterIndex;
@@ -1300,7 +1302,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                             setState(() {
                               _isPageMode = val.first;
                               _currentHorizontalPageIndex = 0;
-                              _pageHorizontalController = PageController();
+                              _resetHorizontalPageController(initialPage: 0);
                               _savePreferences();
                             });
                             setModalState(() {});
@@ -1330,9 +1332,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
                               if (!_isPageMode) {
                                 _isPageMode = true;
                               }
-                              // 重新初始化 PageController，彻底杜绝多重挂载异常与灰屏
-                              _pageHorizontalController.dispose();
-                              _pageHorizontalController = PageController(initialPage: _currentHorizontalPageIndex);
+                              _resetHorizontalPageController(
+                                initialPage: _currentHorizontalPageIndex,
+                              );
                               _savePreferences();
                             });
                             setModalState(() {});
@@ -1565,7 +1567,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
         children: [
           // 阅读主要连续内容区域
           GestureDetector(
-            onTap: _toggleControls,
+            // 翻页模式自己处理热区点击，不能再由祖先重复切换控制栏。
+            onTap: _isPageMode ? null : _toggleControls,
             behavior: HitTestBehavior.translucent,
             child: SafeArea(
               child: Column(
@@ -2922,10 +2925,16 @@ class _ReaderScreenState extends State<ReaderScreen> {
           final targetPage = _pendingJumpToLastPage ? (pages.length - 1) : 0;
           _pendingJumpToLastPage = false;
           _currentHorizontalPageIndex = targetPage.clamp(0, pages.length - 1);
-          _pageHorizontalController.dispose();
-          _pageHorizontalController = PageController(initialPage: _currentHorizontalPageIndex);
+          _resetHorizontalPageController(
+            initialPage: _currentHorizontalPageIndex,
+          );
         } else {
-          _currentHorizontalPageIndex = _currentHorizontalPageIndex.clamp(0, pages.length - 1);
+          final clampedPage =
+              _currentHorizontalPageIndex.clamp(0, pages.length - 1);
+          if (clampedPage != _currentHorizontalPageIndex) {
+            _currentHorizontalPageIndex = clampedPage;
+            _resetHorizontalPageController(initialPage: clampedPage);
+          }
         }
         final chapterParas = _getChapterParagraphs(_currentActiveIndex);
 
@@ -2939,12 +2948,13 @@ class _ReaderScreenState extends State<ReaderScreen> {
             ? widget.chapters[prevChapterIndex].title
             : '已是第一章';
 
-        // 1. 真实 3D 纸张四角仿真翻页模式（支持四角随手指拖拽、背面镜像文字反转、立体光影渲染）
+        // 1. 四角纸张仿真翻页：正文图层复用，纸背使用快照而不是重复挂载正文。
         if (_pageTurnAnimation == 'simulation') {
           return SimulationPageTurn(
             key: _simulationKey,
             totalPages: pages.length,
             currentPageIndex: _currentHorizontalPageIndex,
+            pageSetKey: _lastPaginateKey,
             backgroundColor: theme.backgroundColor,
             isDark: theme.systemBrightness == Brightness.dark,
             lastBubbleTapTimeGetter: () => _lastBubbleTapTime,
@@ -2981,10 +2991,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 chapterParas: chapterParas,
                 theme: theme,
                 constraints: constraints,
-                onTapParagraph: () {
-                  final pos = _lastPagePointerDown ?? Offset(constraints.maxWidth / 2, 0);
-                  _handleHorizontalPageTap(pos, constraints.maxWidth, pages.length);
-                },
+                // 仿真组件统一处理点击，避免段落和外层同时翻页/切换菜单。
               );
             },
           );
@@ -3036,6 +3043,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
                 key: ValueKey('pageview_chapter_$_currentActiveIndex'),
                 controller: _pageHorizontalController,
                 itemCount: pages.length,
+                // 预排版相邻页，拖动的第一帧不再临时创建、测量整页正文。
+                allowImplicitScrolling: true,
                 physics: const BouncingScrollPhysics(),
                 onPageChanged: (page) {
                   if (_activeSelectableParaNotifier.value != null) {
@@ -3057,11 +3066,12 @@ class _ReaderScreenState extends State<ReaderScreen> {
                     },
                   );
 
-                  return _buildAnimatedPageItem(
-                    pageIdx: pageIdx,
+                  return ReaderPageTransition(
+                    controller: _pageHorizontalController,
+                    pageIndex: pageIdx,
                     width: constraints.maxWidth,
-                    height: constraints.maxHeight,
-                    theme: theme,
+                    mode: _pageTurnAnimation,
+                    isDark: theme.systemBrightness == Brightness.dark,
                     child: pageCard,
                   );
                 },
@@ -3200,126 +3210,25 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  /// 构建单页实时翻页动画（覆盖 cover / 滑动 slide / 渐变 fade）
-  Widget _buildAnimatedPageItem({
-    required int pageIdx,
-    required double width,
-    required double height,
-    required ReaderTheme theme,
-    required Widget child,
-  }) {
-    return AnimatedBuilder(
-      animation: _pageHorizontalController,
-      child: child,
-      builder: (context, staticChild) {
-        double page = _currentHorizontalPageIndex.toDouble();
-        if (_pageHorizontalController.hasClients &&
-            _pageHorizontalController.position.haveDimensions) {
-          page = _pageHorizontalController.page ?? _currentHorizontalPageIndex.toDouble();
-        }
-        final delta = pageIdx - page;
-        if (delta.abs() < 0.0005 || delta.abs() >= 1.0) {
-          return staticChild!;
-        }
-
-        switch (_pageTurnAnimation) {
-          case 'fade':
-            // 柔和渐变翻页动画：微幅视差平移 + 丝滑透明度交融
-            final opacity = Curves.easeInOut.transform((1.0 - delta.abs()).clamp(0.0, 1.0));
-            return Opacity(
-              opacity: opacity,
-              child: Transform.translate(
-                offset: Offset(-delta * width * 0.82, 0),
-                child: staticChild,
-              ),
-            );
-
-          case 'slide':
-            // 平滑滑动翻页动画：带微景深缩放与页间柔和分割阴影
-            final scale = 1.0 - (delta.abs() * 0.025).clamp(0.0, 0.025);
-            return Transform.scale(
-              scale: scale,
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  staticChild!,
-                  if (delta > 0)
-                    Positioned(
-                      left: 0,
-                      top: 0,
-                      bottom: 0,
-                      width: 14,
-                      child: IgnorePointer(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.centerLeft,
-                              end: Alignment.centerRight,
-                              colors: [
-                                Colors.black.withValues(alpha: 0.14 * (1.0 - delta)),
-                                Colors.transparent,
-                              ],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            );
-
-          case 'cover':
-          default:
-            // 经典覆盖翻页动画（默认）：上层书页平滑向左滑出，在底层静止书页上投下细腻立体边缘阴影
-            if (delta < 0) {
-              return staticChild!;
-            } else {
-              final shadowAlpha = (0.28 * (1.0 - delta)).clamp(0.0, 0.28);
-              return ClipRect(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Transform.translate(
-                      offset: Offset(-delta * width, 0),
-                      child: staticChild,
-                    ),
-                    Positioned(
-                      left: 0,
-                      top: 0,
-                      bottom: 0,
-                      width: 28,
-                      child: IgnorePointer(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.centerLeft,
-                              end: Alignment.centerRight,
-                              colors: [
-                                Colors.black.withValues(alpha: shadowAlpha),
-                                Colors.black.withValues(alpha: shadowAlpha * 0.35),
-                                Colors.transparent,
-                              ],
-                              stops: const [0.0, 0.45, 1.0],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }
-        }
-      },
+  void _resetHorizontalPageController({required int initialPage}) {
+    final oldController = _pageHorizontalController;
+    _pageHorizontalController = PageController(
+      initialPage: initialPage,
+      keepPage: false,
     );
+    _isAnimatingHorizontalPage = false;
+    // 先让旧 PageView/AnimatedBuilder 脱离图层，再释放其控制器。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      oldController.dispose();
+    });
   }
 
   Duration get _pageTurnDuration {
     switch (_pageTurnAnimation) {
       case 'simulation':
-        return const Duration(milliseconds: 340);
-      case 'cover':
         return const Duration(milliseconds: 300);
+      case 'cover':
+        return const Duration(milliseconds: 260);
       case 'fade':
         return const Duration(milliseconds: 260);
       case 'slide':
@@ -3329,24 +3238,43 @@ class _ReaderScreenState extends State<ReaderScreen> {
   }
 
   void _animateToPreviousHorizontalPage() {
+    if (!_canStartHorizontalPageTurn) return;
     if (_currentHorizontalPageIndex > 0) {
-      _pageHorizontalController.previousPage(
-        duration: _pageTurnDuration,
-        curve: Curves.easeOutCubic,
-      );
+      _animateToHorizontalPage(_currentHorizontalPageIndex - 1);
     } else if (_currentActiveIndex > 0) {
       _startFromChapter(_currentActiveIndex - 1, toLastPage: true);
     }
   }
 
   void _animateToNextHorizontalPage(int totalPages) {
+    if (!_canStartHorizontalPageTurn) return;
     if (_currentHorizontalPageIndex < totalPages - 1) {
-      _pageHorizontalController.nextPage(
+      _animateToHorizontalPage(_currentHorizontalPageIndex + 1);
+    } else if (_currentActiveIndex < widget.chapters.length - 1) {
+      _startFromChapter(_currentActiveIndex + 1);
+    }
+  }
+
+  bool get _canStartHorizontalPageTurn =>
+      !_isSwitchingChapter &&
+      !_isAnimatingHorizontalPage &&
+      _pageHorizontalController.hasClients &&
+      _pageHorizontalController.position.haveDimensions &&
+      !_pageHorizontalController.position.isScrollingNotifier.value;
+
+  Future<void> _animateToHorizontalPage(int targetPage) async {
+    final controller = _pageHorizontalController;
+    _isAnimatingHorizontalPage = true;
+    try {
+      await controller.animateToPage(
+        targetPage,
         duration: _pageTurnDuration,
         curve: Curves.easeOutCubic,
       );
-    } else if (_currentActiveIndex < widget.chapters.length - 1) {
-      _startFromChapter(_currentActiveIndex + 1);
+    } finally {
+      if (mounted && identical(controller, _pageHorizontalController)) {
+        _isAnimatingHorizontalPage = false;
+      }
     }
   }
 
@@ -3554,6 +3482,11 @@ class _ReaderScreenState extends State<ReaderScreen> {
   /// 智能章节单屏饱满填充分页算法（像素级 TextPainter 精准测算，充分利用整屏空间，绝无大片空白）
   List<String> _paginateContent(String content, Size size) {
     if (content.isEmpty) return [''];
+    final paginateKey = '${_currentActiveIndex}_${size.width}_${size.height}_${_fontSize}_${_lineHeight}_${_letterSpacing}_${_fontFamily}_${_indentTwoChars}_${_paragraphSpacing}_${_horizontalPadding}_${content.length}';
+    if (paginateKey == _lastPaginateKey && _cachedPaginatedPages.isNotEmpty) {
+      return _cachedPaginatedPages;
+    }
+
     final availWidth = (size.width - _horizontalPadding * 2).clamp(100.0, 3000.0);
     // 预留顶部/底部内边距(8*2=16)与底部页码高度(~20)共约 36px
     const reservedVertical = 36.0;
@@ -3572,12 +3505,8 @@ class _ReaderScreenState extends State<ReaderScreen> {
       textDirection: TextDirection.ltr,
     )..layout(maxWidth: availWidth);
     final firstPageTitleOccupied = titlePainter.height + 10.0;
+    titlePainter.dispose();
     final firstPageAvailHeight = (normalAvailHeight - firstPageTitleOccupied).clamp(100.0, 4000.0);
-
-    final paginateKey = '${_currentActiveIndex}_${size.width}_${size.height}_${_fontSize}_${_lineHeight}_${_letterSpacing}_${_fontFamily}_${_indentTwoChars}_${_paragraphSpacing}_${_horizontalPadding}_${content.length}';
-    if (paginateKey == _lastPaginateKey && _cachedPaginatedPages.isNotEmpty) {
-      return _cachedPaginatedPages;
-    }
 
     final textStyle = TextStyle(
       fontSize: _fontSize,
@@ -3681,6 +3610,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
     }
 
     final result = pages.isEmpty ? [content] : pages;
+    painter.dispose();
     _lastPaginateKey = paginateKey;
     _cachedPaginatedPages = result;
     return result;
