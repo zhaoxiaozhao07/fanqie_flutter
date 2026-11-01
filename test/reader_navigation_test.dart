@@ -44,6 +44,7 @@ Future<Book> openReader(
   double scale = 1,
   Book? book,
   Key? readerKey,
+  bool resume = true,
 }) async {
   tester.view.physicalSize = const Size(400, 800);
   tester.view.devicePixelRatio = 1;
@@ -69,6 +70,7 @@ Future<Book> openReader(
       home: ReaderScreen(
         key: readerKey,
         book: selectedBook,
+        resumeSavedPosition: resume,
         chapters:
             chapters ??
             List.generate(
@@ -103,6 +105,42 @@ void main() {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(_native, null);
   });
+
+  testWidgets(
+    'resume follows chapter ID after insertion; explicit open does not',
+    (tester) async {
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final book = Book(
+        bookId: 'resume-reordered',
+        bookName: '续读',
+        author: '测试',
+      );
+      final chapters = [
+        Chapter(itemId: 'new', title: '新插入章', content: chapterText(0)),
+        Chapter(itemId: 'saved', title: '已读章', content: chapterText(1)),
+      ];
+      await ReaderPositionService().save(
+        book.bookId,
+        const ReadingPosition(chapterId: 'saved', paragraphIndex: 5),
+      );
+      await openReader(tester, 'none', chapters: chapters, book: book);
+      expect(address(tester).chapterIndex, 1);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await settleReader(tester);
+      await openReader(
+        tester,
+        'none',
+        chapters: chapters,
+        book: book,
+        resume: false,
+      );
+      expect(address(tester).chapterIndex, 0);
+      expect(address(tester).pageIndex, 0);
+      await tester.pumpWidget(const SizedBox.shrink());
+      await settleReader(tester);
+    },
+  );
 
   for (final mode in ['cover', 'simulation', 'slide', 'fade', 'none']) {
     testWidgets(

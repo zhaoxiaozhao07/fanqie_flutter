@@ -52,6 +52,7 @@ class ReaderScreen extends StatefulWidget {
   final Book book;
   final List<Chapter> chapters;
   final int initialChapterIndex;
+  final bool resumeSavedPosition;
   final Future<String?> Function(Chapter chapter)? chapterContentLoader;
   final Future<ChapterCommentStats?> Function(Chapter chapter)?
   chapterCommentStatsLoader;
@@ -61,6 +62,7 @@ class ReaderScreen extends StatefulWidget {
     required this.book,
     required this.chapters,
     this.initialChapterIndex = 0,
+    this.resumeSavedPosition = true,
     this.chapterContentLoader,
     this.chapterCommentStatsLoader,
   });
@@ -302,13 +304,24 @@ class _ReaderScreenState extends State<ReaderScreen>
     _bookmarkService.changeNotifier.addListener(_loadNotes);
     _activeSelectableParaNotifier.addListener(_onReaderSelectionChanged);
     _loadPreferences().then((_) async {
-      final saved = await _positionService.load(widget.book.bookId);
+      final saved = widget.resumeSavedPosition
+          ? await _positionService.loadSnapshot(widget.book.bookId)
+          : null;
       if (!mounted) return;
-      if (saved?.chapterId == widget.chapters[_currentActiveIndex].itemId) {
-        _readingPosition = saved;
+      final target = saved?.resolve(widget.chapters);
+      if (target != null) {
+        _currentActiveIndex = target.chapterIndex;
+        _activeChapterNotifier.value = target.chapterIndex;
+        _anchorChapterIndex = target.chapterIndex;
+        _readingPosition = target.position;
       }
       await _startFromChapter(_currentActiveIndex, preservePosition: true);
       if (mounted) {
+        if (target?.notice != null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text(target!.notice!)),
+          );
+        }
         ReaderSystemService.setVolumeKeyScrollEnabled(_volumeKeyScroll);
       }
     });
@@ -764,33 +777,46 @@ class _ReaderScreenState extends State<ReaderScreen>
     final chapter = widget.chapters[index];
 
     try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setInt('read_progress_index_${widget.book.bookId}', index);
-      await prefs.setString(
-        'read_progress_title_${widget.book.bookId}',
-        chapter.title,
+      await _writeReadingSnapshot(
+        _readingPosition?.chapterId == chapter.itemId
+            ? _readingPosition!
+            : ReadingPosition(chapterId: chapter.itemId),
+        updateSummary: true,
       );
-      await prefs.setInt(
-        'read_progress_time_${widget.book.bookId}',
-        DateTime.now().millisecondsSinceEpoch,
-      );
-
-      // 同步到阅读历史（只要打开阅读就记录）
-      await _readingHistoryService.recordReading(
-        book: widget.book,
-        chapterIndex: index,
-        chapterTitle: chapter.title,
-      );
-
-      // 若在书架中，则同步书架进度并置顶
-      if (_isInBookshelf) {
-        await _bookshelfService.updateReadingProgress(
-          widget.book.bookId,
-          index,
-          chapter.title,
-        );
-      }
     } catch (_) {}
+  }
+
+  Future<void> _writeReadingSnapshot(
+    ReadingPosition position, {
+    bool updateSummary = false,
+  }) {
+    final index = _chapterIndexById[position.chapterId];
+    if (index == null) return Future.value();
+    final chapter = widget.chapters[index];
+    return _positionService.save(
+      widget.book.bookId,
+      position,
+      chapterIndex: index,
+      chapterTitle: chapter.title,
+      previousChapterId: index > 0 ? widget.chapters[index - 1].itemId : null,
+      nextChapterId: index + 1 < widget.chapters.length
+          ? widget.chapters[index + 1].itemId
+          : null,
+      onCommitted: updateSummary
+          ? () async {
+              await _readingHistoryService.recordReading(
+                book: widget.book,
+                chapterIndex: index,
+                chapterTitle: chapter.title,
+              );
+              if (_isInBookshelf) {
+                await _bookshelfService.updateReadingProgress(
+                  widget.book.bookId, index, chapter.title,
+                );
+              }
+            }
+          : null,
+    );
   }
 
   ReadingPosition? _captureReadingPosition() {
@@ -906,7 +932,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     final position = _readingPosition;
     return position == null
         ? Future.value()
-        : _positionService.save(widget.book.bookId, position);
+        : _writeReadingSnapshot(position).catchError((_) {
+            if (mounted && notify) {
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text('阅读位置暂未保存，请检查存储空间')),
+              );
+            }
+          });
   }
 
   void _captureRestorationImage({bool fromPage = false}) {

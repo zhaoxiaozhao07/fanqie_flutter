@@ -162,7 +162,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     }
   }
 
-  void _openReader(int chapterIndex) {
+  void _openReader(int chapterIndex, {bool resume = false}) {
     if (_chapters == null || _chapters!.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('正在加载章节目录，请稍候...')),
@@ -178,6 +178,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
           book: _bookDetail ?? widget.book,
           chapters: _chapters!,
           initialChapterIndex: targetIndex,
+          resumeSavedPosition: resume,
         ),
       ),
     ).then((_) {
@@ -503,7 +504,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               // 阅读按钮
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: () => _openReader(_lastReadIndex ?? 0),
+                  onPressed: () => _openReader(_lastReadIndex ?? 0, resume: true),
                   icon: const Icon(Icons.menu_book_rounded, size: 20),
                   label: Text(
                     readText,
