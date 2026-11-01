@@ -16,6 +16,7 @@ class ReaderSettingsRepository {
   static const presetsKey = 'reader_typography_presets_v1';
   static String bookKey(String bookId) => 'reader_settings_book_$bookId';
   static final Map<String, Future<void>> _writes = {};
+  static Future<void> flush() => Future.wait(_writes.values).then((_) {});
   static const legacyKeys = {
     'fontSize': 'reader_font_size',
     'lineHeight': 'reader_line_height',

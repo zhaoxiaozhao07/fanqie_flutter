@@ -16,6 +16,16 @@ class BookshelfService {
   final List<BookshelfBook> _books = [];
   SharedPreferences? _prefs;
   bool _initialized = false;
+  int _generation = 0;
+
+  Future<void> reload() async {
+    _generation++;
+    _initialized = false;
+    _prefs = null;
+    _books.clear();
+    await initialize();
+    changeNotifier.value++;
+  }
 
   /// 用于触发全局书架状态更新
   final ValueNotifier<int> changeNotifier = ValueNotifier<int>(0);
@@ -174,6 +184,7 @@ class BookshelfService {
   /// 检查连载书籍更新 (Update Watcher)
   Future<Map<String, int>> checkBookshelfUpdates({bool force = false}) async {
     await initialize();
+    final generation = _generation;
     final apiService = ApiService();
     final updatesFound = <String, int>{};
 
@@ -184,6 +195,7 @@ class BookshelfService {
 
       try {
         final chapters = await apiService.getBookDirectory(book.bookId);
+        if (generation != _generation) return updatesFound;
         if (chapters.isNotEmpty) {
           final remoteCount = chapters.length;
           final localBaseCount = book.totalChapters > 0

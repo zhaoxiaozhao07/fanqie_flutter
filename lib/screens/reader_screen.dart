@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:collection';
 import 'dart:math' as math;
 import 'dart:ui' as ui;
@@ -20,6 +21,9 @@ import '../widgets/reader_settings_sheet.dart';
 import '../widgets/reader_search_sheet.dart';
 import '../services/reader_search_service.dart';
 import '../services/reader_navigation_history.dart';
+import '../services/note_anchor_resolver.dart';
+import '../widgets/note_editor_dialog.dart';
+import '../widgets/reader_notes_sheet.dart';
 
 export '../models/reader_theme.dart';
 import 'book_detail_screen.dart';
@@ -150,7 +154,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   // 预分割章节段落缓存，避免 build 期间重复 split 造成卡顿
   final Map<int, List<String>> _chapterParagraphsCache = {};
   // 笔记划线 O(1) 索引缓存 ('${chapterIndex}_${paraIndex}' -> List<String>)
-  final Map<String, List<String>> _notesByChapterPara = {};
+  final LinkedHashMap<int, _ResolvedChapterNotes> _resolvedNotes =
+      LinkedHashMap();
+  String _notesSerialized = '';
   // 章节是否来自本地持久化离线/已下载存储
   final Map<int, bool> _chapterIsOffline = {};
   // 当前无限下拉中已渲染展示的章节索引列表
@@ -592,10 +598,17 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _checkBookmarkStatus() async {
     await _bookmarkService.initialize();
-    final bookmarked = await _bookmarkService.isChapterBookmarked(
-      widget.book.bookId,
-      _currentActiveIndex,
-    );
+    final position = _captureReadingPosition() ?? _readingPosition;
+    final bookmarked =
+        position != null &&
+        await _bookmarkService.bookmarkAt(
+              widget.book.bookId,
+              position.chapterId,
+              _currentActiveIndex,
+              position.paragraphIndex,
+              position.characterOffset,
+            ) !=
+            null;
     if (mounted && _isCurrentChapterBookmarked != bookmarked) {
       if (_showControls) {
         setState(() {
@@ -619,49 +632,50 @@ class _ReaderScreenState extends State<ReaderScreen>
     await _bookmarkService.initialize();
     final notes = await _bookmarkService.getNotes(widget.book.bookId);
     if (!mounted) return;
-    final old = Object.hashAll(
-      _cachedNotes.map((note) => (note.id, note.text, note.note)),
-    );
-    final next = Object.hashAll(
-      notes.map((note) => (note.id, note.text, note.note)),
-    );
-    if (old == next) return;
+    final serialized = jsonEncode(notes.map((note) => note.toJson()).toList());
+    if (serialized == _notesSerialized) return;
     setState(() {
+      _notesSerialized = serialized;
       _cachedNotes = notes;
-      _rebuildNotesIndex(notes);
+      _resolvedNotes.clear();
       _notesVersion++;
     });
   }
 
-  /// 构建笔记划线 O(1) 哈希索引，避免在每个段落 build 时遍历全书笔记
-  void _rebuildNotesIndex(List<ReadingNote> notes) {
-    _notesByChapterPara.clear();
-    for (final n in notes) {
-      final t = n.text.trim();
-      if (t.isEmpty) continue;
-      final key = '${n.chapterIndex}_${n.paragraphIndex}';
-      final list = _notesByChapterPara.putIfAbsent(key, () => <String>[]);
-      if (!list.contains(t)) {
-        list.add(t);
-      }
-    }
-  }
-
-  /// O(1) 获取指定章节与段落的划线词句列表
-  List<String> _getParaUnderlines(
+  List<ResolvedNote> _noteRanges(
     int chapterIndex,
-    int paraIndex, {
-    bool includeChapterWide = false,
-  }) {
-    final exact = _notesByChapterPara['${chapterIndex}_$paraIndex'];
-    if (!includeChapterWide) {
-      return exact ?? const [];
+    int paragraphIndex,
+    List<String> paragraphs,
+  ) {
+    var cached = _resolvedNotes.remove(chapterIndex);
+    if (cached == null ||
+        !identical(cached.paragraphs, paragraphs) ||
+        cached.version != _notesVersion) {
+      final hash = NoteAnchorResolver.digest(paragraphs);
+      final chapterId = widget.chapters[chapterIndex].itemId;
+      final grouped = <int, List<ResolvedNote>>{};
+      for (final note in _cachedNotes) {
+        if (note.chapterId.isNotEmpty
+            ? note.chapterId != chapterId
+            : note.chapterIndex != chapterIndex) {
+          continue;
+        }
+        final resolved = NoteAnchorResolver.resolve(
+          note,
+          paragraphs,
+          chapterHash: hash,
+        );
+        if (resolved != null) {
+          grouped.putIfAbsent(resolved.paragraphIndex, () => []).add(resolved);
+        }
+      }
+      cached = _ResolvedChapterNotes(paragraphs, _notesVersion, grouped);
     }
-    final wide = _notesByChapterPara['${chapterIndex}_-1'];
-    if (exact == null && wide == null) return const [];
-    if (wide == null) return exact!;
-    if (exact == null) return wide;
-    return {...exact, ...wide}.toList();
+    _resolvedNotes[chapterIndex] = cached;
+    while (_resolvedNotes.length > 9) {
+      _resolvedNotes.remove(_resolvedNotes.keys.first);
+    }
+    return cached.notes[paragraphIndex] ?? const [];
   }
 
   /// 获取预分割的章节段落列表（带内存缓存，杜绝 build 期重复 split）
@@ -675,16 +689,132 @@ class _ReaderScreenState extends State<ReaderScreen>
     return split;
   }
 
-  Future<void> _toggleBookmark() async {
-    final bookmarked = await _bookmarkService.isChapterBookmarked(
-      widget.book.bookId,
-      _currentActiveIndex,
+  Future<bool> _saveSelectedNote(
+    int chapterIndex,
+    int paragraphIndex,
+    String paragraph,
+    int start,
+    int end, {
+    NoteEditData? edit,
+  }) async {
+    start = ReaderText.safeOffset(paragraph, start);
+    end = ReaderText.safeOffset(paragraph, end);
+    if (end <= start) return false;
+    final paragraphs = _getChapterParagraphs(chapterIndex);
+    final before = ReaderText.safeOffset(paragraph, math.max(0, start - 24));
+    final after = ReaderText.safeOffset(
+      paragraph,
+      math.min(paragraph.length, end + 24),
     );
-    if (bookmarked) {
-      await _bookmarkService.removeBookmarkByChapter(
-        widget.book.bookId,
-        _currentActiveIndex,
+    try {
+      await _bookmarkService.addNote(
+        bookId: widget.book.bookId,
+        chapterId: widget.chapters[chapterIndex].itemId,
+        chapterIndex: chapterIndex,
+        chapterTitle: widget.chapters[chapterIndex].title,
+        paragraphIndex: paragraphIndex,
+        text: paragraph.substring(start, end),
+        note: edit?.note ?? '',
+        startOffset: start,
+        endOffset: end,
+        chapterHash: paragraphs.isEmpty
+            ? ''
+            : NoteAnchorResolver.digest(paragraphs),
+        prefix: paragraph.substring(before, start),
+        suffix: paragraph.substring(end, after),
+        colorIndex: edit?.colorIndex ?? 0,
+        tags: edit?.tags ?? const [],
       );
+      return true;
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('笔记未保存，请检查存储空间后重试')));
+      }
+      return false;
+    }
+  }
+
+  int? _annotationChapter(String id, int oldIndex, String title) {
+    if (id.isNotEmpty) return _chapterIndexById[id];
+    final matches = [
+      for (var i = 0; i < widget.chapters.length; i++)
+        if (widget.chapters[i].title == title) i,
+    ];
+    if (matches.length == 1) return matches.single;
+    return title.isEmpty && oldIndex >= 0 && oldIndex < widget.chapters.length
+        ? oldIndex
+        : null;
+  }
+
+  Future<void> _openReadingNote(ReadingNote note) async {
+    final index = _annotationChapter(
+      note.chapterId,
+      note.chapterIndex,
+      note.chapterTitle,
+    );
+    if (index == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('章节已变化，笔记待重新定位')));
+      return;
+    }
+    await _navigateTo(
+      ReadingPosition(chapterId: widget.chapters[index].itemId),
+      readingNote: note,
+    );
+  }
+
+  Future<void> _openBookmark(Bookmark bookmark) async {
+    final index = _annotationChapter(
+      bookmark.chapterId,
+      bookmark.chapterIndex,
+      bookmark.chapterTitle,
+    );
+    if (index == null) {
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(const SnackBar(content: Text('章节已变化，书签待重新定位')));
+      return;
+    }
+    await _navigateTo(
+      ReadingPosition(
+        chapterId: widget.chapters[index].itemId,
+        paragraphIndex: bookmark.paragraphIndex,
+        characterOffset: bookmark.characterOffset,
+      ),
+    );
+  }
+
+  Future<void> _showNotesManagement() async {
+    _beginReaderPanel();
+    final note = await showModalBottomSheet<ReadingNote>(
+      context: context,
+      isScrollControlled: true,
+      backgroundColor: _themes[_themeIndex].backgroundColor,
+      builder: (_) => FractionallySizedBox(
+        heightFactor: .9,
+        child: ReaderNotesSheet(book: widget.book, theme: _themes[_themeIndex]),
+      ),
+    ).whenComplete(_endReaderPanel);
+    if (mounted && note != null) await _openReadingNote(note);
+  }
+
+  Future<void> _toggleBookmark() async {
+    final current =
+        _captureReadingPosition() ??
+        _readingPosition ??
+        ReadingPosition(chapterId: widget.chapters[_currentActiveIndex].itemId);
+    final bookmarked = await _bookmarkService.bookmarkAt(
+      widget.book.bookId,
+      current.chapterId,
+      _currentActiveIndex,
+      current.paragraphIndex,
+      current.characterOffset,
+    );
+    if (bookmarked != null) {
+      await _bookmarkService.removeBookmark(bookmarked.id, widget.book.bookId);
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -708,6 +838,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         bookId: widget.book.bookId,
         chapterIndex: _currentActiveIndex,
         chapterTitle: chapter.title,
+        chapterId: chapter.itemId,
         paragraphIndex: paragraphIndex,
         characterOffset: position?.characterOffset ?? 0,
         contentPreview: preview,
@@ -1372,6 +1503,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     bool remember = true,
     String? locateText,
     ReaderSearchHit? searchHit,
+    ReadingNote? readingNote,
   }) async {
     if (!mounted) return false;
     final index = _chapterIndexById[target.chapterId];
@@ -1404,6 +1536,23 @@ class _ReaderScreenState extends State<ReaderScreen>
           SnackBar(content: Text(_chapterErrors[index] ?? '章节暂未就绪，原阅读位置已保留')),
         );
         return false;
+      }
+      if (readingNote != null) {
+        final resolved = NoteAnchorResolver.resolve(
+          readingNote,
+          _getChapterParagraphs(index),
+        );
+        if (resolved == null) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('原文已变化或引用不唯一，笔记待重新定位；未改变阅读位置')),
+          );
+          return false;
+        }
+        target = ReadingPosition(
+          chapterId: target.chapterId,
+          paragraphIndex: resolved.paragraphIndex,
+          characterOffset: resolved.start,
+        );
       }
       if (searchHit != null) {
         final paragraphs = _getChapterParagraphs(index);
@@ -2221,6 +2370,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       return;
     }
     _showControls = !_showControls;
+    if (_showControls) _checkBookmarkStatus();
   }
 
   void _beginReaderPanel() {
@@ -2613,24 +2763,9 @@ class _ReaderScreenState extends State<ReaderScreen>
                                       },
                                     ),
                                     onTap: () {
-                                      if (bookmark.chapterIndex < 0 ||
-                                          bookmark.chapterIndex >=
-                                              widget.chapters.length) {
-                                        return;
-                                      }
                                       _showControls = false;
                                       Navigator.pop(sheetContext);
-                                      _navigateTo(
-                                        ReadingPosition(
-                                          chapterId: widget
-                                              .chapters[bookmark.chapterIndex]
-                                              .itemId,
-                                          paragraphIndex:
-                                              bookmark.paragraphIndex,
-                                          characterOffset:
-                                              bookmark.characterOffset,
-                                        ),
-                                      );
+                                      _openBookmark(bookmark);
                                     },
                                   );
                                 },
@@ -2658,25 +2793,9 @@ class _ReaderScreenState extends State<ReaderScreen>
                                   style: TextStyle(color: theme.secondaryColor),
                                 ),
                                 onTap: () {
-                                  if (note.chapterIndex < 0 ||
-                                      note.chapterIndex >=
-                                          widget.chapters.length) {
-                                    return;
-                                  }
                                   _showControls = false;
                                   Navigator.pop(sheetContext);
-                                  _navigateTo(
-                                    ReadingPosition(
-                                      chapterId: widget
-                                          .chapters[note.chapterIndex]
-                                          .itemId,
-                                      paragraphIndex: math.max(
-                                        0,
-                                        note.paragraphIndex,
-                                      ),
-                                    ),
-                                    locateText: note.text,
-                                  );
+                                  _openReadingNote(note);
                                 },
                               );
                             },
@@ -3392,17 +3511,20 @@ class _ReaderScreenState extends State<ReaderScreen>
     final isLocateTarget = _highlightedParagraphKey == paraKeyStr;
     final showBubble = _showCommentBubbles && commentCount > 0;
 
-    // O(1) 哈希索引获取本章节、本段落特定的划线记录
     final validChapIdx = chapterIndex;
-    final paraUnderlines = _getParaUnderlines(validChapIdx, paraIndex);
+    final ranges = _noteRanges(
+      chapterIndex,
+      paraIndex,
+      _getChapterParagraphs(chapterIndex),
+    );
 
     final inlineSpans = _withSpokenHighlight(
       _buildSpansWithUnderline(
         textToShow,
-        paraUnderlines,
+        ranges,
         theme,
-        validChapIdx,
-        paraIndex,
+        sourceStart: 0,
+        sourceLength: trimmed.length,
       ),
       textToShow,
       theme,
@@ -3430,6 +3552,9 @@ class _ReaderScreenState extends State<ReaderScreen>
         chapterIndex: validChapIdx,
         paraIndex: paraIndex,
         onTap: _toggleControls,
+        sourceParagraph: trimmed,
+        sourceStart: 0,
+        sourceEnd: trimmed.length,
         commentBubble: showBubble
             ? _buildCommentBubble(chapter, paraIndex, trimmed, theme)
             : null,
@@ -3451,6 +3576,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     required int chapterIndex,
     required int paraIndex,
     required VoidCallback? onTap,
+    required String sourceParagraph,
+    required int sourceStart,
+    required int sourceEnd,
     Widget? commentBubble,
     Size? commentBubbleSize,
   }) {
@@ -3496,6 +3624,20 @@ class _ReaderScreenState extends State<ReaderScreen>
                 context: context,
                 anchors: editableTextState.contextMenuAnchors,
                 selectedText: selected,
+                sourceParagraph: sourceParagraph,
+                selectionStart:
+                    (textVal.selection.start +
+                            selected.length -
+                            selected.trimLeft().length -
+                            (textVal.text.length - (sourceEnd - sourceStart)) +
+                            sourceStart)
+                        .clamp(0, sourceParagraph.length),
+                selectionEnd:
+                    (textVal.selection.end -
+                            (selected.length - selected.trimRight().length) -
+                            (textVal.text.length - (sourceEnd - sourceStart)) +
+                            sourceStart)
+                        .clamp(0, sourceParagraph.length),
                 onDismiss: () {
                   editableTextState.hideToolbar();
                   _activeSelectableParaNotifier.value = null;
@@ -3883,6 +4025,9 @@ class _ReaderScreenState extends State<ReaderScreen>
                 color: theme.backgroundColor,
                 onSelected: (val) {
                   switch (val) {
+                    case 'notes':
+                      _showNotesManagement();
+                      break;
                     case 'pure':
                       _setPureMode();
                       break;
@@ -3904,6 +4049,13 @@ class _ReaderScreenState extends State<ReaderScreen>
                   }
                 },
                 itemBuilder: (context) => [
+                  PopupMenuItem(
+                    value: 'notes',
+                    child: Text(
+                      '笔记管理与导出',
+                      style: TextStyle(color: theme.textColor),
+                    ),
+                  ),
                   PopupMenuItem(
                     value: 'pure',
                     child: Text(
@@ -4401,6 +4553,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
     });
     _schedulePositionSave();
+    _checkBookmarkStatus();
     if (changedChapter) {
       final chapterId = widget.chapters[_currentActiveIndex].itemId;
       _fetchCommentStats(chapterId);
@@ -4477,6 +4630,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                             page.fragments[index].paragraphIndex,
                             chapterIndex: address.chapterIndex,
                             pageIdx: address.pageIndex,
+                            sourceParagraphs: paragraphs,
                             sourceParagraph:
                                 paragraphs[page.fragments[index].paragraphIndex]
                                     .trim(),
@@ -4548,6 +4702,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     required int chapterIndex,
     int pageIdx = 0,
     required String sourceParagraph,
+    required List<String> sourceParagraphs,
     required int startOffset,
     required int endOffset,
   }) {
@@ -4559,31 +4714,14 @@ class _ReaderScreenState extends State<ReaderScreen>
     final validChapIdx = chapterIndex;
     final effectiveParaIdx = pIdx;
 
-    final paraUnderlines = _getParaUnderlines(
-      validChapIdx,
-      effectiveParaIdx,
-      includeChapterWide: true,
-    );
-
-    final visibleUnderlines = <String>[];
-    for (final phrase in paraUnderlines) {
-      var offset = sourceParagraph.indexOf(phrase);
-      while (offset >= 0) {
-        final begin = math.max(startOffset, offset);
-        final end = math.min(endOffset, offset + phrase.length);
-        if (begin < end) {
-          visibleUnderlines.add(sourceParagraph.substring(begin, end));
-        }
-        offset = sourceParagraph.indexOf(phrase, offset + 1);
-      }
-    }
+    final ranges = _noteRanges(chapterIndex, pIdx, sourceParagraphs);
     final spans = _withSpokenHighlight(
       _buildSpansWithUnderline(
         textToShow,
-        visibleUnderlines,
+        ranges,
         theme,
-        validChapIdx,
-        effectiveParaIdx,
+        sourceStart: startOffset,
+        sourceLength: endOffset - startOffset,
       ),
       textToShow,
       theme,
@@ -4607,6 +4745,9 @@ class _ReaderScreenState extends State<ReaderScreen>
         chapterIndex: validChapIdx,
         paraIndex: effectiveParaIdx,
         onTap: null,
+        sourceParagraph: sourceParagraph,
+        sourceStart: startOffset,
+        sourceEnd: endOffset,
         // 续页中段不重复显示段评。只在原段落的真正结尾预留内联气泡；
         // 统计异步到达时可原位显示，不缩窄正文，也不改变既有分页。
         commentBubble:
@@ -4716,113 +4857,59 @@ class _ReaderScreenState extends State<ReaderScreen>
   /// 纯正虚线下划线构建（字体平整不跳起，仅在文字下方展示优雅虚线）
   List<InlineSpan> _buildSpansWithUnderline(
     String text,
-    List<String> underlinedPhrases,
-    ReaderTheme theme,
-    int chapterIndex,
-    int paraIndex,
-  ) {
-    if (underlinedPhrases.isEmpty) {
-      return [
-        TextSpan(
-          text: text,
-          style: TextStyle(
-            fontSize: _fontSize,
-            height: _lineHeight,
-            color: theme.textColor,
-            letterSpacing: _letterSpacing,
-            fontFamily: _resolveFontFamily(_fontFamily),
-          ),
-        ),
-      ];
+    List<ResolvedNote> notes,
+    ReaderTheme theme, {
+    required int sourceStart,
+    required int sourceLength,
+  }) {
+    final prefix = math.max(0, text.length - sourceLength);
+    final ranges = <(int, int, ReadingNote)>[];
+    final points = <int>{0, text.length};
+    for (final note in notes) {
+      final start = (note.start - sourceStart + prefix).clamp(
+        prefix,
+        text.length,
+      );
+      final end = (note.end - sourceStart + prefix).clamp(prefix, text.length);
+      if (start >= end) continue;
+      ranges.add((start, end, note.note));
+      points
+        ..add(start)
+        ..add(end);
     }
-
-    final matchedPhrases = underlinedPhrases
-        .map((p) => p.trim())
-        .where((p) => p.isNotEmpty && text.contains(p))
-        .toList();
-
-    if (matchedPhrases.isEmpty) {
-      return [
+    final sorted = points.toList()..sort();
+    const colors = [
+      Color(0xFFFFD46B),
+      Color(0xFF80B98B),
+      Color(0xFF7CA2E8),
+      Color(0xFFE59ABC),
+    ];
+    return [
+      for (var i = 0; i + 1 < sorted.length; i++)
         TextSpan(
-          text: text,
-          style: TextStyle(
-            fontSize: _fontSize,
-            height: _lineHeight,
-            color: theme.textColor,
-            letterSpacing: _letterSpacing,
-            fontFamily: _resolveFontFamily(_fontFamily),
-          ),
-        ),
-      ];
-    }
-
-    matchedPhrases.sort((a, b) => b.length.compareTo(a.length));
-    final spans = <InlineSpan>[];
-    int currentPos = 0;
-
-    while (currentPos < text.length) {
-      int nextMatchStart = -1;
-      String? matchedPhrase;
-
-      for (final phrase in matchedPhrases) {
-        final idx = text.indexOf(phrase, currentPos);
-        if (idx != -1 && (nextMatchStart == -1 || idx < nextMatchStart)) {
-          nextMatchStart = idx;
-          matchedPhrase = phrase;
-        }
-      }
-
-      if (nextMatchStart != -1 && matchedPhrase != null) {
-        if (nextMatchStart > currentPos) {
-          spans.add(
-            TextSpan(
-              text: text.substring(currentPos, nextMatchStart),
-              style: TextStyle(
-                fontSize: _fontSize,
-                height: _lineHeight,
-                color: theme.textColor,
-                letterSpacing: _letterSpacing,
-                fontFamily: _resolveFontFamily(_fontFamily),
-              ),
-            ),
-          );
-        }
-        // 虚线下划线：文字基线绝对平齐，绝不抬高文字，文字下方展现优雅虚线
-        spans.add(
-          TextSpan(
-            text: matchedPhrase,
-            style: TextStyle(
-              fontSize: _fontSize,
-              height: _lineHeight,
-              fontFamily: _resolveFontFamily(_fontFamily),
-              letterSpacing: _letterSpacing,
-              color: theme.textColor,
-              decoration: TextDecoration.underline,
+          text: text.substring(sorted[i], sorted[i + 1]),
+          style: () {
+            final matches = ranges.where(
+              (range) => range.$1 <= sorted[i] && range.$2 >= sorted[i + 1],
+            );
+            final mark = matches.isEmpty ? null : matches.first.$3;
+            return _readerBodyStyle(color: theme.textColor).copyWith(
+              decoration: mark == null ? null : TextDecoration.underline,
               decorationStyle: TextDecorationStyle.dashed,
-              decorationColor: theme.textColor.withValues(alpha: 0.85),
+              decorationColor: theme.textColor.withValues(alpha: .85),
               decorationThickness: 1.5,
-            ),
-          ),
-        );
-        currentPos = nextMatchStart + matchedPhrase.length;
-      } else {
-        spans.add(
-          TextSpan(
-            text: text.substring(currentPos),
-            style: TextStyle(
-              fontSize: _fontSize,
-              height: _lineHeight,
-              color: theme.textColor,
-              letterSpacing: _letterSpacing,
-              fontFamily: _resolveFontFamily(_fontFamily),
-            ),
-          ),
-        );
-        break;
-      }
-    }
-
-    return spans;
+              backgroundColor: mark == null
+                  ? null
+                  : Color.alphaBlend(
+                      colors[mark.colorIndex.clamp(0, 3)].withValues(
+                        alpha: .18,
+                      ),
+                      theme.backgroundColor,
+                    ),
+            );
+          }(),
+        ),
+    ];
   }
 
   /// 专属暗色半透明圆角气泡浮动菜单（支持自由选择文字、复制、划线/取消划线，紧贴选区）
@@ -4830,6 +4917,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     required BuildContext context,
     required TextSelectionToolbarAnchors anchors,
     required String selectedText,
+    required String sourceParagraph,
+    required int selectionStart,
+    required int selectionEnd,
     required VoidCallback onDismiss,
     required int chapterIndex,
     required int paraIndex,
@@ -4837,20 +4927,18 @@ class _ReaderScreenState extends State<ReaderScreen>
     final cleanSelected = selectedText.trim();
     if (cleanSelected.isEmpty) return const SizedBox.shrink();
 
-    // 智能判断选中文本是否已在划线中
-    final isAlreadyUnderlined = _cachedNotes.any((n) {
-      if (n.chapterIndex != chapterIndex) return false;
-      if (paraIndex >= 0 &&
-          n.paragraphIndex >= 0 &&
-          n.paragraphIndex != paraIndex) {
-        return false;
-      }
-      final noteText = n.text.trim();
-      if (noteText.isEmpty) return false;
-      return noteText == cleanSelected ||
-          noteText.contains(cleanSelected) ||
-          cleanSelected.contains(noteText);
-    });
+    final existing =
+        _noteRanges(
+              chapterIndex,
+              paraIndex,
+              _getChapterParagraphs(chapterIndex),
+            )
+            .where(
+              (note) =>
+                  note.start <= selectionStart && note.end >= selectionEnd,
+            )
+            .firstOrNull;
+    final isAlreadyUnderlined = existing != null;
 
     final messenger = ScaffoldMessenger.of(context);
 
@@ -4878,6 +4966,48 @@ class _ReaderScreenState extends State<ReaderScreen>
             crossAxisAlignment: WrapCrossAlignment.center,
             runSpacing: 4,
             children: [
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  minimumSize: const Size(48, 48),
+                ),
+                onPressed: () async {
+                  onDismiss();
+                  _beginReaderPanel();
+                  final edit = await showDialog<NoteEditData>(
+                    context: context,
+                    builder: (_) => _themes[_themeIndex].wrap(
+                      NoteEditorDialog(
+                        quote: existing?.note.text ?? cleanSelected,
+                        initialNote: existing?.note.note ?? '',
+                        initialColor: existing?.note.colorIndex ?? 0,
+                        initialTags: existing?.note.tags ?? const [],
+                      ),
+                    ),
+                  ).whenComplete(_endReaderPanel);
+                  if (edit == null) return;
+                  if (existing != null) {
+                    await _bookmarkService.updateNote(
+                      existing.note.edited(
+                        note: edit.note,
+                        colorIndex: edit.colorIndex,
+                        tags: edit.tags,
+                      ),
+                    );
+                  } else {
+                    await _saveSelectedNote(
+                      chapterIndex,
+                      paraIndex,
+                      sourceParagraph,
+                      selectionStart,
+                      selectionEnd,
+                      edit: edit,
+                    );
+                  }
+                },
+                icon: const Icon(Icons.note_add_outlined, size: 16),
+                label: const Text('笔记'),
+              ),
               TextButton.icon(
                 style: TextButton.styleFrom(
                   foregroundColor: Colors.white,
@@ -4925,14 +5055,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                   ),
                   onPressed: () async {
                     onDismiss();
-                    await _bookmarkService.removeNoteByParagraph(
-                      bookId: widget.book.bookId,
-                      chapterIndex: chapterIndex,
-                      paragraphIndex: paraIndex,
-                      text: cleanSelected,
-                    );
-                    await _bookmarkService.removeNoteByText(
-                      cleanSelected,
+                    await _bookmarkService.removeNote(
+                      existing.note.id,
                       widget.book.bookId,
                     );
                     await _loadNotes();
@@ -4972,14 +5096,15 @@ class _ReaderScreenState extends State<ReaderScreen>
                   ),
                   onPressed: () async {
                     onDismiss();
-                    await _bookmarkService.addNote(
-                      bookId: widget.book.bookId,
-                      chapterIndex: chapterIndex,
-                      chapterTitle: widget.chapters[chapterIndex].title,
-                      paragraphIndex: paraIndex >= 0 ? paraIndex : 0,
-                      text: cleanSelected,
-                      note: '',
-                    );
+                    if (!await _saveSelectedNote(
+                      chapterIndex,
+                      paraIndex,
+                      sourceParagraph,
+                      selectionStart,
+                      selectionEnd,
+                    )) {
+                      return;
+                    }
                     await _loadNotes();
                     if (mounted) {
                       messenger.showSnackBar(
@@ -5243,4 +5368,11 @@ class _ReaderSheetLifetimeState extends State<_ReaderSheetLifetime> {
 
   @override
   Widget build(BuildContext context) => widget.child;
+}
+
+class _ResolvedChapterNotes {
+  final List<String> paragraphs;
+  final int version;
+  final Map<int, List<ResolvedNote>> notes;
+  const _ResolvedChapterNotes(this.paragraphs, this.version, this.notes);
 }

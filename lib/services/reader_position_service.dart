@@ -8,6 +8,7 @@ import '../models/reading_snapshot.dart';
 class ReaderPositionService {
   // Shared across reader instances: a disposing route must not race a new one.
   static final Map<String, Future<void>> _writes = {};
+  static Future<void> flush() => Future.wait(_writes.values).then((_) {});
 
   Future<ReadingPosition?> load(String bookId) async {
     return (await loadSnapshot(bookId))?.position;

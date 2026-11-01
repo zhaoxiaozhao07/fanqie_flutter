@@ -11,6 +11,7 @@ import '../services/bookshelf_service.dart';
 import '../services/history_service.dart';
 import '../services/local_book_service.dart';
 import '../widgets/local_book_import_dialog.dart';
+import '../widgets/reader_backup_dialog.dart';
 import '../widgets/book_cover_widget.dart';
 import '../widgets/download_action_button.dart';
 import 'book_detail_screen.dart';
@@ -86,7 +87,9 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     final modeStr = prefs.getString('bookshelf_view_mode') ?? 'list';
     if (mounted) {
       setState(() {
-        _viewMode = modeStr == 'grid3' ? BookshelfViewMode.grid3 : BookshelfViewMode.list;
+        _viewMode = modeStr == 'grid3'
+            ? BookshelfViewMode.grid3
+            : BookshelfViewMode.list;
       });
     }
   }
@@ -99,19 +102,28 @@ class BookshelfScreenState extends State<BookshelfScreen> {
       _viewMode = nextMode;
     });
     final prefs = await SharedPreferences.getInstance();
-    await prefs.setString('bookshelf_view_mode', nextMode == BookshelfViewMode.grid3 ? 'grid3' : 'list');
+    await prefs.setString(
+      'bookshelf_view_mode',
+      nextMode == BookshelfViewMode.grid3 ? 'grid3' : 'list',
+    );
   }
 
   Future<void> _showImportLocalBookDialog() async {
     final result = await showDialog<LocalImportResult>(
-      context: context, barrierDismissible: false,
+      context: context,
+      barrierDismissible: false,
       builder: (_) => const LocalBookImportDialog(),
     );
     if (!mounted || result == null) return;
-    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(
-      result.alreadyExists ? '已保留《${result.book.bookName}》原阅读数据' :
-      '已导入《${result.book.bookName}》共 ${result.chapterCount} 章',
-    )));
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          result.alreadyExists
+              ? '已保留《${result.book.bookName}》原阅读数据'
+              : '已导入《${result.book.bookName}》共 ${result.chapterCount} 章',
+        ),
+      ),
+    );
     _loadData(silent: true);
   }
 
@@ -155,16 +167,20 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     // 互相补全缺失的书封（无论是 bookId 相同还是书名相同）
     for (int i = 0; i < shelfList.length; i++) {
       final b = shelfList[i];
-      final resolvedCover = coverByBookId[b.bookId] ?? coverByName[b.bookName.trim()];
-      if ((b.thumbUrl == null || b.thumbUrl!.isEmpty) && resolvedCover != null) {
+      final resolvedCover =
+          coverByBookId[b.bookId] ?? coverByName[b.bookName.trim()];
+      if ((b.thumbUrl == null || b.thumbUrl!.isEmpty) &&
+          resolvedCover != null) {
         shelfList[i] = b.copyWithCover(resolvedCover);
         _bookshelfService.updateCover(b.bookId, resolvedCover);
       }
     }
     for (int i = 0; i < downloads.length; i++) {
       final d = downloads[i];
-      final resolvedCover = coverByBookId[d.bookId] ?? coverByName[d.bookName.trim()];
-      if ((d.thumbUrl == null || d.thumbUrl!.isEmpty) && resolvedCover != null) {
+      final resolvedCover =
+          coverByBookId[d.bookId] ?? coverByName[d.bookName.trim()];
+      if ((d.thumbUrl == null || d.thumbUrl!.isEmpty) &&
+          resolvedCover != null) {
         downloads[i] = d.copyWithCover(resolvedCover);
         _downloadHistoryService.updateCover(d.bookId, resolvedCover);
       }
@@ -195,7 +211,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     return clean.startsWith('https://') ? clean : null;
   }
 
-  void _autoFetchMissingCovers(List<BookshelfBook> shelfList, List<DownloadHistory> downloads) async {
+  void _autoFetchMissingCovers(
+    List<BookshelfBook> shelfList,
+    List<DownloadHistory> downloads,
+  ) async {
     final missingBooks = <String, String>{}; // bookId -> bookName
     for (final b in shelfList) {
       if (b.thumbUrl == null || b.thumbUrl!.isEmpty) {
@@ -219,7 +238,9 @@ class BookshelfScreenState extends State<BookshelfScreen> {
         // 优先通过书名搜索获取最新封面
         final searchRes = await _apiService.searchBooks(bookName);
         String? newCover;
-        if (searchRes.isNotEmpty && searchRes.first.thumbUrl != null && searchRes.first.thumbUrl!.isNotEmpty) {
+        if (searchRes.isNotEmpty &&
+            searchRes.first.thumbUrl != null &&
+            searchRes.first.thumbUrl!.isNotEmpty) {
           newCover = cleanCoverUrl(searchRes.first.thumbUrl);
         } else {
           final detail = await _apiService.getBookDetail(bookId);
@@ -326,7 +347,9 @@ class BookshelfScreenState extends State<BookshelfScreen> {
 
     if (confirmed == true && mounted) {
       if (isDownloadedTab) {
-        await _downloadHistoryService.deleteHistories(_selectedBookIds.toList());
+        await _downloadHistoryService.deleteHistories(
+          _selectedBookIds.toList(),
+        );
       } else {
         await _bookshelfService.removeMultiple(_selectedBookIds.toList());
       }
@@ -339,7 +362,9 @@ class BookshelfScreenState extends State<BookshelfScreen> {
 
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(isDownloadedTab ? '已删除选中的下载记录' : '已将选中的书籍移出书架')),
+          SnackBar(
+            content: Text(isDownloadedTab ? '已删除选中的下载记录' : '已将选中的书籍移出书架'),
+          ),
         );
       }
     }
@@ -375,7 +400,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
       return;
     }
 
-    final targetIndex = (shelfBook.lastReadChapterIndex ?? 0).clamp(0, chapters.length - 1);
+    final targetIndex = (shelfBook.lastReadChapterIndex ?? 0).clamp(
+      0,
+      chapters.length - 1,
+    );
     final readerSettings = await ReaderSettingsRepository().load(book.bookId);
     if (!mounted) return;
 
@@ -430,9 +458,9 @@ class BookshelfScreenState extends State<BookshelfScreen> {
 
     if (chapters.isEmpty) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('无法解析小说章节，请检查网络或文件')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('无法解析小说章节，请检查网络或文件')));
       }
       return;
     }
@@ -464,7 +492,9 @@ class BookshelfScreenState extends State<BookshelfScreen> {
       if (!await file.exists()) return [];
 
       final content = await file.readAsString();
-      final reg = RegExp(r'\n(?=(?:第[0-9一二三四五六七八九十百千]+[章回节卷集幕篇部]|[0-9]+[、\s]))');
+      final reg = RegExp(
+        r'\n(?=(?:第[0-9一二三四五六七八九十百千]+[章回节卷集幕篇部]|[0-9]+[、\s]))',
+      );
       final splits = content.split(reg);
 
       final chapters = <Chapter>[];
@@ -473,12 +503,14 @@ class BookshelfScreenState extends State<BookshelfScreen> {
         if (part.isEmpty) continue;
         final lines = part.split('\n');
         final title = lines.first.trim();
-        chapters.add(Chapter(
-          itemId: 'local_$i',
-          title: title.length > 40 ? title.substring(0, 40) : title,
-          order: i + 1,
-          content: part,
-        ));
+        chapters.add(
+          Chapter(
+            itemId: 'local_$i',
+            title: title.length > 40 ? title.substring(0, 40) : title,
+            order: i + 1,
+            content: part,
+          ),
+        );
       }
       return chapters;
     } catch (_) {
@@ -520,10 +552,25 @@ class BookshelfScreenState extends State<BookshelfScreen> {
           if (!_isSelectionMode) ...[
             const DownloadActionButton(),
             // 导入本地 TXT / EPUB 小说
-            IconButton(
+            PopupMenuButton<String>(
               icon: const Icon(Icons.file_upload_outlined),
-              tooltip: '导入本地小说',
-              onPressed: _showImportLocalBookDialog,
+              tooltip: '导入与备份',
+              onSelected: (value) async {
+                if (value == 'import') {
+                  await _showImportLocalBookDialog();
+                } else {
+                  await showDialog<void>(
+                    context: context,
+                    barrierDismissible: false,
+                    builder: (_) => const ReaderBackupDialog(),
+                  );
+                  if (mounted) _loadData(silent: true);
+                }
+              },
+              itemBuilder: (_) => const [
+                PopupMenuItem(value: 'import', child: Text('导入本地小说')),
+                PopupMenuItem(value: 'backup', child: Text('备份与恢复')),
+              ],
             ),
             // 切换 列表 / 三列 视图按钮
             IconButton(
@@ -532,7 +579,9 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                     ? Icons.grid_view_rounded
                     : Icons.view_list_rounded,
               ),
-              tooltip: _viewMode == BookshelfViewMode.list ? '切换为三列视图' : '切换为列表视图',
+              tooltip: _viewMode == BookshelfViewMode.list
+                  ? '切换为三列视图'
+                  : '切换为列表视图',
               onPressed: _toggleViewMode,
             ),
             // 排序选项 (仅收藏页支持)
@@ -576,7 +625,9 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                     ? Icons.deselect_rounded
                     : Icons.select_all_rounded,
               ),
-              tooltip: _selectedBookIds.length == _currentTabTotalCount ? '取消全选' : '全选',
+              tooltip: _selectedBookIds.length == _currentTabTotalCount
+                  ? '取消全选'
+                  : '全选',
               onPressed: _selectAll,
             ),
         ],
@@ -597,9 +648,17 @@ class BookshelfScreenState extends State<BookshelfScreen> {
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         children: [
-          _buildPillTab(0, '全部收藏 (${_books.length})', Icons.collections_bookmark_rounded),
+          _buildPillTab(
+            0,
+            '全部收藏 (${_books.length})',
+            Icons.collections_bookmark_rounded,
+          ),
           const SizedBox(width: 8),
-          _buildPillTab(1, '已下载 (${_downloadedBooks.length})', Icons.download_done_rounded),
+          _buildPillTab(
+            1,
+            '已下载 (${_downloadedBooks.length})',
+            Icons.download_done_rounded,
+          ),
           const Spacer(),
           Text(
             _viewMode == BookshelfViewMode.grid3 ? '三列视图' : '单列列表',
@@ -630,7 +689,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
               : const Color(0xFFF2F4F7),
           borderRadius: BorderRadius.circular(20),
           border: isSelected
-              ? Border.all(color: AppTheme.primaryColor.withValues(alpha: 0.5), width: 1.5)
+              ? Border.all(
+                  color: AppTheme.primaryColor.withValues(alpha: 0.5),
+                  width: 1.5,
+                )
               : Border.all(color: Colors.transparent, width: 1.5),
         ),
         child: Row(
@@ -639,7 +701,9 @@ class BookshelfScreenState extends State<BookshelfScreen> {
             Icon(
               icon,
               size: 16,
-              color: isSelected ? AppTheme.primaryColor : AppTheme.textSecondary,
+              color: isSelected
+                  ? AppTheme.primaryColor
+                  : AppTheme.textSecondary,
             ),
             const SizedBox(width: 6),
             Text(
@@ -647,7 +711,9 @@ class BookshelfScreenState extends State<BookshelfScreen> {
               style: TextStyle(
                 fontSize: 13,
                 fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                color: isSelected ? AppTheme.primaryColor : AppTheme.textSecondary,
+                color: isSelected
+                    ? AppTheme.primaryColor
+                    : AppTheme.textSecondary,
               ),
             ),
           ],
@@ -677,11 +743,19 @@ class BookshelfScreenState extends State<BookshelfScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.collections_bookmark_outlined, size: 72, color: Colors.grey.shade400),
+              Icon(
+                Icons.collections_bookmark_outlined,
+                size: 72,
+                color: Colors.grey.shade400,
+              ),
               const SizedBox(height: 16),
               const Text(
                 '书架空空如也',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textPrimary),
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: AppTheme.textPrimary,
+                ),
               ),
               const SizedBox(height: 8),
               const Text(
@@ -697,8 +771,13 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppTheme.primaryColor,
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 12,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20),
+                  ),
                 ),
               ),
             ],
@@ -741,7 +820,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
             ],
           ),
           child: ListTile(
-            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 6,
+            ),
             leading: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -782,7 +864,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                           top: 0,
                           right: 0,
                           child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 4,
+                              vertical: 1,
+                            ),
                             decoration: const BoxDecoration(
                               color: Colors.redAccent,
                               borderRadius: BorderRadius.only(
@@ -817,7 +902,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
               },
               child: Text(
                 shelfBook.bookName,
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -837,7 +925,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                   const SizedBox(height: 4),
                   Text(
                     '作者: ${shelfBook.author}',
-                    style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppTheme.textSecondary,
+                    ),
                     maxLines: 1,
                   ),
                   const SizedBox(height: 4),
@@ -863,7 +954,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                       ),
                       Text(
                         _formatTime(shelfBook.lastReadTime),
-                        style: const TextStyle(fontSize: 10, color: AppTheme.textHint),
+                        style: const TextStyle(
+                          fontSize: 10,
+                          color: AppTheme.textHint,
+                        ),
                       ),
                     ],
                   ),
@@ -874,14 +968,24 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                 ? OutlinedButton(
                     onPressed: () => _continueReading(shelfBook),
                     style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 4,
+                      ),
                       minimumSize: const Size(0, 32),
-                      side: BorderSide(color: AppTheme.primaryColor.withValues(alpha: 0.6)),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                      side: BorderSide(
+                        color: AppTheme.primaryColor.withValues(alpha: 0.6),
+                      ),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
                     ),
                     child: Text(
                       shelfBook.lastReadChapterIndex != null ? '续读' : '开读',
-                      style: const TextStyle(fontSize: 12, color: AppTheme.primaryColor),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: AppTheme.primaryColor,
+                      ),
                     ),
                   )
                 : null,
@@ -987,13 +1091,20 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                                 color: Colors.white,
                                 shape: BoxShape.circle,
                                 boxShadow: [
-                                  BoxShadow(color: Colors.black.withValues(alpha: 0.2), blurRadius: 4),
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.2),
+                                    blurRadius: 4,
+                                  ),
                                 ],
                               ),
                               child: Icon(
-                                isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
+                                isSelected
+                                    ? Icons.check_circle
+                                    : Icons.radio_button_unchecked,
                                 size: 24,
-                                color: isSelected ? AppTheme.primaryColor : Colors.grey,
+                                color: isSelected
+                                    ? AppTheme.primaryColor
+                                    : Colors.grey,
                               ),
                             ),
                           ),
@@ -1003,12 +1114,18 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                             top: 4,
                             right: 4,
                             child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 5,
+                                vertical: 2,
+                              ),
                               decoration: BoxDecoration(
                                 color: Colors.redAccent,
                                 borderRadius: BorderRadius.circular(6),
                                 boxShadow: [
-                                  BoxShadow(color: Colors.black.withValues(alpha: 0.25), blurRadius: 4),
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.25),
+                                    blurRadius: 4,
+                                  ),
                                 ],
                               ),
                               child: const Text(
@@ -1022,21 +1139,31 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                             ),
                           ),
                         // 阅读进度标签浮层
-                        if (!_isSelectionMode && shelfBook.lastReadChapterIndex != null)
+                        if (!_isSelectionMode &&
+                            shelfBook.lastReadChapterIndex != null)
                           Positioned(
                             bottom: 0,
                             left: 0,
                             right: 0,
                             child: Container(
-                              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 4,
+                                vertical: 2,
+                              ),
                               decoration: BoxDecoration(
                                 color: Colors.black.withValues(alpha: 0.65),
-                                borderRadius: const BorderRadius.vertical(bottom: Radius.circular(8)),
+                                borderRadius: const BorderRadius.vertical(
+                                  bottom: Radius.circular(8),
+                                ),
                               ),
                               child: Text(
                                 '读至第${(shelfBook.lastReadChapterIndex ?? 0) + 1}章',
                                 textAlign: TextAlign.center,
-                                style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.w500),
+                                style: const TextStyle(
+                                  fontSize: 10,
+                                  color: Colors.white,
+                                  fontWeight: FontWeight.w500,
+                                ),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
@@ -1072,7 +1199,11 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                         height: 36, // 严格固定两行高度，确保所有卡片对齐
                         child: Text(
                           shelfBook.bookName,
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, height: 1.3),
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            height: 1.3,
+                          ),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -1082,7 +1213,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                         height: 16,
                         child: Text(
                           shelfBook.author,
-                          style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: AppTheme.textSecondary,
+                          ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -1107,11 +1241,19 @@ class BookshelfScreenState extends State<BookshelfScreen> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              Icon(Icons.download_done_rounded, size: 72, color: Colors.grey.shade400),
+              Icon(
+                Icons.download_done_rounded,
+                size: 72,
+                color: Colors.grey.shade400,
+              ),
               const SizedBox(height: 16),
               const Text(
                 '暂无已下载小说',
-                style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold, color: AppTheme.textPrimary),
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.bold,
+                  color: AppTheme.textPrimary,
+                ),
               ),
               const SizedBox(height: 8),
               const Text(
@@ -1127,8 +1269,13 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                 style: ElevatedButton.styleFrom(
                   backgroundColor: AppTheme.primaryColor,
                   foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
-                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 24,
+                    vertical: 12,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(20),
+                  ),
                 ),
               ),
             ],
@@ -1168,7 +1315,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
             ],
           ),
           child: ListTile(
-            contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+            contentPadding: const EdgeInsets.symmetric(
+              horizontal: 12,
+              vertical: 6,
+            ),
             leading: Row(
               mainAxisSize: MainAxisSize.min,
               children: [
@@ -1218,7 +1368,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
               },
               child: Text(
                 download.bookName,
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                style: const TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 15,
+                ),
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
               ),
@@ -1238,27 +1391,40 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                   const SizedBox(height: 4),
                   Text(
                     '作者: ${download.author}',
-                    style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                    style: const TextStyle(
+                      fontSize: 12,
+                      color: AppTheme.textSecondary,
+                    ),
                     maxLines: 1,
                   ),
                   const SizedBox(height: 4),
                   Row(
                     children: [
                       Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 6,
+                          vertical: 2,
+                        ),
                         decoration: BoxDecoration(
                           color: AppTheme.primaryColor.withValues(alpha: 0.1),
                           borderRadius: BorderRadius.circular(4),
                         ),
                         child: Text(
                           download.format,
-                          style: const TextStyle(fontSize: 10, color: AppTheme.primaryColor, fontWeight: FontWeight.bold),
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: AppTheme.primaryColor,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
                       ),
                       const SizedBox(width: 8),
                       Text(
                         download.formattedFileSize,
-                        style: const TextStyle(fontSize: 11, color: AppTheme.textHint),
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AppTheme.textHint,
+                        ),
                       ),
                     ],
                   ),
@@ -1273,9 +1439,14 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                     style: ElevatedButton.styleFrom(
                       backgroundColor: AppTheme.primaryColor,
                       foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 12,
+                        vertical: 6,
+                      ),
                       minimumSize: const Size(0, 32),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(16),
+                      ),
                     ),
                   )
                 : null,
@@ -1370,13 +1541,20 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                                 color: Colors.white,
                                 shape: BoxShape.circle,
                                 boxShadow: [
-                                  BoxShadow(color: Colors.black.withValues(alpha: 0.2), blurRadius: 4),
+                                  BoxShadow(
+                                    color: Colors.black.withValues(alpha: 0.2),
+                                    blurRadius: 4,
+                                  ),
                                 ],
                               ),
                               child: Icon(
-                                isSelected ? Icons.check_circle : Icons.radio_button_unchecked,
+                                isSelected
+                                    ? Icons.check_circle
+                                    : Icons.radio_button_unchecked,
                                 size: 24,
-                                color: isSelected ? AppTheme.primaryColor : Colors.grey,
+                                color: isSelected
+                                    ? AppTheme.primaryColor
+                                    : Colors.grey,
                               ),
                             ),
                           ),
@@ -1385,14 +1563,21 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                           bottom: 4,
                           right: 4,
                           child: Container(
-                            padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 5,
+                              vertical: 2,
+                            ),
                             decoration: BoxDecoration(
                               color: AppTheme.primaryColor,
                               borderRadius: BorderRadius.circular(4),
                             ),
                             child: Text(
                               download.format,
-                              style: const TextStyle(fontSize: 9, color: Colors.white, fontWeight: FontWeight.bold),
+                              style: const TextStyle(
+                                fontSize: 9,
+                                color: Colors.white,
+                                fontWeight: FontWeight.bold,
+                              ),
                             ),
                           ),
                         ),
@@ -1426,7 +1611,11 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                         height: 36, // 严格固定两行高度
                         child: Text(
                           download.bookName,
-                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13, height: 1.3),
+                          style: const TextStyle(
+                            fontWeight: FontWeight.bold,
+                            fontSize: 13,
+                            height: 1.3,
+                          ),
                           maxLines: 2,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -1436,7 +1625,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                         height: 16,
                         child: Text(
                           '${download.author} · ${download.formattedFileSize}',
-                          style: const TextStyle(fontSize: 10, color: AppTheme.textSecondary),
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: AppTheme.textSecondary,
+                          ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
@@ -1454,7 +1646,12 @@ class BookshelfScreenState extends State<BookshelfScreen> {
 
   Widget _buildBatchBottomBar() {
     return Container(
-      padding: EdgeInsets.fromLTRB(16, 8, 16, MediaQuery.of(context).padding.bottom + 8),
+      padding: EdgeInsets.fromLTRB(
+        16,
+        8,
+        16,
+        MediaQuery.of(context).padding.bottom + 8,
+      ),
       decoration: BoxDecoration(
         color: Colors.white,
         boxShadow: [
@@ -1485,11 +1682,17 @@ class BookshelfScreenState extends State<BookshelfScreen> {
           ElevatedButton.icon(
             onPressed: _selectedBookIds.isEmpty ? null : _deleteSelected,
             icon: const Icon(Icons.delete_outline, size: 18),
-            label: Text(_currentSubTab == 1 ? '删除下载 (${_selectedBookIds.length})' : '移出书架 (${_selectedBookIds.length})'),
+            label: Text(
+              _currentSubTab == 1
+                  ? '删除下载 (${_selectedBookIds.length})'
+                  : '移出书架 (${_selectedBookIds.length})',
+            ),
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.red,
               foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
             ),
           ),
         ],

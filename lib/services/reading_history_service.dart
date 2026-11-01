@@ -17,6 +17,14 @@ class ReadingHistoryService {
   SharedPreferences? _prefs;
   bool _initialized = false;
 
+  Future<void> reload() async {
+    _initialized = false;
+    _prefs = null;
+    _historyList.clear();
+    await initialize();
+    changeNotifier.value++;
+  }
+
   final ValueNotifier<int> changeNotifier = ValueNotifier<int>(0);
 
   Future<void> initialize() async {

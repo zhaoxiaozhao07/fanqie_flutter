@@ -3,10 +3,37 @@ import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'app_theme.dart';
 import 'screens/main_screen.dart';
 import 'services/reader_route_observer.dart';
+import 'services/reader_backup_service.dart';
 
-void main() {
+Future<void> main() async {
   // 确保 Flutter 绑定已初始化
   WidgetsFlutterBinding.ensureInitialized();
+  try {
+    await ReaderBackupService().recover();
+  } catch (_) {
+    runApp(
+      MaterialApp(
+        home: Scaffold(
+          body: SafeArea(
+            child: Center(
+              child: Padding(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Text('上次恢复尚未完成，原数据与恢复日志已保留。请检查存储空间后重试。'),
+                    const SizedBox(height: 16),
+                    FilledButton(onPressed: main, child: const Text('重试恢复')),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    return;
+  }
   // 配置全局图片缓存
   _configureImageCache();
   runApp(const FanqieApp());

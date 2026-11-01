@@ -43,9 +43,13 @@ class SafeZipReader {
   static Future<SafeZipReader> open(
     File file, {
     void Function()? checkCancelled,
+    int fileLimit = maxFileBytes,
+    int entryLimit = maxEntries,
+    int inflatedLimit = maxInflatedBytes,
+    int individualLimit = 32 * 1024 * 1024,
   }) async {
     final length = await file.length();
-    if (length < 22 || length > maxFileBytes) {
+    if (length < 22 || length > fileLimit) {
       throw const FormatException('压缩包为空或超过 128 MB');
     }
     final input = await file.open();
@@ -67,7 +71,7 @@ class SafeZipReader {
       final size = tail.getUint32(end + 12, Endian.little);
       final offset = tail.getUint32(end + 16, Endian.little);
       if (count == 0 ||
-          count > maxEntries ||
+          count > entryLimit ||
           size > 16 * 1024 * 1024 ||
           offset + size > start + end ||
           tail.getUint16(end + 4, Endian.little) != 0 ||
@@ -104,7 +108,7 @@ class SafeZipReader {
             commentLength > 4096 ||
             next > size ||
             localOffset + 30 > offset ||
-            uncompressed > 32 * 1024 * 1024 ||
+            uncompressed > individualLimit ||
             ((attrs >> 16) & 0xf000) == 0xa000 ||
             (flags & 1) != 0 ||
             (method != 0 && method != 8)) {
@@ -122,7 +126,7 @@ class SafeZipReader {
         }
         name = safeName(name);
         inflated += uncompressed;
-        if (inflated > maxInflatedBytes || entries.containsKey(name)) {
+        if (inflated > inflatedLimit || entries.containsKey(name)) {
           throw const FormatException('压缩包解压总量超限或存在重复路径');
         }
         await input.setPosition(localOffset);
@@ -162,6 +166,22 @@ class SafeZipReader {
     int maxBytes = 8 * 1024 * 1024,
     void Function()? checkCancelled,
   }) async {
+    final output = BytesBuilder(copy: false);
+    await for (final chunk in stream(
+      name,
+      maxBytes: maxBytes,
+      checkCancelled: checkCancelled,
+    )) {
+      output.add(chunk);
+    }
+    return output.takeBytes();
+  }
+
+  Stream<List<int>> stream(
+    String name, {
+    int maxBytes = 128 * 1024 * 1024,
+    void Function()? checkCancelled,
+  }) async* {
     final entry = entries[name];
     if (entry == null) throw FormatException('缺少压缩包资源：$name');
     if (entry.size > maxBytes) throw const FormatException('资源大小超过安全限制');
@@ -180,20 +200,19 @@ class SafeZipReader {
     final data = entry.method == 8
         ? compressed().transform(ZLibDecoder(raw: true))
         : compressed();
-    final output = BytesBuilder(copy: false);
     var total = 0;
+    var crc = 0;
     await for (final chunk in data) {
       checkCancelled?.call();
       total += chunk.length;
       if (total > maxBytes || total > entry.size) {
         throw const FormatException('资源实际解压大小超过声明或安全限制');
       }
-      output.add(chunk);
+      crc = archive.getCrc32(chunk, crc);
+      yield chunk;
     }
-    final bytes = output.takeBytes();
-    if (total != entry.size || archive.getCrc32(bytes) != entry.crc) {
+    if (total != entry.size || crc != entry.crc) {
       throw const FormatException('压缩包资源校验失败');
     }
-    return bytes;
   }
 }
