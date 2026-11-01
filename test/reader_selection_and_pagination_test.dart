@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'package:fanqie_flutter/widgets/simulation_page_turn.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -510,6 +511,197 @@ void main() {
 
       await tester.pumpAndSettle();
       expect(find.text('第二页正文内容'), findsOneWidget);
+    });
+
+    testWidgets('Realistic SimulationPageTurn supports 4 corners drag, mirror reflected text matrix and page turn', (tester) async {
+      int currentPage = 0;
+      final simKey = GlobalKey<SimulationPageTurnState>();
+      final pages = ['第一页：白日依山尽', '第二页：黄河入海流', '第三页：欲穷千里目'];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                return SizedBox(
+                  width: 400,
+                  height: 600,
+                  child: SimulationPageTurn(
+                    key: simKey,
+                    totalPages: pages.length,
+                    currentPageIndex: currentPage,
+                    backgroundColor: const Color(0xFFF5EEDC),
+                    pageBuilder: (context, idx) {
+                      return Container(
+                        color: const Color(0xFFF5EEDC),
+                        padding: const EdgeInsets.all(24),
+                        child: Text(pages[idx], style: const TextStyle(fontSize: 18)),
+                      );
+                    },
+                    onPageChanged: (newPage) {
+                      setState(() => currentPage = newPage);
+                    },
+                  ),
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+      expect(find.text('第一页：白日依山尽'), findsOneWidget);
+
+      // 1. Drag from bottom-right corner (390, 580) towards top-left (200, 350)
+      final gesture = await tester.startGesture(const Offset(390, 580));
+      await tester.pump(const Duration(milliseconds: 50));
+      await gesture.moveTo(const Offset(220, 380));
+      await tester.pump(const Duration(milliseconds: 50));
+
+      // Underneath, the second page should be visible, and the reflected back page should render with Transform
+      expect(find.text('第二页：黄河入海流'), findsOneWidget);
+      expect(find.byType(Transform), findsWidgets);
+      expect(find.byType(ClipPath), findsWidgets);
+
+      // Release gesture to complete turn to page 2
+      await gesture.moveTo(const Offset(10, 450));
+      await gesture.up();
+      await tester.pumpAndSettle();
+
+      expect(currentPage, 1);
+      expect(find.text('第二页：黄河入海流'), findsOneWidget);
+
+      // 2. Drag from top-right corner (390, 30) towards bottom-left (150, 200) to turn to page 3
+      final gesture2 = await tester.startGesture(const Offset(390, 30));
+      await tester.pump(const Duration(milliseconds: 50));
+      await gesture2.moveTo(const Offset(160, 200));
+      await tester.pump(const Duration(milliseconds: 50));
+      await gesture2.moveTo(const Offset(10, 200));
+      await gesture2.up();
+      await tester.pumpAndSettle();
+
+      expect(currentPage, 2);
+      expect(find.text('第三页：欲穷千里目'), findsOneWidget);
+
+      // 3. Programmatic/Volume turn to previous page using simulation key
+      simKey.currentState?.turnToPreviousPage();
+      await tester.pumpAndSettle();
+      expect(currentPage, 1);
+      expect(find.text('第二页：黄河入海流'), findsOneWidget);
+    });
+
+    testWidgets('Switching between page turn animations (cover, simulation, slide, fade) NEVER causes grey screen', (tester) async {
+      String currentMode = 'cover';
+      int pageIndex = 0;
+      PageController pageController = PageController();
+      final simKey = GlobalKey<SimulationPageTurnState>();
+      final pages = ['Page A', 'Page B', 'Page C'];
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: StatefulBuilder(
+              builder: (context, setState) {
+                return Column(
+                  children: [
+                    Row(
+                      children: [
+                        ElevatedButton(
+                          onPressed: () {
+                            setState(() {
+                              currentMode = 'simulation';
+                              pageController.dispose();
+                              pageController = PageController(initialPage: pageIndex);
+                            });
+                          },
+                          child: const Text('To Simulation'),
+                        ),
+                        ElevatedButton(
+                          onPressed: () {
+                            setState(() {
+                              currentMode = 'slide';
+                              pageController.dispose();
+                              pageController = PageController(initialPage: pageIndex);
+                            });
+                          },
+                          child: const Text('To Slide'),
+                        ),
+                        ElevatedButton(
+                          onPressed: () {
+                            setState(() {
+                              currentMode = 'fade';
+                              pageController.dispose();
+                              pageController = PageController(initialPage: pageIndex);
+                            });
+                          },
+                          child: const Text('To Fade'),
+                        ),
+                        ElevatedButton(
+                          onPressed: () {
+                            setState(() {
+                              currentMode = 'cover';
+                              pageController.dispose();
+                              pageController = PageController(initialPage: pageIndex);
+                            });
+                          },
+                          child: const Text('To Cover'),
+                        ),
+                      ],
+                    ),
+                    Expanded(
+                      child: currentMode == 'simulation'
+                          ? SimulationPageTurn(
+                              key: simKey,
+                              totalPages: pages.length,
+                              currentPageIndex: pageIndex,
+                              backgroundColor: Colors.white,
+                              pageBuilder: (context, idx) => Center(child: Text(pages[idx])),
+                              onPageChanged: (idx) => setState(() => pageIndex = idx),
+                            )
+                          : PageView.builder(
+                              controller: pageController,
+                              itemCount: pages.length,
+                              onPageChanged: (idx) => pageIndex = idx,
+                              itemBuilder: (context, idx) => Center(child: Text(pages[idx])),
+                            ),
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.pumpAndSettle();
+      expect(find.text('Page A'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      // Rapidly toggle across all 4 modes
+      await tester.tap(find.text('To Simulation'));
+      await tester.pumpAndSettle();
+      expect(find.text('Page A'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      await tester.tap(find.text('To Slide'));
+      await tester.pumpAndSettle();
+      expect(find.text('Page A'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      await tester.tap(find.text('To Fade'));
+      await tester.pumpAndSettle();
+      expect(find.text('Page A'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      await tester.tap(find.text('To Simulation'));
+      await tester.pumpAndSettle();
+      expect(find.text('Page A'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+
+      await tester.tap(find.text('To Cover'));
+      await tester.pumpAndSettle();
+      expect(find.text('Page A'), findsOneWidget);
+      expect(tester.takeException(), isNull);
     });
   });
 }

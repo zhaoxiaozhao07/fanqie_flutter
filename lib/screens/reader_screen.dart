@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -17,6 +16,7 @@ import '../services/reader_system_service.dart';
 import '../services/tts_service.dart';
 import '../widgets/tts_player_panel.dart';
 import '../widgets/paragraph_comment_sheet.dart';
+import '../widgets/simulation_page_turn.dart';
 
 /// 阅读器主题配置
 class ReaderTheme {
@@ -127,9 +127,9 @@ class _ReaderScreenState extends State<ReaderScreen> {
   String _pageTurnAnimation = 'cover'; // 左右翻页动画：cover(覆盖), simulation(仿真), slide(滑动), fade(渐变)
   PageController? _pageController;
   PageController _pageHorizontalController = PageController();
+  final GlobalKey<SimulationPageTurnState> _simulationKey = GlobalKey<SimulationPageTurnState>();
   int _currentHorizontalPageIndex = 0;
   bool _pendingJumpToLastPage = false;
-  int _chapterTurnDirection = 1; // 1: 下一章, -1: 上一章
   double _horizontalOverscrollAccum = 0.0;
   DateTime _lastBubbleTapTime = DateTime.fromMillisecondsSinceEpoch(0);
   Offset? _lastPagePointerDown;
@@ -476,6 +476,14 @@ class _ReaderScreenState extends State<ReaderScreen> {
   void _onVolumeScroll(String direction) {
     if (!_volumeKeyScroll) return;
     if (_isPageMode) {
+      if (_pageTurnAnimation == 'simulation') {
+        if (direction == 'down') {
+          _simulationKey.currentState?.turnToNextPage();
+        } else {
+          _simulationKey.currentState?.turnToPreviousPage();
+        }
+        return;
+      }
       final totalPages = _cachedPaginatedPages.isNotEmpty ? _cachedPaginatedPages.length : 1;
       if (direction == 'down') {
         _animateToNextHorizontalPage(totalPages);
@@ -531,9 +539,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
   Future<void> _startFromChapter(int index, {bool toLastPage = false}) async {
     if (index < 0 || index >= widget.chapters.length) return;
 
-    final prevActive = _currentActiveIndex;
     setState(() {
-      _chapterTurnDirection = index >= prevActive ? 1 : -1;
       _currentActiveIndex = index;
       _activeChapterNotifier.value = index;
       _anchorChapterIndex = index;
@@ -1311,9 +1317,10 @@ class _ReaderScreenState extends State<ReaderScreen> {
                               _pageTurnAnimation = val.first;
                               if (!_isPageMode) {
                                 _isPageMode = true;
-                                _currentHorizontalPageIndex = 0;
-                                _pageHorizontalController = PageController();
                               }
+                              // 重新初始化 PageController，彻底杜绝多重挂载异常与灰屏
+                              _pageHorizontalController.dispose();
+                              _pageHorizontalController = PageController(initialPage: _currentHorizontalPageIndex);
                               _savePreferences();
                             });
                             setModalState(() {});
@@ -2904,6 +2911,45 @@ class _ReaderScreenState extends State<ReaderScreen> {
         }
         final chapterParas = _getChapterParagraphs(_currentActiveIndex);
 
+        // 1. 真实 3D 纸张四角仿真翻页模式（支持四角随手指拖拽、背面镜像文字反转、立体光影渲染）
+        if (_pageTurnAnimation == 'simulation') {
+          return SimulationPageTurn(
+            key: _simulationKey,
+            totalPages: pages.length,
+            currentPageIndex: _currentHorizontalPageIndex,
+            backgroundColor: theme.backgroundColor,
+            isDark: theme.systemBrightness == Brightness.dark,
+            lastBubbleTapTimeGetter: () => _lastBubbleTapTime,
+            onPageChanged: (newPage) {
+              if (_activeSelectableParaNotifier.value != null) {
+                _activeSelectableParaNotifier.value = null;
+              }
+              setState(() {
+                _currentHorizontalPageIndex = newPage;
+              });
+            },
+            onPreviousChapter: () => _startFromChapter(_currentActiveIndex - 1, toLastPage: true),
+            onNextChapter: () => _startFromChapter(_currentActiveIndex + 1),
+            onCenterTap: _toggleControls,
+            pageBuilder: (context, pageIdx) {
+              return _buildSinglePageCard(
+                pageIdx: pageIdx,
+                pages: pages,
+                chapter: chapter,
+                chapterParas: chapterParas,
+                theme: theme,
+                constraints: constraints,
+                onTapParagraph: () {
+                  final pos = _lastPagePointerDown ?? Offset(constraints.maxWidth / 2, 0);
+                  _handleHorizontalPageTap(pos, constraints.maxWidth, pages.length);
+                },
+              );
+            },
+          );
+        }
+
+        // 2. 覆盖 (cover)、滑动 (slide)、渐变 (fade) 翻页模式
+        // 移除多余的外部 AnimatedSwitcher，彻底杜绝 PageController 冲突灰屏
         return Listener(
           behavior: HitTestBehavior.translucent,
           onPointerDown: (event) {
@@ -2916,141 +2962,66 @@ class _ReaderScreenState extends State<ReaderScreen> {
               final pos = _lastPagePointerDown ?? Offset(constraints.maxWidth / 2, 0);
               _handleHorizontalPageTap(pos, constraints.maxWidth, pages.length);
             },
-            child: AnimatedSwitcher(
-              duration: const Duration(milliseconds: 300),
-              switchInCurve: Curves.easeOutCubic,
-              switchOutCurve: Curves.easeInCubic,
-              transitionBuilder: (child, animation) =>
-                  _buildChapterTransitionAnimation(child, animation, constraints.maxWidth, theme),
-              child: Container(
-                key: ValueKey('page_chapter_${_currentActiveIndex}_$_pageTurnAnimation'),
-                width: constraints.maxWidth,
-                height: constraints.maxHeight,
-                color: theme.backgroundColor,
-                child: NotificationListener<ScrollNotification>(
-                  onNotification: (notification) {
-                    if (notification is OverscrollNotification) {
-                      _horizontalOverscrollAccum += notification.overscroll;
-                    } else if (notification is ScrollUpdateNotification) {
-                      final pos = notification.metrics;
-                      if (pos.pixels < pos.minScrollExtent - 52 && _currentActiveIndex > 0) {
-                        _horizontalOverscrollAccum = -60;
-                      } else if (pos.pixels > pos.maxScrollExtent + 52 &&
-                          _currentActiveIndex < widget.chapters.length - 1) {
-                        _horizontalOverscrollAccum = 60;
-                      }
-                    } else if (notification is ScrollEndNotification) {
-                      if (_horizontalOverscrollAccum < -45 &&
-                          _currentHorizontalPageIndex == 0 &&
-                          _currentActiveIndex > 0) {
-                        _horizontalOverscrollAccum = 0;
-                        _startFromChapter(_currentActiveIndex - 1, toLastPage: true);
-                      } else if (_horizontalOverscrollAccum > 45 &&
-                          _currentHorizontalPageIndex >= pages.length - 1 &&
-                          _currentActiveIndex < widget.chapters.length - 1) {
-                        _horizontalOverscrollAccum = 0;
-                        _startFromChapter(_currentActiveIndex + 1);
-                      }
-                      _horizontalOverscrollAccum = 0;
-                    }
-                    return false;
-                  },
-                  child: PageView.builder(
-                    controller: _pageHorizontalController,
-                    itemCount: pages.length,
-                    physics: const BouncingScrollPhysics(),
-                    onPageChanged: (page) {
-                      if (_activeSelectableParaNotifier.value != null) {
-                        _activeSelectableParaNotifier.value = null;
-                      }
-                      _currentHorizontalPageIndex = page;
+            child: NotificationListener<ScrollNotification>(
+              onNotification: (notification) {
+                if (notification is OverscrollNotification) {
+                  _horizontalOverscrollAccum += notification.overscroll;
+                } else if (notification is ScrollUpdateNotification) {
+                  final pos = notification.metrics;
+                  if (pos.pixels < pos.minScrollExtent - 52 && _currentActiveIndex > 0) {
+                    _horizontalOverscrollAccum = -60;
+                  } else if (pos.pixels > pos.maxScrollExtent + 52 &&
+                      _currentActiveIndex < widget.chapters.length - 1) {
+                    _horizontalOverscrollAccum = 60;
+                  }
+                } else if (notification is ScrollEndNotification) {
+                  if (_horizontalOverscrollAccum < -45 &&
+                      _currentHorizontalPageIndex == 0 &&
+                      _currentActiveIndex > 0) {
+                    _horizontalOverscrollAccum = 0;
+                    _startFromChapter(_currentActiveIndex - 1, toLastPage: true);
+                  } else if (_horizontalOverscrollAccum > 45 &&
+                      _currentHorizontalPageIndex >= pages.length - 1 &&
+                      _currentActiveIndex < widget.chapters.length - 1) {
+                    _horizontalOverscrollAccum = 0;
+                    _startFromChapter(_currentActiveIndex + 1);
+                  }
+                  _horizontalOverscrollAccum = 0;
+                }
+                return false;
+              },
+              child: PageView.builder(
+                controller: _pageHorizontalController,
+                itemCount: pages.length,
+                physics: const BouncingScrollPhysics(),
+                onPageChanged: (page) {
+                  if (_activeSelectableParaNotifier.value != null) {
+                    _activeSelectableParaNotifier.value = null;
+                  }
+                  _currentHorizontalPageIndex = page;
+                },
+                itemBuilder: (context, pageIdx) {
+                  final pageCard = _buildSinglePageCard(
+                    pageIdx: pageIdx,
+                    pages: pages,
+                    chapter: chapter,
+                    chapterParas: chapterParas,
+                    theme: theme,
+                    constraints: constraints,
+                    onTapParagraph: () {
+                      final pos = _lastPagePointerDown ?? Offset(constraints.maxWidth / 2, 0);
+                      _handleHorizontalPageTap(pos, constraints.maxWidth, pages.length);
                     },
-                    itemBuilder: (context, pageIdx) {
-                      final pageText = pages[pageIdx];
-                      final pageParagraphs = pageText.split('\n\n');
+                  );
 
-                      final pageCard = Container(
-                        width: constraints.maxWidth,
-                        height: constraints.maxHeight,
-                        color: theme.backgroundColor,
-                        padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 8),
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (pageIdx == 0) ...[
-                              Text(
-                                chapter.title,
-                                style: TextStyle(
-                                  fontSize: _fontSize + 4,
-                                  fontWeight: FontWeight.bold,
-                                  color: theme.textColor,
-                                  height: 1.4,
-                                  fontFamily: _resolveFontFamily(_fontFamily),
-                                ),
-                              ),
-                              const SizedBox(height: 10),
-                            ],
-                            // 饱满填满整屏
-                            Expanded(
-                              child: ValueListenableBuilder<int>(
-                                valueListenable: _commentStatsVersionNotifier,
-                                builder: (context, _, _) {
-                                  return Column(
-                                    crossAxisAlignment: CrossAxisAlignment.start,
-                                    children: [
-                                      for (int i = 0; i < pageParagraphs.length; i++) ...[
-                                        _buildParagraphWithUnderlines(
-                                          pageParagraphs[i],
-                                          theme,
-                                          chapter,
-                                          i,
-                                          chapterParas,
-                                          pageIdx: pageIdx,
-                                          onTapParagraph: () {
-                                            final pos = _lastPagePointerDown ??
-                                                Offset(constraints.maxWidth / 2, 0);
-                                            _handleHorizontalPageTap(
-                                              pos,
-                                              constraints.maxWidth,
-                                              pages.length,
-                                            );
-                                          },
-                                        ),
-                                        SizedBox(height: _paragraphSpacing.clamp(4.0, 14.0)),
-                                      ],
-                                    ],
-                                  );
-                                },
-                              ),
-                            ),
-                            // 纯净居中展示页码（去除重复的章节名）
-                            Padding(
-                              padding: const EdgeInsets.only(top: 4, bottom: 2),
-                              child: Center(
-                                child: Text(
-                                  '第 ${pageIdx + 1} / ${pages.length} 页',
-                                  style: TextStyle(
-                                    fontSize: 11,
-                                    color: theme.secondaryColor.withValues(alpha: 0.65),
-                                    letterSpacing: 1.0,
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      );
-
-                      return _buildAnimatedPageItem(
-                        pageIdx: pageIdx,
-                        width: constraints.maxWidth,
-                        height: constraints.maxHeight,
-                        theme: theme,
-                        child: pageCard,
-                      );
-                    },
-                  ),
-                ),
+                  return _buildAnimatedPageItem(
+                    pageIdx: pageIdx,
+                    width: constraints.maxWidth,
+                    height: constraints.maxHeight,
+                    theme: theme,
+                    child: pageCard,
+                  );
+                },
               ),
             ),
           ),
@@ -3059,31 +3030,85 @@ class _ReaderScreenState extends State<ReaderScreen> {
     );
   }
 
-  /// 跨章节翻页过渡动画（与当前选中的翻页动画风格保持一致）
-  Widget _buildChapterTransitionAnimation(
-    Widget child,
-    Animation<double> animation,
-    double width,
-    ReaderTheme theme,
-  ) {
-    if (_pageTurnAnimation == 'fade') {
-      return FadeTransition(opacity: animation, child: child);
-    }
-    final isIncoming = child.key == ValueKey('page_chapter_${_currentActiveIndex}_$_pageTurnAnimation');
-    final dir = _chapterTurnDirection.toDouble();
-    final offsetTween = isIncoming
-        ? Tween<Offset>(begin: Offset(0.18 * dir, 0.0), end: Offset.zero)
-        : Tween<Offset>(begin: Offset(-0.18 * dir, 0.0), end: Offset.zero);
-    return FadeTransition(
-      opacity: CurvedAnimation(parent: animation, curve: Curves.easeOut),
-      child: SlideTransition(
-        position: offsetTween.animate(CurvedAnimation(parent: animation, curve: Curves.easeOutCubic)),
-        child: child,
+  /// 构建单页内容卡片（由 PageView 或 SimulationPageTurn 复用）
+  Widget _buildSinglePageCard({
+    required int pageIdx,
+    required List<String> pages,
+    required Chapter chapter,
+    required List<String> chapterParas,
+    required ReaderTheme theme,
+    required BoxConstraints constraints,
+    VoidCallback? onTapParagraph,
+  }) {
+    final pageText = pages[pageIdx];
+    final pageParagraphs = pageText.split('\n\n');
+
+    return Container(
+      width: constraints.maxWidth,
+      height: constraints.maxHeight,
+      color: theme.backgroundColor,
+      padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (pageIdx == 0) ...[
+            Text(
+              chapter.title,
+              style: TextStyle(
+                fontSize: _fontSize + 4,
+                fontWeight: FontWeight.bold,
+                color: theme.textColor,
+                height: 1.4,
+                fontFamily: _resolveFontFamily(_fontFamily),
+              ),
+            ),
+            const SizedBox(height: 10),
+          ],
+          // 饱满填满整屏
+          Expanded(
+            child: ValueListenableBuilder<int>(
+              valueListenable: _commentStatsVersionNotifier,
+              builder: (context, _, _) {
+                return Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    for (int i = 0; i < pageParagraphs.length; i++) ...[
+                      _buildParagraphWithUnderlines(
+                        pageParagraphs[i],
+                        theme,
+                        chapter,
+                        i,
+                        chapterParas,
+                        pageIdx: pageIdx,
+                        onTapParagraph: onTapParagraph,
+                      ),
+                      SizedBox(height: _paragraphSpacing.clamp(4.0, 14.0)),
+                    ],
+                  ],
+                );
+              },
+            ),
+          ),
+          // 纯净居中展示页码（去除重复的章节名）
+          Padding(
+            padding: const EdgeInsets.only(top: 4, bottom: 2),
+            child: Center(
+              child: Text(
+                '第 ${pageIdx + 1} / ${pages.length} 页',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: theme.secondaryColor.withValues(alpha: 0.65),
+                  letterSpacing: 1.0,
+                ),
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  /// 构建单页实时翻页动画（支持手指跟手拖拽与点击翻页：覆盖 cover / 仿真 simulation / 滑动 slide / 渐变 fade）
+  /// 构建单页实时翻页动画（覆盖 cover / 滑动 slide / 渐变 fade）
   Widget _buildAnimatedPageItem({
     required int pageIdx,
     required double width,
@@ -3105,120 +3130,7 @@ class _ReaderScreenState extends State<ReaderScreen> {
           return staticChild!;
         }
 
-        final isDark = theme.systemBrightness == Brightness.dark;
-
         switch (_pageTurnAnimation) {
-          case 'simulation':
-            // 仿真立体书页卷曲翻页动画：双页锚定书脊，沿移动折线展示 3D 卷曲纸背高光、折痕暗影与投射阴影
-            if (delta < 0) {
-              final t = (-delta).clamp(0.0, 1.0);
-              final curlWidth = (math.sin(t * math.pi) * 44.0).clamp(6.0, 44.0);
-              final paperBackBase = Color.lerp(
-                theme.backgroundColor,
-                theme.highlightColor,
-                isDark ? 0.55 : 0.72,
-              )!;
-              final paperBackHighlight = Color.lerp(
-                paperBackBase,
-                Colors.white,
-                isDark ? 0.14 : 0.45,
-              )!;
-              final creaseShadowAlpha = (0.26 * math.sin(t * math.pi)).clamp(0.0, 0.26);
-
-              return ClipRect(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Transform.translate(
-                      offset: Offset(t * width, 0),
-                      child: staticChild,
-                    ),
-                    // 卷曲纸背立体高光与折痕带
-                    Positioned(
-                      right: 0,
-                      top: 0,
-                      bottom: 0,
-                      width: curlWidth + 14.0,
-                      child: IgnorePointer(
-                        child: Row(
-                          children: [
-                            // 内侧折痕柔和暗影
-                            Container(
-                              width: 14.0,
-                              decoration: BoxDecoration(
-                                gradient: LinearGradient(
-                                  begin: Alignment.centerLeft,
-                                  end: Alignment.centerRight,
-                                  colors: [
-                                    Colors.transparent,
-                                    Colors.black.withValues(alpha: creaseShadowAlpha),
-                                  ],
-                                ),
-                              ),
-                            ),
-                            // 3D 圆柱面卷曲纸背
-                            Expanded(
-                              child: DecoratedBox(
-                                decoration: BoxDecoration(
-                                  gradient: LinearGradient(
-                                    begin: Alignment.centerLeft,
-                                    end: Alignment.centerRight,
-                                    colors: [
-                                      paperBackBase,
-                                      paperBackHighlight,
-                                      paperBackBase,
-                                      Colors.black.withValues(alpha: isDark ? 0.35 : 0.16),
-                                    ],
-                                    stops: const [0.0, 0.38, 0.82, 1.0],
-                                  ),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            } else {
-              // 底层逐渐显露的下一页 + 卷曲书页投射在底页上的柔和深阴影
-              final shadowAlpha = (0.34 * (1.0 - delta)).clamp(0.0, 0.34);
-              return ClipRect(
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    Transform.translate(
-                      offset: Offset(-delta * width, 0),
-                      child: staticChild,
-                    ),
-                    Positioned(
-                      left: 0,
-                      top: 0,
-                      bottom: 0,
-                      width: 34,
-                      child: IgnorePointer(
-                        child: DecoratedBox(
-                          decoration: BoxDecoration(
-                            gradient: LinearGradient(
-                              begin: Alignment.centerLeft,
-                              end: Alignment.centerRight,
-                              colors: [
-                                Colors.black.withValues(alpha: shadowAlpha),
-                                Colors.black.withValues(alpha: shadowAlpha * 0.4),
-                                Colors.transparent,
-                              ],
-                              stops: const [0.0, 0.42, 1.0],
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              );
-            }
-
           case 'fade':
             // 柔和渐变翻页动画：微幅视差平移 + 丝滑透明度交融
             final opacity = Curves.easeInOut.transform((1.0 - delta.abs()).clamp(0.0, 1.0));
