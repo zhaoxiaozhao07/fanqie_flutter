@@ -18,6 +18,7 @@ import 'reader_settings_repository.dart';
 import 'reading_history_service.dart';
 import 'safe_zip_reader.dart';
 import 'tts_service.dart';
+import 'reading_activity_service.dart';
 
 enum ReaderRestoreMode { merge, replace }
 
@@ -73,6 +74,7 @@ class ReaderBackupService {
       );
 
   Future<Map<String, Object>> _snapshot() async {
+    if (notifyServices) await ReadingActivityService().flush();
     await BookmarkService().flush();
     await ReaderPositionService.flush();
     await ReaderSettingsRepository.flush();
@@ -251,8 +253,12 @@ class ReaderBackupService {
               throw const FormatException('书籍标识不合法');
             }
           }
-        } else if (key == 'reader_activity_v1' && json is! Map) {
-          throw const FormatException('阅读统计损坏');
+        } else if (key == 'reader_activity_v1' &&
+            (json is! Map ||
+                json['version'] != 1 ||
+                json['books'] is! Map ||
+                json['days'] is! Map)) {
+          throw const FormatException('阅读统计损坏或版本不支持');
         }
       }
     }
@@ -468,6 +474,7 @@ class ReaderBackupService {
     BookmarkService().invalidate();
     await BookshelfService().reload();
     await ReadingHistoryService().reload();
+    await ReadingActivityService().reload();
   }
 }
 

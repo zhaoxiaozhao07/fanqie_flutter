@@ -12,6 +12,7 @@ import '../services/history_service.dart';
 import '../services/local_book_service.dart';
 import '../widgets/local_book_import_dialog.dart';
 import '../widgets/reader_backup_dialog.dart';
+import '../widgets/reading_activity_dialog.dart';
 import '../widgets/book_cover_widget.dart';
 import '../widgets/download_action_button.dart';
 import 'book_detail_screen.dart';
@@ -558,6 +559,9 @@ class BookshelfScreenState extends State<BookshelfScreen> {
               onSelected: (value) async {
                 if (value == 'import') {
                   await _showImportLocalBookDialog();
+                } else if (value == 'activity') {
+                  await showDialog<void>(context: context,
+                    builder: (_) => const ReadingActivityDialog());
                 } else {
                   await showDialog<void>(
                     context: context,
@@ -570,6 +574,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
               itemBuilder: (_) => const [
                 PopupMenuItem(value: 'import', child: Text('导入本地小说')),
                 PopupMenuItem(value: 'backup', child: Text('备份与恢复')),
+                PopupMenuItem(value: 'activity', child: Text('阅读统计')),
               ],
             ),
             // 切换 列表 / 三列 视图按钮

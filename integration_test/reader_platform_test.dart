@@ -10,6 +10,8 @@ import 'package:fanqie_flutter/models/reader_settings.dart';
 import 'package:fanqie_flutter/screens/reader_screen.dart';
 import 'package:fanqie_flutter/services/reader_route_observer.dart';
 import 'package:fanqie_flutter/services/reader_settings_repository.dart';
+import 'package:fanqie_flutter/services/reader_backup_service.dart';
+import 'package:fanqie_flutter/services/reading_activity_service.dart';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
@@ -337,6 +339,77 @@ void main() {
 
   // Run via scripts/test_android_platform.sh, which backgrounds and locks the
   // test emulator after READY, and restores it only after VERIFIED.
+  testWidgets('native preference and file backup restore round-trip', (
+    tester,
+  ) async {
+    final prefs = await SharedPreferences.getInstance();
+    final original = prefs.getDouble('reader_font_size');
+    final root = Directory('${directory.path}/backup-probe');
+    final chapter = File('${root.path}/offline_books/probe/chapter.txt');
+    await chapter.parent.create(recursive: true);
+    await chapter.writeAsString('备份正文');
+    final service = ReaderBackupService(
+      documents: () async => root,
+      notifyServices: false,
+    );
+    await prefs.setDouble('reader_font_size', 20);
+    try {
+      final backup = await service.create(includeBooks: true);
+      await prefs.setDouble('reader_font_size', 27);
+      await chapter.writeAsString('更改的正文');
+      await service.restore(backup, mode: ReaderRestoreMode.replace);
+      expect(prefs.getDouble('reader_font_size'), 20);
+      expect(await chapter.readAsString(), '备份正文');
+    } finally {
+      if (original == null) {
+        await prefs.remove('reader_font_size');
+      } else {
+        await prefs.setDouble('reader_font_size', original);
+      }
+    }
+  });
+
+  testWidgets(
+    'opt-in reading activity persists in the native preferences store',
+    (tester) async {
+      final prefs = await SharedPreferences.getInstance();
+      final oldData = prefs.getString('reader_activity_v1');
+      final oldEnabled = prefs.getBool('reader_activity_enabled');
+      var now = DateTime(2026, 11, 2);
+      final activity = ReadingActivityService.forTesting(now: () => now);
+      try {
+        await activity.setEnabled(true, clear: true);
+        activity.attach(
+          Object(),
+          Book(bookId: 'activity-probe', bookName: '统计验证', author: '测试'),
+          active: () => true,
+          automatic: () => true,
+          position: () => const ReadingActivityPosition('c', 0, 1000),
+        );
+        for (var i = 0; i < 3; i++) {
+          now = now.add(const Duration(seconds: 1));
+          activity.tick();
+        }
+        await activity.flush();
+        expect(prefs.getString('reader_activity_v1'), contains('3000'));
+        await activity.setEnabled(false, clear: true);
+        expect(prefs.containsKey('reader_activity_v1'), false);
+      } finally {
+        activity.dispose();
+        if (oldData == null) {
+          await prefs.remove('reader_activity_v1');
+        } else {
+          await prefs.setString('reader_activity_v1', oldData);
+        }
+        if (oldEnabled == null) {
+          await prefs.remove('reader_activity_enabled');
+        } else {
+          await prefs.setBool('reader_activity_enabled', oldEnabled);
+        }
+      }
+    },
+  );
+
   testWidgets('foreground service keeps actual audio playing with screen off', (
     tester,
   ) async {

@@ -906,6 +906,11 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     }
     final index = _chapterIndex;
     final title = _chapters[index].title;
+    final text = currentText;
+    final preview = text.substring(
+      0,
+      ReaderText.safeOffset(text, text.length.clamp(0, 120)),
+    );
     unawaited(
       ReaderPositionService()
           .save(
@@ -922,6 +927,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
                 book: book,
                 chapterIndex: index,
                 chapterTitle: title,
+                preview: preview,
               );
               final shelf = BookshelfService();
               await shelf.initialize();

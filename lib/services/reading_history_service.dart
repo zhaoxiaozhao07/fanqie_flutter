@@ -9,7 +9,8 @@ class ReadingHistoryService {
   static const String _storageKey = 'reading_history_v1';
   static const int _maxHistoryCount = 300;
 
-  static final ReadingHistoryService _instance = ReadingHistoryService._internal();
+  static final ReadingHistoryService _instance =
+      ReadingHistoryService._internal();
   factory ReadingHistoryService() => _instance;
   ReadingHistoryService._internal();
 
@@ -36,7 +37,9 @@ class ReadingHistoryService {
         final List<dynamic> list = json.decode(jsonStr);
         _historyList.clear();
         _historyList.addAll(
-          list.whereType<Map>().map((j) => ReadingHistory.fromJson(Map<String, dynamic>.from(j))),
+          list.whereType<Map>().map(
+            (j) => ReadingHistory.fromJson(Map<String, dynamic>.from(j)),
+          ),
         );
       } catch (e) {
         if (kDebugMode) {
@@ -59,6 +62,7 @@ class ReadingHistoryService {
     required Book book,
     required int chapterIndex,
     required String chapterTitle,
+    String preview = '',
   }) async {
     await initialize();
 
@@ -77,6 +81,7 @@ class ReadingHistoryService {
         lastReadChapterTitle: chapterTitle,
         lastReadChapterIndex: chapterIndex,
         lastReadTime: DateTime.now(),
+        lastReadPreview: preview,
       ),
     );
 

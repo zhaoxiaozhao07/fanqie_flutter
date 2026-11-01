@@ -24,6 +24,7 @@ import '../services/reader_navigation_history.dart';
 import '../services/note_anchor_resolver.dart';
 import '../widgets/note_editor_dialog.dart';
 import '../widgets/reader_notes_sheet.dart';
+import '../services/reading_activity_service.dart';
 
 export '../models/reader_theme.dart';
 import 'book_detail_screen.dart';
@@ -79,6 +80,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   PageRoute<dynamic>? _observedRoute;
   bool _readerRouteActive = true;
   bool _dependenciesReady = false;
+  final ReadingActivityService _activity = ReadingActivityService();
   final ReaderNavigationHistory _jumpHistory = ReaderNavigationHistory();
   bool _navigationLoading = false;
   int _navigationGeneration = 0;
@@ -278,6 +280,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void didPush() {
     _readerRouteActive = true;
+    _attachActivity();
     ReaderSystemService.setKeepScreenOn(
       _readerPreferences.keepScreenOn,
       owner: this,
@@ -292,6 +295,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void didPushNext() {
+    _activity.detach(this);
     _restTimer?.cancel();
     _readerRouteActive = false;
     ReaderSystemService.setKeepScreenOn(false, owner: this);
@@ -313,6 +317,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void didPop() {
+    _activity.detach(this);
     _readerRouteActive = false;
     ReaderSystemService.setKeepScreenOn(false, owner: this);
     _pauseAutoScroll();
@@ -430,6 +435,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void dispose() {
+    _activity.detach(this);
     _restTimer?.cancel();
     _navigationGeneration++;
     readerRouteObserver.unsubscribe(this);
@@ -1066,6 +1072,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     final index = _chapterIndexById[position.chapterId];
     if (index == null) return Future.value();
     final chapter = widget.chapters[index];
+    final paragraphs = _getChapterParagraphs(index);
+    final source = position.paragraphIndex < paragraphs.length
+        ? paragraphs[position.paragraphIndex].trim() : '';
+    final start = ReaderText.safeOffset(source, position.characterOffset.clamp(0, source.length));
+    final end = ReaderText.safeOffset(source, math.min(source.length, start + 120));
+    final preview = source.substring(start, end);
     return _positionService.save(
       widget.book.bookId,
       position,
@@ -1081,6 +1093,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 book: widget.book,
                 chapterIndex: index,
                 chapterTitle: chapter.title,
+                preview: preview,
               );
               if (_isInBookshelf) {
                 await _bookshelfService.updateReadingProgress(
@@ -1207,7 +1220,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final position = _readingPosition;
     return position == null
         ? Future.value()
-        : _writeReadingSnapshot(position).catchError((_) {
+        : _writeReadingSnapshot(position, updateSummary: !notify).catchError((_) {
             if (mounted && notify) {
               ScaffoldMessenger.of(
                 context,
@@ -1427,14 +1440,42 @@ class _ReaderScreenState extends State<ReaderScreen>
       _resumeAutoAfterLifecycle = false;
     } else {
       _restTimer?.cancel();
-      _savePositionNow();
+      _savePositionNow(notify: false);
       _flushPreferences();
       _resumeAutoAfterLifecycle = _autoScrollTicker?.isActive ?? false;
       _pauseAutoScroll();
     }
   }
 
+  void _attachActivity() {
+    _activity.attach(this, widget.book,
+      active: () => mounted && _readerRouteActive && !_isLoadingHead && _errorMessage == null &&
+          !_showControls && _readerPanels == 0 && !_navigationLoading &&
+          WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
+      automatic: () => _isAutoScrolling && (_autoScrollTicker?.isActive ?? false),
+      position: _activityPosition,
+    );
+  }
+
+  ReadingActivityPosition? _activityPosition() {
+    final position = _readingPosition;
+    if (position == null) return null;
+    final index = _chapterIndexById[position.chapterId];
+    if (index == null) return null;
+    final paragraphs = _getChapterParagraphs(index);
+    if (paragraphs.isEmpty) return null;
+    var total = 0;
+    var offset = position.characterOffset;
+    for (var i = 0; i < paragraphs.length; i++) {
+      final length = paragraphs[i].trim().length;
+      total += length;
+      if (i < position.paragraphIndex) offset += length;
+    }
+    return ReadingActivityPosition(position.chapterId, offset.clamp(0, total), total);
+  }
+
   void _onUserPageTurn() {
+    _activity.interact(this);
     _manualScrollUntil = DateTime.now().add(const Duration(seconds: 3));
     _pauseAutoScroll();
     if (_readerPreferences.haptics) HapticFeedback.selectionClick();
@@ -1506,6 +1547,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     ReadingNote? readingNote,
   }) async {
     if (!mounted) return false;
+    _activity.breakSequence();
+    _activity.interact(this);
     final index = _chapterIndexById[target.chapterId];
     if (index == null) return false;
     final generation = ++_navigationGeneration;
@@ -2361,6 +2404,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       ReaderText.display(raw, chapterTitle: chapterTitle);
 
   void _toggleControls() {
+    _activity.interact(this);
     if (DateTime.now().difference(_lastBubbleTapTime) <
         const Duration(milliseconds: 400)) {
       return;
@@ -3286,6 +3330,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _activeChapterNotifier,
         _statusTextNotifier,
         _positionVersion,
+        _activity,
       ]),
       builder: (context, _) {
         final activeIdx = _activeChapterNotifier.value;
@@ -3317,6 +3362,9 @@ class _ReaderScreenState extends State<ReaderScreen>
               )
             : 0.0;
         final percentStr = (progress * 100).toStringAsFixed(1);
+        final metric = _activityPosition();
+        final remaining = metric == null ? null :
+            _activity.remainingMinutes(widget.book.bookId, metric.total - metric.offset);
 
         return Container(
           height: math.max(
@@ -3329,7 +3377,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             children: [
               Expanded(
                 child: Text(
-                  ch.title,
+                  remaining == null ? ch.title : '本章约 $remaining 分钟',
                   style: TextStyle(fontSize: 10, color: theme.secondaryColor),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,

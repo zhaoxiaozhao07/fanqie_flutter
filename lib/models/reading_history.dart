@@ -12,6 +12,7 @@ class ReadingHistory {
   final String lastReadChapterTitle;
   final int lastReadChapterIndex;
   final DateTime lastReadTime;
+  final String lastReadPreview;
 
   ReadingHistory({
     required this.bookId,
@@ -24,6 +25,7 @@ class ReadingHistory {
     required this.lastReadChapterTitle,
     required this.lastReadChapterIndex,
     required this.lastReadTime,
+    this.lastReadPreview = '',
   });
 
   Book toBook() {
@@ -50,6 +52,7 @@ class ReadingHistory {
       'last_read_chapter_title': lastReadChapterTitle,
       'last_read_chapter_index': lastReadChapterIndex,
       'last_read_time': lastReadTime.toIso8601String(),
+      'last_read_preview': lastReadPreview,
     };
   }
 
@@ -62,13 +65,17 @@ class ReadingHistory {
       category: json['category']?.toString(),
       creationStatus: json['creation_status']?.toString() ?? '连载中',
       score: json['score']?.toString(),
-      lastReadChapterTitle: json['last_read_chapter_title']?.toString() ?? '开始阅读',
+      lastReadChapterTitle:
+          json['last_read_chapter_title']?.toString() ?? '开始阅读',
       lastReadChapterIndex: json['last_read_chapter_index'] is int
           ? json['last_read_chapter_index'] as int
-          : int.tryParse(json['last_read_chapter_index']?.toString() ?? '0') ?? 0,
+          : int.tryParse(json['last_read_chapter_index']?.toString() ?? '0') ??
+                0,
       lastReadTime: json['last_read_time'] != null
-          ? DateTime.tryParse(json['last_read_time'].toString()) ?? DateTime.now()
+          ? DateTime.tryParse(json['last_read_time'].toString()) ??
+                DateTime.now()
           : DateTime.now(),
+      lastReadPreview: json['last_read_preview']?.toString() ?? '',
     );
   }
 }

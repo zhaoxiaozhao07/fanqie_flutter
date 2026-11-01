@@ -490,6 +490,11 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
                       ),
                     ],
                   ),
+                  if (item.lastReadPreview.isNotEmpty) Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(item.lastReadPreview, maxLines: 2, overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
+                  ),
                 ],
               ),
               trailing: !_isReadingSelectionMode
