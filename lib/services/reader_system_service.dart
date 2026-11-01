@@ -12,6 +12,16 @@ class ReaderSystemService {
   static void Function(String method, dynamic args)? _ttsCallback;
   static bool _handlerInitialized = false;
 
+  /// A hint for prefetch policy, never proof that a request will succeed.
+  static Future<String> getNetworkType() async {
+    if (!Platform.isAndroid) return 'unknown';
+    try {
+      return await _channel.invokeMethod<String>('getNetworkType') ?? 'unknown';
+    } catch (_) {
+      return 'unknown';
+    }
+  }
+
   /// 统一初始化单一消息处理总线，避免多个服务 setMethodCallHandler 互相覆盖
   static void _ensureGlobalHandler() {
     if (_handlerInitialized) return;

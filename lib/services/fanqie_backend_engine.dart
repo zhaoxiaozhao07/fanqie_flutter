@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import '../models/book.dart';
 import '../models/chapter.dart';
 import 'font_decryptor.dart';
+import 'reader_cache_service.dart';
 
 /// 番茄小说内置后端引擎
 /// 原 fanqie-backend 服务完整移植至 Dart，直接在前端内置运行：
@@ -153,6 +154,21 @@ class FanqieBackendEngine {
   FanqieBackendEngine._internal() : _client = http.Client();
 
   http.Client _client;
+  final ReaderCacheService readerCache = ReaderCacheService();
+  final ValueNotifier<String?> cacheWarning = ValueNotifier(null);
+
+  Future<void> _cacheForReading(
+    String bookId, String itemId, String content,
+  ) async {
+    try {
+      await readerCache.write(bookId, itemId, content);
+      final policy = await ReaderCachePolicy.load();
+      await readerCache.trim(policy.maxBytes);
+      cacheWarning.value = null;
+    } on FileSystemException {
+      cacheWarning.value = '正文已加载，但离线缓存写入失败，请检查存储空间';
+    }
+  }
 
   // 内存详情缓存（包含 chapterListWithVolume 和 itemIds）
   final Map<String, Map<String, dynamic>> _detailCache = {};
@@ -182,12 +198,12 @@ class FanqieBackendEngine {
 
   Future<File> _getChapterCacheFile(String itemId) async {
     final dir = await _getChapterCacheDir();
-    return File('${dir.path}/$itemId.txt');
+    return File('${dir.path}/${ReaderCacheService.segment(itemId)}.txt');
   }
 
   /// 获取书籍离线持久化存储目录 (持久保存在文档目录，支持离线阅读与快速读取)
   Future<Directory> getOfflineBookDir(String bookId) async {
-    final cleanId = bookId.trim();
+    final cleanId = ReaderCacheService.segment(bookId.trim());
     Directory baseDir;
     try {
       baseDir = await getApplicationDocumentsDirectory();
@@ -204,45 +220,39 @@ class FanqieBackendEngine {
   /// 获取指定书籍的离线章节文件
   Future<File> getOfflineChapterFile(String bookId, String itemId) async {
     final dir = await getOfflineBookDir(bookId);
-    return File('${dir.path}/$itemId.txt');
+    return File('${dir.path}/${ReaderCacheService.segment(itemId)}.txt');
   }
 
   /// 检查某本书的某个章节是否已离线缓存
   Future<bool> isChapterOffline(String bookId, String itemId) async {
-    try {
-      final file = await getOfflineChapterFile(bookId, itemId);
-      if (await file.exists()) {
-        final len = await file.length();
-        return len > 50;
-      }
-    } catch (_) {}
-    return false;
+    return await readerCache.read(bookId, itemId) != null;
   }
 
   /// 直接读取离线章节内容（若无离线则返回 null）
   Future<String?> getOfflineChapterContent(String bookId, String itemId) async {
-    try {
-      final file = await getOfflineChapterFile(bookId, itemId);
-      if (await file.exists()) {
-        final content = await file.readAsString();
-        if (content.length > 50 && !content.contains('APP端专享/锁章章节')) {
-          return content;
-        }
-      }
-    } catch (_) {}
-    return null;
+    return readerCache.read(bookId, itemId);
   }
 
   /// 获取指定书籍已离线的章节数
   Future<int> getOfflineChapterCount(String bookId) async {
+    final names = <String>{};
     try {
-      final dir = await getOfflineBookDir(bookId);
-      if (await dir.exists()) {
-        final list = await dir.list().toList();
-        return list.where((f) => f.path.endsWith('.txt')).length;
+      for (final dir in [
+        await getOfflineBookDir(bookId),
+        Directory(
+          '${(await readerCache.temporaryRoot()).path}/${ReaderCacheService.segment(bookId)}',
+        ),
+      ]) {
+        if (!await dir.exists()) continue;
+        await for (final file in dir.list(followLinks: false)) {
+          if (file is File && file.path.endsWith('.txt') &&
+              ReaderCacheService.isReadable(await file.readAsString())) {
+            names.add(file.uri.pathSegments.last);
+          }
+        }
       }
     } catch (_) {}
-    return 0;
+    return names.length;
   }
 
   /// 1. 搜索书籍接口
@@ -616,27 +626,19 @@ class FanqieBackendEngine {
     final cleanId = itemId.trim();
     if (cleanId.isEmpty) return null;
 
-    // 1. 若提供了 bookId，优先使用已下载离线资源
-    if (bookId != null && bookId.isNotEmpty) {
-      final offline = await getOfflineChapterContent(bookId, cleanId);
-      if (offline != null && offline.isNotEmpty) {
-        return offline;
-      }
-    }
+    final cacheBook = bookId?.isNotEmpty == true ? bookId! : '_shared';
+    final offline = await readerCache.read(cacheBook, cleanId);
+    if (offline != null) return offline;
+    // Imported book IDs never fall through to a remote content endpoint.
+    if (cacheBook.startsWith('local_')) return null;
 
     // 2. 检查通用本地缓存
     try {
       final cacheFile = await _getChapterCacheFile(cleanId);
       if (await cacheFile.exists()) {
         final cached = await cacheFile.readAsString();
-        if (cached.length > 50 && !cached.contains('APP端专享/锁章章节')) {
-          // 同步写入书籍离线目录
-          if (bookId != null && bookId.isNotEmpty) {
-            try {
-              final offlineFile = await getOfflineChapterFile(bookId, cleanId);
-              await offlineFile.writeAsString(cached);
-            } catch (_) {}
-          }
+        if (cached.length > 50 && ReaderCacheService.isReadable(cached)) {
+          await _cacheForReading(cacheBook, cleanId, cached);
           return cached;
         }
       }
@@ -645,16 +647,10 @@ class FanqieBackendEngine {
     // 3. 优先通过移动端通道获取完整无锁正文 (对接 reading.snssdk.com 移动端专属接口)
     try {
       final mobileContent = await _mobileGateway.fetchChapter(cleanId);
-      if (mobileContent != null && mobileContent.length > 50) {
+      if (mobileContent != null && mobileContent.length > 50 &&
+          ReaderCacheService.isReadable(mobileContent)) {
         // 成功获取完整正文，持久化缓存（实现无下载时的阅读自动缓存）
-        try {
-          final cacheFile = await _getChapterCacheFile(cleanId);
-          await cacheFile.writeAsString(mobileContent);
-          if (bookId != null && bookId.isNotEmpty) {
-            final offlineFile = await getOfflineChapterFile(bookId, cleanId);
-            await offlineFile.writeAsString(mobileContent);
-          }
-        } catch (_) {}
+        await _cacheForReading(cacheBook, cleanId, mobileContent);
         return mobileContent;
       }
     } catch (e) {
@@ -685,14 +681,7 @@ class FanqieBackendEngine {
                     if (isLocked || decrypted.length <= 200) {
                       return '$decrypted\n\n[提示：本章为番茄APP端专享/锁章章节，当前官方Web端仅提供试读预览]';
                     } else {
-                      try {
-                        final cacheFile = await _getChapterCacheFile(cleanId);
-                        await cacheFile.writeAsString(decrypted);
-                        if (bookId != null && bookId.isNotEmpty) {
-                          final offlineFile = await getOfflineChapterFile(bookId, cleanId);
-                          await offlineFile.writeAsString(decrypted);
-                        }
-                      } catch (_) {}
+                      await _cacheForReading(cacheBook, cleanId, decrypted);
                       return decrypted;
                     }
                   }
@@ -728,6 +717,7 @@ class FanqieBackendEngine {
     final offlineDir = await getOfflineBookDir(bookId);
     int completed = 0;
     int nextIndex = 0;
+    int failures = 0;
 
     Future<void> worker() async {
       while (true) {
@@ -738,13 +728,17 @@ class FanqieBackendEngine {
         currentIndex = nextIndex++;
 
         final chapter = chapters[currentIndex];
-        final offlineFile = File('${offlineDir.path}/${chapter.itemId}.txt');
+        final offlineFile = File(
+          '${offlineDir.path}/${ReaderCacheService.segment(chapter.itemId)}.txt',
+        );
 
         // 检查是否已有离线文件
         bool hasCached = false;
         try {
-          if (await offlineFile.exists() && await offlineFile.length() > 50) {
-            hasCached = true;
+          if (await offlineFile.exists()) {
+            hasCached = ReaderCacheService.isReadable(
+              await offlineFile.readAsString(),
+            );
           }
         } catch (_) {}
 
@@ -754,7 +748,7 @@ class FanqieBackendEngine {
             if (isCancelled?.call() == true) return;
             try {
               content = await getChapterContent(chapter.itemId, bookId: bookId);
-              if (content != null && content.isNotEmpty && content.length > 50) {
+              if (ReaderCacheService.isReadable(content)) {
                 break;
               }
             } catch (_) {}
@@ -763,15 +757,17 @@ class FanqieBackendEngine {
             }
           }
 
-          if (content != null && content.isNotEmpty) {
+          if (isCancelled?.call() == true) return;
+          if (ReaderCacheService.isReadable(content)) {
             try {
-              await offlineFile.writeAsString(content);
-            } catch (_) {}
+              final staged = File('${offlineFile.path}.pending');
+              await staged.writeAsString(content!, flush: true);
+              await staged.rename(offlineFile.path);
+            } catch (_) {
+              failures++;
+            }
           } else {
-            // 标记容错写入，避免阻塞
-            try {
-              await offlineFile.writeAsString('[本章内容下载失败，请在联网时重新阅读]');
-            } catch (_) {}
+            failures++;
           }
         }
 
@@ -783,6 +779,9 @@ class FanqieBackendEngine {
     final workerCount = concurrency.clamp(1, total);
     final workers = List.generate(workerCount, (_) => worker());
     await Future.wait(workers);
+    if (failures > 0 && isCancelled?.call() != true) {
+      throw StateError('$failures 章未能完整下载，已保留成功章节，请重试');
+    }
   }
 
   /// 提取页面中 window.__INITIAL_STATE__ JSON 对象

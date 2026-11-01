@@ -23,11 +23,13 @@ import '../services/reader_system_service.dart';
 import '../services/reader_pagination.dart';
 import '../services/reader_position_service.dart';
 import '../services/reader_font_service.dart';
+import '../services/reader_cache_service.dart';
 import '../services/tts_service.dart';
 import '../widgets/tts_player_panel.dart';
 import '../widgets/paragraph_comment_sheet.dart';
 import '../widgets/reader_page_view.dart';
 import '../widgets/reader_comment_bubble.dart';
+import '../widgets/reader_cache_sheet.dart';
 
 /// 阅读器主题配置
 class ReaderTheme {
@@ -83,6 +85,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   final ReaderPositionService _positionService = ReaderPositionService();
   final ReaderPaginationCache _pagination = ReaderPaginationCache();
   final Map<int, Future<void>> _chapterRequests = {};
+  final Map<int, String> _chapterErrors = {};
+  ReaderCachePolicy _cachePolicy = const ReaderCachePolicy();
+  int _prefetchGeneration = 0;
   final LinkedHashSet<int> _prefetchQueue = LinkedHashSet();
   final Map<String, Future<void>> _commentRequests = {};
   final Map<int, ReaderChapterPages> _preparedPages = {};
@@ -296,6 +301,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       _volumeGroups.putIfAbsent(currentVolume, () => []).add(chapter);
     }
     WidgetsBinding.instance.addObserver(this);
+    ReaderCacheService.pinBook(widget.book.bookId);
     _autoScrollTicker = createTicker(_advanceAutoScroll);
     _checkBookshelfStatus();
     _checkBookmarkStatus();
@@ -340,6 +346,12 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void dispose() {
+    _prefetchGeneration++;
+    _prefetchQueue.clear();
+    ReaderCacheService.unpinBook(widget.book.bookId);
+    _apiService.engine.readerCache.trim(_cachePolicy.maxBytes).catchError(
+      (_) => 0,
+    );
     WidgetsBinding.instance.removeObserver(this);
     _positionTimer?.cancel();
     _preferencesTimer?.cancel();
@@ -645,6 +657,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<void> _loadPreferences() async {
+    _cachePolicy = await ReaderCachePolicy.load();
     final prefs = await SharedPreferences.getInstance();
     if (!mounted) return;
     setState(() {
@@ -1168,11 +1181,21 @@ class _ReaderScreenState extends State<ReaderScreen>
         if (hasVisibleContent) {
           ScaffoldMessenger.of(
             context,
-          ).showSnackBar(const SnackBar(content: Text('章节暂未就绪，请重试；当前阅读位置已保留')));
+          ).showSnackBar(SnackBar(
+            content: Text(
+              '${_chapterErrors[index] ?? '章节暂未就绪'}；当前阅读位置已保留',
+            ),
+            action: SnackBarAction(
+              label: '重试',
+              onPressed: () => _startFromChapter(
+                index, position: position, toLastPage: toLastPage,
+              ),
+            ),
+          ));
         } else {
           setState(() {
             _isLoadingHead = false;
-            _errorMessage = '本章内容加载失败，请检查网络后重试';
+            _errorMessage = _chapterErrors[index] ?? '本章内容加载失败，请重试';
           });
         }
         return;
@@ -1446,13 +1469,32 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   /// 自动向上拉伸追加上一章（实现双向无缝连续阅读）
-  Future<void> _autoPrependPreviousChapter() async {
+  Future<bool> _mayAutoLoad(int index) async {
+    if (_chapterCache.containsKey(index) ||
+        widget.chapters[index].content != null) {
+      return true;
+    }
+    if (await _apiService.isChapterOffline(
+      widget.book.bookId, widget.chapters[index].itemId,
+    )) {
+      return true;
+    }
+    return _cachePolicy.allowsPrefetch(await ReaderSystemService.getNetworkType());
+  }
+
+  Future<void> _autoPrependPreviousChapter({bool retry = false}) async {
     if (_isLoadingPrev || _displayedChapters.isEmpty) return;
 
     final prevIndex = _displayedChapters.first - 1;
+    if (!retry && _chapterErrors.containsKey(prevIndex)) return;
     if (prevIndex < 0) return;
 
     _isLoadingPrev = true;
+    if (!retry && !await _mayAutoLoad(prevIndex)) {
+      if (mounted) setState(() => _isLoadingPrev = false);
+      return;
+    }
+    if (!mounted) return;
 
     // 确保内容在缓存中
     if (!_chapterCache.containsKey(prevIndex)) {
@@ -1487,13 +1529,19 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   /// 自动向下拉伸追加下一章（实现连续无限下拉）
-  Future<void> _autoAppendNextChapter() async {
+  Future<void> _autoAppendNextChapter({bool retry = false}) async {
     if (_isLoadingMore || _displayedChapters.isEmpty) return;
 
     final nextIndex = _displayedChapters.last + 1;
+    if (!retry && _chapterErrors.containsKey(nextIndex)) return;
     if (nextIndex >= widget.chapters.length) return; // 已到全书最后一章
 
     _isLoadingMore = true;
+    if (!retry && !await _mayAutoLoad(nextIndex)) {
+      if (mounted) setState(() => _isLoadingMore = false);
+      return;
+    }
+    if (!mounted) return;
 
     // 确保内容在缓存中
     if (!_chapterCache.containsKey(nextIndex)) {
@@ -1516,7 +1564,11 @@ class _ReaderScreenState extends State<ReaderScreen>
       _triggerSilentPrefetch(nextIndex);
     }
 
-    _isLoadingMore = false;
+    if (mounted) {
+      setState(() => _isLoadingMore = false);
+    } else {
+      _isLoadingMore = false;
+    }
   }
 
   /// 获取章节内容并缓存
@@ -1528,6 +1580,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     final existing = _chapterRequests[index];
     if (existing != null) return existing;
+    _prefetchQueue.remove(index); // Foreground promotes a queued chapter.
+    _chapterErrors.remove(index);
     final request = _loadChapterContent(index).whenComplete(() {
       _chapterRequests.remove(index);
     });
@@ -1540,7 +1594,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     try {
       String? content = chapter.content;
       if (content == null && widget.chapterContentLoader != null) {
-        content = await widget.chapterContentLoader!(chapter);
+        content = await widget.chapterContentLoader!(chapter).timeout(
+          const Duration(seconds: 30),
+        );
       } else if (content == null) {
         _chapterIsOffline[index] = await _apiService.isChapterOffline(
           widget.book.bookId,
@@ -1549,19 +1605,24 @@ class _ReaderScreenState extends State<ReaderScreen>
         content = await _apiService.getChapterContent(
           chapter.itemId,
           bookId: widget.book.bookId,
-        );
+        ).timeout(const Duration(seconds: 30));
       }
-      if (!mounted || content == null || content.isEmpty) return;
+      if (!mounted) return;
+      if (!ReaderCacheService.isReadable(content)) {
+        throw const FormatException('章节为空、未完整提供或本地文件已缺失');
+      }
       if ((index - _currentActiveIndex).abs() > 5 &&
           _requestedChapterIndex != index &&
           !_displayedChapters.contains(index)) {
         return;
       }
-      final formatted = _formatContent(content, chapterTitle: chapter.title);
+      final formatted = _formatContent(content!, chapterTitle: chapter.title);
       _chapterCache[index] = formatted;
       _chapterParagraphsCache[index] = formatted.split('\n\n');
-      _chapterIsOffline[index] =
-          chapter.content == null && widget.chapterContentLoader == null;
+      _chapterIsOffline[index] = chapter.content != null ||
+          (widget.chapterContentLoader == null &&
+           await _apiService.isChapterOffline(widget.book.bookId, chapter.itemId));
+      if (!mounted) return;
       _preparedPages.remove(index);
       if ((index - _currentActiveIndex).abs() <= 1 ||
           _displayedChapters.contains(index)) {
@@ -1569,7 +1630,14 @@ class _ReaderScreenState extends State<ReaderScreen>
         _fetchChapterCommentsCount(chapter.itemId);
       }
       _warmAdjacentPages();
-    } catch (_) {
+    } catch (error) {
+      if (mounted) {
+        _chapterErrors[index] = switch (error) {
+          TimeoutException() => '加载超时，请检查网络后重试',
+          FormatException() => '章节内容不可用或本地文件缺失，请重试或重新导入',
+          _ => '加载失败，请检查网络与存储后重试',
+        };
+      }
       _prefetchedIndices.remove(index);
     }
   }
@@ -1586,6 +1654,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _fetchCommentStats(String itemId) {
+    if (!_showCommentBubbles || widget.book.bookId.startsWith('local_')) return;
     final key = 'stats:$itemId';
     if (_chapterCommentStats.containsKey(itemId) ||
         _commentRequests.containsKey(key)) {
@@ -1612,6 +1681,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _fetchChapterCommentsCount(String itemId) {
+    if (widget.book.bookId.startsWith('local_')) return;
     final key = 'count:$itemId';
     if (_chapterCommentsCount.containsKey(itemId) ||
         _commentRequests.containsKey(key)) {
@@ -1635,8 +1705,24 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  void _triggerSilentPrefetch(int currentIndex, {int count = 4}) {
-    _prefetchQueue.removeWhere((index) => (index - currentIndex).abs() > 4);
+  void _triggerSilentPrefetch(int currentIndex, {int? count}) {
+    final generation = ++_prefetchGeneration;
+    final limit = count ?? _cachePolicy.ahead;
+    _prefetchQueue.removeWhere((index) {
+      final stale = (index - currentIndex).abs() > limit;
+      if (stale) _prefetchedIndices.remove(index);
+      return stale;
+    });
+    ReaderSystemService.getNetworkType().then((network) {
+      if (!mounted || generation != _prefetchGeneration ||
+          !_cachePolicy.allowsPrefetch(network)) {
+        return;
+      }
+      _queueSilentPrefetch(currentIndex, limit);
+    });
+  }
+
+  void _queueSilentPrefetch(int currentIndex, int count) {
     // 近邻优先，正文最多两个后台请求；评论不占用正文调度队列。
     for (final index in [
       currentIndex + 1,
@@ -1645,6 +1731,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     ]) {
       if (index >= 0 &&
           index < widget.chapters.length &&
+          !_chapterErrors.containsKey(index) &&
           !_chapterCache.containsKey(index) &&
           !_prefetchedIndices.contains(index)) {
         _prefetchQueue.add(index);
@@ -1660,7 +1747,16 @@ class _ReaderScreenState extends State<ReaderScreen>
       final index = _prefetchQueue.first;
       _prefetchQueue.remove(index);
       _prefetchWorkers++;
-      _fetchChapterContent(index).whenComplete(() {
+      () async {
+        if (!_cachePolicy.allowsPrefetch(
+          await ReaderSystemService.getNetworkType(),
+        ) || !mounted) {
+          _prefetchedIndices.removeAll(_prefetchQueue);
+          _prefetchQueue.clear();
+          return;
+        }
+        await _fetchChapterContent(index);
+      }().whenComplete(() {
         _prefetchWorkers--;
         if (!_chapterCache.containsKey(index)) _prefetchedIndices.remove(index);
         _pumpPrefetch();
@@ -1684,6 +1780,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       _chapterIsOffline.remove(index);
       _preparedPages.remove(index);
       _chapterKeys.remove(index);
+      _chapterErrors.remove(index);
       _prefetchedIndices.remove(index);
       final id = widget.chapters[index].itemId;
       _chapterCommentStats.remove(id);
@@ -2810,7 +2907,8 @@ class _ReaderScreenState extends State<ReaderScreen>
         padding: const EdgeInsets.symmetric(vertical: 16),
         child: Center(
           child: TextButton.icon(
-            onPressed: _isLoadingPrev ? null : _autoPrependPreviousChapter,
+            onPressed: _isLoadingPrev
+                ? null : () => _autoPrependPreviousChapter(retry: true),
             icon: _isLoadingPrev
                 ? SizedBox(
                     width: 14,
@@ -2854,55 +2952,24 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Widget _buildBottomNextIndicatorSliver(ReaderTheme theme) {
+    final next = _displayedChapters.isEmpty ? 0 : _displayedChapters.last + 1;
+    final error = _chapterErrors[next];
     return SliverToBoxAdapter(
       child: Padding(
-        padding: EdgeInsets.symmetric(horizontal: _horizontalPadding),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (_displayedChapters.isNotEmpty &&
-                _displayedChapters.last < widget.chapters.length - 1)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 32),
-                child: Center(
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation<Color>(
-                            theme.secondaryColor.withValues(alpha: 0.7),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        '正在加载下一章...',
-                        style: TextStyle(
-                          color: theme.secondaryColor,
-                          fontSize: 13,
-                        ),
-                      ),
-                    ],
-                  ),
+        padding: EdgeInsets.symmetric(horizontal: _horizontalPadding, vertical: 32),
+        child: Center(
+          child: next >= widget.chapters.length
+              ? Text('— 已到最后一章 —', style: TextStyle(color: theme.secondaryColor))
+              : TextButton.icon(
+                  onPressed: _isLoadingMore ? null
+                      : () => _autoAppendNextChapter(retry: true),
+                  icon: _isLoadingMore
+                      ? const SizedBox(width: 16, height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2))
+                      : Icon(error == null ? Icons.arrow_downward : Icons.refresh),
+                  label: Text(_isLoadingMore ? '正在加载下一章…'
+                      : error == null ? '继续下一章' : '$error · 点击重试'),
                 ),
-              )
-            else if (_displayedChapters.isNotEmpty &&
-                _displayedChapters.last >= widget.chapters.length - 1)
-              Padding(
-                padding: const EdgeInsets.symmetric(vertical: 48),
-                child: Center(
-                  child: Text(
-                    '— 全书已完结 —',
-                    style: TextStyle(fontSize: 13, color: theme.secondaryColor),
-                  ),
-                ),
-              ),
-            const SizedBox(height: 32),
-          ],
         ),
       ),
     );
@@ -3846,110 +3913,43 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _showQuickCacheModal() {
     final currentTheme = _themes[_themeIndex];
-    final remainingCount = widget.chapters.length - _currentActiveIndex - 1;
-
-    showModalBottomSheet(
+    _beginReaderPanel();
+    showModalBottomSheet<void>(
       context: context,
+      isScrollControlled: true,
       backgroundColor: currentTheme.backgroundColor,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (ctx) {
-        return Padding(
-          padding: const EdgeInsets.fromLTRB(20, 16, 20, 24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Center(
-                child: Container(
-                  width: 36,
-                  height: 4,
-                  decoration: BoxDecoration(
-                    color: currentTheme.secondaryColor.withValues(alpha: 0.3),
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                '批量离线缓存',
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  color: currentTheme.textColor,
-                ),
-              ),
-              const SizedBox(height: 6),
-              Text(
-                '当前位置：第 ${_currentActiveIndex + 1} 章，后续未读 ${remainingCount > 0 ? remainingCount : 0} 章',
-                style: TextStyle(
-                  fontSize: 12,
-                  color: currentTheme.secondaryColor,
-                ),
-              ),
-              const SizedBox(height: 16),
-              _buildCacheOptionTile(
-                currentTheme,
-                title: '缓存后续 20 章',
-                subtitle: '适合通勤快速离线阅读',
-                onTap: () => _triggerBatchDownload(20),
-              ),
-              _buildCacheOptionTile(
-                currentTheme,
-                title: '缓存后续 50 章',
-                subtitle: '深度阅读推荐',
-                onTap: () => _triggerBatchDownload(50),
-              ),
-              _buildCacheOptionTile(
-                currentTheme,
-                title:
-                    '缓存全书未读章节 (${remainingCount > 0 ? remainingCount : 0} 章)',
-                subtitle: '离线保存整本剩余内容',
-                onTap: () => _triggerBatchDownload(remainingCount),
-              ),
-            ],
+      builder: (context) => Theme(
+        data: ThemeData(
+          brightness: currentTheme.systemBrightness,
+          colorScheme: ColorScheme.fromSeed(
+            seedColor: currentTheme.textColor,
+            brightness: currentTheme.systemBrightness,
+            surface: currentTheme.backgroundColor,
           ),
-        );
-      },
-    );
-  }
-
-  Widget _buildCacheOptionTile(
-    ReaderTheme theme, {
-    required String title,
-    required String subtitle,
-    required VoidCallback onTap,
-  }) {
-    return ListTile(
-      contentPadding: EdgeInsets.zero,
-      title: Text(
-        title,
-        style: TextStyle(
-          color: theme.textColor,
-          fontWeight: FontWeight.w600,
-          fontSize: 14,
+        ),
+        child: FractionallySizedBox(
+          heightFactor: .85,
+          child: ReaderCacheSheet(
+            bookId: widget.book.bookId,
+            chapters: widget.chapters,
+            currentIndex: _currentActiveIndex,
+            warning: _apiService.engine.cacheWarning.value,
+            onDownload: _triggerBatchDownload,
+            onPolicyChanged: (policy) {
+              _cachePolicy = policy;
+              _prefetchedIndices.removeAll(_prefetchQueue);
+              _prefetchQueue.clear();
+              _triggerSilentPrefetch(_currentActiveIndex);
+            },
+          ),
         ),
       ),
-      subtitle: Text(
-        subtitle,
-        style: TextStyle(color: theme.secondaryColor, fontSize: 12),
-      ),
-      trailing: Icon(
-        Icons.arrow_forward_ios,
-        size: 14,
-        color: theme.secondaryColor,
-      ),
-      onTap: () {
-        Navigator.pop(context);
-        onTap();
-      },
-    );
+    ).whenComplete(_endReaderPanel);
   }
 
   void _triggerBatchDownload(int count) {
     if (count <= 0) return;
-    final startIndex = _currentActiveIndex;
+    final startIndex = _currentActiveIndex + 1;
     final endIndex = (startIndex + count).clamp(0, widget.chapters.length);
     final targetChapters = widget.chapters.sublist(startIndex, endIndex);
 

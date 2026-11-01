@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
@@ -8,6 +9,7 @@ import '../models/chapter.dart';
 import '../models/comment.dart';
 import 'fanqie_backend_engine.dart';
 import 'fanqie_mobile_gateway.dart';
+import 'atomic_file.dart';
 
 /// API 服务 - 接入内置番茄小说后端引擎
 /// 覆盖原有全部接口并直接内置运行：
@@ -27,10 +29,25 @@ class ApiService {
   final FanqieBackendEngine _engine;
   final FanqieMobileGateway _mobileGateway = FanqieMobileGateway();
   final http.Client _client;
+  final Future<ChapterCommentStats?> Function(String)? chapterStatsLoader;
+  final Map<String, DateTime> _commentRefreshes = {};
+  bool _disposed = false;
 
-  ApiService({http.Client? client, FanqieBackendEngine? engine})
+  ApiService({http.Client? client, FanqieBackendEngine? engine,
+    this.chapterStatsLoader})
       : _client = client ?? http.Client(),
         _engine = engine ?? FanqieBackendEngine(client: client);
+
+  void _refreshComments(String key, Future<Object?> Function() fetch) {
+    if (_disposed) return;
+    final now = DateTime.now();
+    if (now.difference(_commentRefreshes[key] ?? DateTime(2000)) <
+        const Duration(minutes: 1)) {
+      return;
+    }
+    _commentRefreshes[key] = now;
+    unawaited(fetch().then<void>((_) {}, onError: (Object _) {}));
+  }
 
   FanqieBackendEngine get engine => _engine;
 
@@ -204,16 +221,27 @@ class ApiService {
   }
 
   /// 获取章节段评数量统计（支持离线缓存回退）
-  Future<ChapterCommentStats?> getChapterCommentStats(String itemId, {String? bookId}) async {
+  Future<ChapterCommentStats?> getChapterCommentStats(
+    String itemId, {String? bookId, bool preferCache = true}
+  ) async {
     final cleanId = itemId.trim();
     if (cleanId.isEmpty) return null;
+    if (preferCache) {
+      final cached = await _loadCommentStatsFromDisk(cleanId, bookId: bookId);
+      if (cached != null) {
+        _refreshComments('stats:$cleanId', () => getChapterCommentStats(
+          cleanId, bookId: bookId, preferCache: false,
+        ));
+        return cached;
+      }
+    }
 
     // 1. 尝试在线获取
     try {
-      final stats = await _mobileGateway.fetchChapterCommentStats(cleanId);
+      final stats = await (chapterStatsLoader?.call(cleanId) ??
+          _mobileGateway.fetchChapterCommentStats(cleanId));
       if (stats != null) {
-        // 异步写入缓存（通用缓存与离线书籍目录）
-        _saveCommentStatsToDisk(cleanId, stats, bookId: bookId);
+        await _saveCommentStatsToDisk(cleanId, stats, bookId: bookId);
         return stats;
       }
     } catch (e) {
@@ -226,18 +254,18 @@ class ApiService {
     return _loadCommentStatsFromDisk(cleanId, bookId: bookId);
   }
 
-  void _saveCommentStatsToDisk(String itemId, ChapterCommentStats stats, {String? bookId}) async {
+  Future<void> _saveCommentStatsToDisk(String itemId, ChapterCommentStats stats, {String? bookId}) async {
     try {
       final jsonStr = jsonEncode(stats.toJson());
       final dir = await _getCommentCacheDir(bookId: bookId);
       final file = File('${dir.path}/stats_$itemId.json');
-      await file.writeAsString(jsonStr);
+      await AtomicFile.writeString(file, jsonStr);
 
       // 如果提供了离线书籍ID，同步写入通用缓存
       if (bookId != null && bookId.isNotEmpty) {
         final commonDir = await _getCommentCacheDir();
         final commonFile = File('${commonDir.path}/stats_$itemId.json');
-        await commonFile.writeAsString(jsonStr);
+        await AtomicFile.writeString(commonFile, jsonStr);
       }
     } catch (_) {}
   }
@@ -269,9 +297,19 @@ class ApiService {
     String itemId, {
     int offset = 0,
     int count = 20,
+    bool preferCache = true,
   }) async {
     final cleanItemId = itemId.trim();
     final cleanBookId = bookId.trim();
+    if (preferCache && offset == 0) {
+      final cached = await _loadChapterCommentsFromDisk(cleanBookId, cleanItemId);
+      if (cached != null) {
+        _refreshComments('chapter:$cleanBookId:$cleanItemId', () => getChapterComments(
+          cleanBookId, cleanItemId, count: count, preferCache: false,
+        ));
+        return cached;
+      }
+    }
 
     // 1. 尝试在线获取
     try {
@@ -305,7 +343,7 @@ class ApiService {
       final jsonStr = jsonEncode(page.toJson());
       final dir = await _getCommentCacheDir(bookId: bookId);
       final file = File('${dir.path}/chapter_${itemId}_comments.json');
-      await file.writeAsString(jsonStr);
+      await AtomicFile.writeString(file, jsonStr);
     } catch (_) {}
   }
 
@@ -330,9 +368,21 @@ class ApiService {
     int sort = 1,
     String cursor = '',
     int count = 20,
+    bool preferCache = true,
   }) async {
     final cleanItemId = itemId.trim();
     final cleanBookId = bookId.trim();
+    if (preferCache && cursor.isEmpty) {
+      final cached = await _loadParagraphCommentsFromDisk(
+        cleanBookId, cleanItemId, paraIndex, sort,
+      );
+      if (cached != null) {
+        _refreshComments('para:$cleanBookId:$cleanItemId:$paraIndex:$sort',
+            () => getParagraphComments(cleanBookId, cleanItemId, paraIndex,
+              sort: sort, count: count, preferCache: false));
+        return cached;
+      }
+    }
 
     // 1. 尝试在线获取
     try {
@@ -376,7 +426,7 @@ class ApiService {
       final dir = await _getCommentCacheDir(bookId: bookId);
       final tag = paraIndex != null ? '$paraIndex' : 'all';
       final file = File('${dir.path}/para_${itemId}_${tag}_s$sort.json');
-      await file.writeAsString(jsonStr);
+      await AtomicFile.writeString(file, jsonStr);
     } catch (_) {}
   }
 
@@ -459,6 +509,7 @@ class ApiService {
   }
 
   void dispose() {
+    _disposed = true;
     _client.close();
   }
 }

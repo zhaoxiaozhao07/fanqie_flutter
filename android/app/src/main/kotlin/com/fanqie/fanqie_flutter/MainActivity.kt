@@ -1,6 +1,8 @@
 package com.fanqie.fanqie_flutter
 
 import android.media.MediaPlayer
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.view.KeyEvent
@@ -58,6 +60,15 @@ class MainActivity: FlutterActivity() {
             } else if (call.method == "setVolumeKeyScrollEnabled") {
                 volumeKeyScrollEnabled = call.argument<Boolean>("enabled") ?: false
                 result.success(true)
+            } else if (call.method == "getNetworkType") {
+                val manager = getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+                val capabilities = manager.getNetworkCapabilities(manager.activeNetwork)
+                result.success(when {
+                    capabilities == null -> "offline"
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) -> "wifi"
+                    capabilities.hasTransport(NetworkCapabilities.TRANSPORT_CELLULAR) -> "mobile"
+                    else -> "unknown"
+                })
             } else if (call.method == "getBatteryLevel") {
                 try {
                     val bm = getSystemService(Context.BATTERY_SERVICE) as? BatteryManager

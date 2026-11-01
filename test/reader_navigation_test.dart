@@ -222,6 +222,46 @@ void main() {
     },
   );
 
+  testWidgets('failed next chapter retains content and allows explicit retry', (
+    tester,
+  ) async {
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    var available = false;
+    var requests = 0;
+    await openReader(
+      tester,
+      'none',
+      chapters: [
+        Chapter(
+          itemId: 'offline-first',
+          title: '第一章',
+          content: chapterText(0, paragraphs: 1),
+        ),
+        Chapter(itemId: 'offline-next', title: '第二章'),
+      ],
+      loader: (_) async {
+        requests++;
+        return available ? chapterText(1, paragraphs: 1) : null;
+      },
+    );
+    final view = tester.state<ReaderPageViewState>(find.byType(ReaderPageView));
+    view.turnToNextPage();
+    await settleReader(tester);
+    expect(address(tester).chapterIndex, 0);
+    expect(find.textContaining('当前阅读位置已保留'), findsOneWidget);
+    final previousRequests = requests;
+    available = true;
+    await tester.tap(find.text('重试'));
+    await settleReader(tester);
+    await settleReader(tester);
+    expect(requests, previousRequests + 1);
+    expect(address(tester).chapterIndex, 1);
+    expect(tester.takeException(), isNull);
+    await tester.pumpWidget(const SizedBox.shrink());
+    await settleReader(tester);
+  });
+
   testWidgets(
     'large system text scales render without overflow and resume the same original anchor',
     (tester) async {
