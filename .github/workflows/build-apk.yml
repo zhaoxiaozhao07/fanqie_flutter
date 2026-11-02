@@ -1,0 +1,87 @@
+name: 仅构建签名 Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '构建版本，必须与 pubspec.yaml 一致'
+        required: true
+        type: string
+
+# Artifact-only builds cannot create a tag or publish a GitHub Release.
+permissions:
+  contents: read
+
+concurrency:
+  group: signed-apk-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          cache: true
+      - name: 校验构建版本
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          FULL_VERSION=$(awk '/^version:/{print $2}' pubspec.yaml)
+          VERSION=${FULL_VERSION%%+*}
+          BUILD_NUMBER=${FULL_VERSION##*+}
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          [[ "$BUILD_NUMBER" =~ ^[0-9]+$ ]]
+          [[ "$REQUESTED_VERSION" == "$VERSION" ]]
+          echo "VERSION=$VERSION" >> "$GITHUB_ENV"
+          echo "BUILD_NUMBER=$BUILD_NUMBER" >> "$GITHUB_ENV"
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test --reporter expanded
+      - name: 启用模拟器硬件加速
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+      - uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: default
+          arch: x86_64
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: |
+            flutter test integration_test/discovery_platform_test.dart -d emulator-5554 --reporter expanded
+            flutter test integration_test/reader_status_platform_test.dart -d emulator-5554 --reporter expanded
+      - name: 配置正式签名
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          test -n "$KEYSTORE_BASE64" && test -n "$KEYSTORE_PASSWORD" && test -n "$KEY_PASSWORD" && test -n "$KEY_ALIAS"
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > android/app/upload-keystore.jks
+          printf 'storePassword=%s\nkeyPassword=%s\nkeyAlias=%s\nstoreFile=upload-keystore.jks\n' "$KEYSTORE_PASSWORD" "$KEY_PASSWORD" "$KEY_ALIAS" > android/key.properties
+      - name: 构建签名 Release APK
+        run: flutter build apk --release --build-name="$VERSION" --build-number="$BUILD_NUMBER"
+      - name: 计算校验值
+        run: |
+          cd build/app/outputs/flutter-apk
+          mv app-release.apk "fanqie-v$VERSION.apk"
+          sha256sum "fanqie-v$VERSION.apk" > "fanqie-v$VERSION.apk.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: fanqie-v${{ inputs.version }}-signed
+          path: build/app/outputs/flutter-apk/fanqie-v*.*
+          retention-days: 30

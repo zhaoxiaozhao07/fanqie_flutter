@@ -4,6 +4,13 @@
 
 [最新版本](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/latest) · [发布验证](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/release.yml)
 
+## v3.3.1 界面布局修正
+
+- 首页恢复淡红到白色的顶部渐变、居中标题与圆角搜索栏；频道切换、高级筛选及快捷条件统一为紧凑胶囊布局。
+- 高级筛选弹层的确认操作固定在底部，选项区域可滚动；保留大字、窄屏与横屏适配。
+- 阅读器时间、电量和进度成组靠右，修正松散弹性布局造成的空白偏移；滚动与分页模式共用安全区域定位。
+- 本轮通过 [仅构建签名 APK workflow](.github/workflows/build-apk.yml) 生成补丁安装包，不覆盖已发布的 v3.3.0，也不自动创建新发布标签。
+
 ## v3.3.0 官方书库对齐与正文可靠性
 
 - 首页按当前频道读取官方分类接口，保留上游分类名称、ID 与分组；支持分类查找、全部分类和上次成功数据的离线缓存。

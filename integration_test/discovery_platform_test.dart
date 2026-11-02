@@ -7,6 +7,7 @@ import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:fanqie_flutter/screens/search_screen.dart';
 import 'package:fanqie_flutter/services/api_service.dart';
+import 'package:fanqie_flutter/app_theme.dart';
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
@@ -48,8 +49,32 @@ void main() {
         }),
       );
       addTearDown(api.dispose);
-      await tester.pumpWidget(MaterialApp(home: SearchScreen(apiService: api)));
+      await tester.pumpWidget(
+        MaterialApp(
+          theme: AppTheme.lightTheme,
+          home: SearchScreen(apiService: api),
+        ),
+      );
       await tester.pumpAndSettle();
+      final screenWidth = MediaQuery.sizeOf(
+        tester.element(find.byType(SearchScreen)),
+      ).width;
+      expect(
+        tester.getCenter(find.text('番茄Reader')).dx,
+        closeTo(screenWidth / 2, 1),
+      );
+      expect(
+        tester.getCenter(find.text('全部')).dy,
+        closeTo(tester.getCenter(find.text('高级筛选')).dy, 1),
+      );
+      final header = tester.widget<Container>(
+        find.byKey(const ValueKey('home-red-header')),
+      );
+      expect(
+        ((header.decoration! as BoxDecoration).gradient! as LinearGradient)
+            .colors,
+        [const Color(0xFFFFE8E8), Colors.white],
+      );
       await tester.tap(find.byKey(const ValueKey('category-picker')));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const ValueKey('category-7777')));

@@ -70,6 +70,63 @@ void main() {
   setUp(() => SharedPreferences.setMockInitialValues({}));
 
   testWidgets(
+    'phone header restores the red gradient and keeps filter controls on one row',
+    (tester) async {
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      tester.view.physicalSize = const Size(320, 640);
+      tester.view.devicePixelRatio = 1;
+      final api = FakeDiscoveryApi();
+      await mount(tester, api);
+      await tester.pumpAndSettle();
+      final header = tester.widget<Container>(
+        find.byKey(const ValueKey('home-red-header')),
+      );
+      final gradient =
+          (header.decoration! as BoxDecoration).gradient! as LinearGradient;
+      expect(gradient.colors, [const Color(0xFFFFE8E8), Colors.white]);
+      expect(tester.getCenter(find.text('番茄Reader')).dx, closeTo(160, .01));
+      expect(
+        tester.getCenter(find.text('全部')).dy,
+        closeTo(tester.getCenter(find.text('高级筛选')).dy, .01),
+      );
+      expect(find.widgetWithText(FilledButton, '搜索'), findsOneWidget);
+      await tester.tap(find.text('高级筛选'));
+      await tester.pumpAndSettle();
+      expect(
+        tester.getRect(find.widgetWithText(ChoiceChip, '200万以上')).bottom,
+        lessThan(tester.getRect(find.text('确定筛选')).top),
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
+    'advanced filter confirm action stays docked while options scroll',
+    (tester) async {
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      tester.view.physicalSize = const Size(320, 640);
+      tester.view.devicePixelRatio = 1;
+      final api = FakeDiscoveryApi();
+      await mount(tester, api, scale: 1.5);
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(find.text('高级筛选'));
+      await tester.tap(find.text('高级筛选'));
+      await tester.pumpAndSettle();
+      final before = tester.getRect(find.text('确定筛选'));
+      await tester.drag(
+        find.widgetWithText(ChoiceChip, '最热'),
+        const Offset(0, -160),
+      );
+      await tester.pumpAndSettle();
+      expect(tester.getRect(find.text('确定筛选')), before);
+      expect(before.bottom, lessThanOrEqualTo(640));
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'category search reaches the full server taxonomy, not a shortlist',
     (tester) async {
       final api = FakeDiscoveryApi()

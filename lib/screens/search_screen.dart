@@ -1,4 +1,6 @@
+import 'dart:math' as math;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../app_theme.dart';
 import '../models/book.dart';
 import '../models/discovery.dart';
@@ -203,6 +205,10 @@ class _SearchScreenState extends State<SearchScreen> {
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
+      backgroundColor: Colors.white,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
       builder: (context) => StatefulBuilder(
         builder: (context, modalSetState) {
           Widget choices(
@@ -213,72 +219,156 @@ class _SearchScreenState extends State<SearchScreen> {
           ) => Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(title, style: Theme.of(context).textTheme.titleSmall),
-              const SizedBox(height: 8),
+              Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: AppTheme.textPrimary,
+                ),
+              ),
+              const SizedBox(height: 10),
               Wrap(
                 spacing: 8,
-                runSpacing: 4,
+                runSpacing: 8,
                 children: options.entries
                     .map(
                       (e) => ChoiceChip(
                         label: Text(e.value),
+                        padding: EdgeInsets.zero,
+                        labelPadding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 5,
+                        ),
                         selected: e.key == selected,
+                        showCheckmark: false,
+                        backgroundColor: const Color(0xFFF5F6F8),
+                        selectedColor: AppTheme.primaryLight,
+                        side: BorderSide(
+                          color: e.key == selected
+                              ? AppTheme.primaryColor.withValues(alpha: .3)
+                              : Colors.transparent,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(12),
+                        ),
+                        labelStyle: TextStyle(
+                          fontSize: 13,
+                          color: e.key == selected
+                              ? AppTheme.primaryDark
+                              : AppTheme.textSecondary,
+                          fontWeight: e.key == selected
+                              ? FontWeight.w600
+                              : FontWeight.normal,
+                        ),
                         onSelected: (_) => modalSetState(() => change(e.key)),
                       ),
                     )
                     .toList(),
               ),
-              const SizedBox(height: 16),
+              const SizedBox(height: 22),
             ],
           );
           return ConstrainedBox(
             constraints: BoxConstraints(
               maxHeight: MediaQuery.sizeOf(context).height * .85,
             ),
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(20),
+            child: SafeArea(
+              top: false,
               child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  Wrap(
-                    alignment: WrapAlignment.spaceBetween,
-                    spacing: 16,
-                    children: [
-                      const Text(
-                        '筛选条件',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
+                  Container(
+                    width: 32,
+                    height: 4,
+                    margin: const EdgeInsets.only(top: 10, bottom: 10),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFFE4E6EB),
+                      borderRadius: BorderRadius.circular(2),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 20),
+                    child: Row(
+                      children: [
+                        const Expanded(
+                          child: Text(
+                            '筛选条件',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                              color: AppTheme.textPrimary,
+                            ),
+                          ),
+                        ),
+                        TextButton(
+                          onPressed: () => modalSetState(() {
+                            sort = 0;
+                            status = -1;
+                            words = -1;
+                          }),
+                          child: const Text('重置'),
+                        ),
+                        IconButton(
+                          onPressed: () => Navigator.pop(context),
+                          tooltip: '关闭',
+                          icon: const Icon(Icons.close_rounded, size: 20),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const Divider(height: 20, color: AppTheme.dividerColor),
+                  Flexible(
+                    child: SingleChildScrollView(
+                      padding: const EdgeInsets.symmetric(horizontal: 20),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          choices(
+                            '排序方式',
+                            LibraryFilters.sorts,
+                            sort,
+                            (v) => sort = v,
+                          ),
+                          choices(
+                            '书籍状态',
+                            LibraryFilters.statuses,
+                            status,
+                            (v) => status = v,
+                          ),
+                          choices(
+                            '字数区间',
+                            LibraryFilters.wordCounts,
+                            words,
+                            (v) => words = v,
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(20, 8, 20, 14),
+                    child: SizedBox(
+                      width: double.infinity,
+                      child: FilledButton(
+                        style: FilledButton.styleFrom(
+                          backgroundColor: AppTheme.primaryColor,
+                          foregroundColor: Colors.white,
+                          minimumSize: const Size(0, 44),
+                          padding: const EdgeInsets.symmetric(vertical: 12),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(22),
+                          ),
+                        ),
+                        onPressed: () => Navigator.pop(context, true),
+                        child: const Text(
+                          '确定筛选',
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                          ),
                         ),
                       ),
-                      TextButton(
-                        onPressed: () => modalSetState(() {
-                          sort = 0;
-                          status = -1;
-                          words = -1;
-                        }),
-                        child: const Text('重置'),
-                      ),
-                    ],
-                  ),
-                  choices('排序方式', LibraryFilters.sorts, sort, (v) => sort = v),
-                  choices(
-                    '书籍状态',
-                    LibraryFilters.statuses,
-                    status,
-                    (v) => status = v,
-                  ),
-                  choices(
-                    '字数区间',
-                    LibraryFilters.wordCounts,
-                    words,
-                    (v) => words = v,
-                  ),
-                  SizedBox(
-                    width: double.infinity,
-                    child: FilledButton(
-                      onPressed: () => Navigator.pop(context, true),
-                      child: const Text('确定筛选'),
                     ),
                   ),
                 ],
@@ -297,153 +387,419 @@ class _SearchScreenState extends State<SearchScreen> {
     _reload();
   }
 
+  Widget _chipContent(String label, {IconData? icon, bool active = false}) =>
+      Container(
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        decoration: BoxDecoration(
+          color: active ? AppTheme.primaryLight : const Color(0xFFF5F6F8),
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (icon != null) ...[
+              Icon(
+                icon,
+                size: 14,
+                color: active ? AppTheme.primaryColor : AppTheme.textSecondary,
+              ),
+              const SizedBox(width: 5),
+            ],
+            ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 180),
+              child: Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: active ? FontWeight.w600 : FontWeight.normal,
+                  color: active ? AppTheme.primaryDark : AppTheme.textSecondary,
+                ),
+              ),
+            ),
+            const SizedBox(width: 3),
+            Icon(
+              Icons.keyboard_arrow_down_rounded,
+              size: 14,
+              color: active ? AppTheme.primaryColor : AppTheme.textSecondary,
+            ),
+          ],
+        ),
+      );
+
   Widget _optionMenu(
     String key,
     String label,
     Map<int, String> options,
-    void Function(int) change,
-  ) => PopupMenuButton<int>(
+    int selected,
+    void Function(int) change, {
+    IconData? icon,
+    bool active = false,
+  }) => PopupMenuButton<int>(
     key: ValueKey(key),
     tooltip: label,
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
     onSelected: (v) {
       setState(() => change(v));
       _reload();
     },
     itemBuilder: (_) => options.entries
-        .map((e) => PopupMenuItem(value: e.key, child: Text(e.value)))
+        .map(
+          (e) => PopupMenuItem(
+            value: e.key,
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    e.value,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: e.key == selected
+                          ? AppTheme.primaryDark
+                          : AppTheme.textPrimary,
+                    ),
+                  ),
+                ),
+                if (e.key == selected)
+                  const Icon(
+                    Icons.check_rounded,
+                    size: 16,
+                    color: AppTheme.primaryColor,
+                  ),
+              ],
+            ),
+          ),
+        )
         .toList(),
+    child: _chipContent(label, icon: icon, active: active),
+  );
+
+  Widget _genderSegment() => Material(
+    color: const Color(0xFFF2F4F7),
+    borderRadius: BorderRadius.circular(20),
     child: Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      padding: const EdgeInsets.all(3),
       child: Row(
         mainAxisSize: MainAxisSize.min,
-        children: [Text(label), const Icon(Icons.arrow_drop_down, size: 18)],
+        children: LibraryFilters.genders.entries
+            .map(
+              (e) => Semantics(
+                button: true,
+                selected: e.key == _gender,
+                child: InkWell(
+                  borderRadius: BorderRadius.circular(16),
+                  onTap: () => _switchGender(e.key),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 140),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 7,
+                    ),
+                    decoration: BoxDecoration(
+                      color: e.key == _gender
+                          ? AppTheme.primaryColor
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(16),
+                    ),
+                    child: Text(
+                      e.value,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: e.key == _gender
+                            ? Colors.white
+                            : AppTheme.textSecondary,
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            )
+            .toList(),
       ),
+    ),
+  );
+
+  Widget _advancedFilterButton() {
+    final count =
+        (_sort == 0 ? 0 : 1) +
+        (_status == -1 ? 0 : 1) +
+        (_wordCount == -1 ? 0 : 1);
+    return Material(
+      color: count == 0 ? const Color(0xFFF2F4F7) : AppTheme.primaryLight,
+      borderRadius: BorderRadius.circular(18),
+      child: InkWell(
+        key: const ValueKey('home-filter-button'),
+        borderRadius: BorderRadius.circular(18),
+        onTap: _showFilters,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                Icons.tune_rounded,
+                size: 14,
+                color: count == 0
+                    ? AppTheme.textSecondary
+                    : AppTheme.primaryColor,
+              ),
+              const SizedBox(width: 5),
+              Text(
+                '高级筛选',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: count == 0
+                      ? AppTheme.textSecondary
+                      : AppTheme.primaryDark,
+                ),
+              ),
+              if (count > 0) ...[
+                const SizedBox(width: 5),
+                Text(
+                  '$count',
+                  style: const TextStyle(
+                    fontSize: 11,
+                    fontWeight: FontWeight.w700,
+                    color: AppTheme.primaryColor,
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _searchBar() => Padding(
+    padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+    child: Row(
+      children: [
+        Expanded(
+          child: ValueListenableBuilder<TextEditingValue>(
+            valueListenable: _search,
+            builder: (context, value, _) => TextField(
+              controller: _search,
+              textInputAction: TextInputAction.search,
+              textAlignVertical: TextAlignVertical.center,
+              style: const TextStyle(fontSize: 14, color: AppTheme.textPrimary),
+              decoration: InputDecoration(
+                hintText: '搜索书名、作者...',
+                filled: true,
+                fillColor: const Color(0xFFF2F4F7),
+                hintStyle: const TextStyle(
+                  fontSize: 14,
+                  color: AppTheme.textHint,
+                ),
+                prefixIcon: const Icon(
+                  Icons.search_rounded,
+                  size: 18,
+                  color: AppTheme.textHint,
+                ),
+                prefixIconConstraints: const BoxConstraints(minWidth: 36),
+                suffixIcon: value.text.isEmpty
+                    ? null
+                    : IconButton(
+                        tooltip: '清空',
+                        onPressed: _search.clear,
+                        icon: const Icon(
+                          Icons.close_rounded,
+                          size: 16,
+                          color: AppTheme.textHint,
+                        ),
+                      ),
+                isDense: true,
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 11,
+                ),
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(22),
+                  borderSide: BorderSide.none,
+                ),
+                enabledBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(22),
+                  borderSide: BorderSide.none,
+                ),
+                focusedBorder: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(22),
+                  borderSide: BorderSide(
+                    color: AppTheme.primaryColor.withValues(alpha: .25),
+                  ),
+                ),
+              ),
+              onSubmitted: (_) => _performSearch(),
+            ),
+          ),
+        ),
+        const SizedBox(width: 10),
+        FilledButton(
+          key: const ValueKey('home-search-action'),
+          onPressed: _performSearch,
+          style: FilledButton.styleFrom(
+            backgroundColor: AppTheme.primaryColor,
+            foregroundColor: Colors.white,
+            minimumSize: const Size(0, 42),
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(22),
+            ),
+          ),
+          child: const Text(
+            '搜索',
+            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+          ),
+        ),
+      ],
     ),
   );
 
   Widget _header() => Column(
     children: [
-      Padding(
-        padding: const EdgeInsets.fromLTRB(16, 4, 8, 4),
-        child: Row(
-          children: [
-            const Expanded(
-              child: Text(
-                '番茄Reader',
-                style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600),
-              ),
-            ),
-            const DownloadActionButton(),
-          ],
-        ),
-      ),
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        child: Row(
-          children: [
-            Expanded(
-              child: TextField(
-                controller: _search,
-                textInputAction: TextInputAction.search,
-                decoration: const InputDecoration(
-                  hintText: '搜索书名、作者...',
-                  prefixIcon: Icon(Icons.search),
-                  isDense: true,
-                  border: OutlineInputBorder(),
-                ),
-                onSubmitted: (_) => _performSearch(),
-              ),
-            ),
-            IconButton(
-              onPressed: _performSearch,
-              tooltip: '搜索',
-              icon: const Icon(Icons.search_rounded),
-            ),
-          ],
-        ),
-      ),
-      Padding(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-        child: Align(
-          alignment: Alignment.centerLeft,
-          child: Wrap(
-            spacing: 6,
-            runSpacing: 4,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              ...LibraryFilters.genders.entries.map(
-                (e) => ChoiceChip(
-                  label: Text(e.value),
-                  selected: e.key == _gender,
-                  onSelected: (_) => _switchGender(e.key),
-                ),
-              ),
-              TextButton.icon(
-                onPressed: _showFilters,
-                icon: const Icon(Icons.tune, size: 18),
-                label: const Text('高级筛选'),
-              ),
-            ],
+      Container(
+        key: const ValueKey('home-red-header'),
+        padding: EdgeInsets.only(top: MediaQuery.paddingOf(context).top),
+        decoration: const BoxDecoration(
+          gradient: LinearGradient(
+            begin: Alignment.topCenter,
+            end: Alignment.bottomCenter,
+            colors: [Color(0xFFFFE8E8), Colors.white],
           ),
         ),
-      ),
-      SingleChildScrollView(
-        scrollDirection: Axis.horizontal,
-        child: Row(
+        child: Column(
           children: [
-            const SizedBox(width: 8),
-            TextButton.icon(
-              key: const ValueKey('category-picker'),
-              onPressed: _catalogLoading && _categories.isEmpty
-                  ? null
-                  : _pickCategory,
-              icon: const Icon(Icons.category_outlined, size: 18),
-              label: ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 220),
-                child: Text(_category.name, overflow: TextOverflow.ellipsis),
+            SizedBox(
+              height: math.max(
+                44,
+                MediaQuery.textScalerOf(context).scale(18) * 1.3 + 8,
+              ),
+              width: double.infinity,
+              child: Stack(
+                alignment: Alignment.center,
+                children: [
+                  const Padding(
+                    padding: EdgeInsets.symmetric(horizontal: 56),
+                    child: Text(
+                      '番茄Reader',
+                      textAlign: TextAlign.center,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w600,
+                        color: AppTheme.textPrimary,
+                      ),
+                    ),
+                  ),
+                  const Positioned(right: 8, child: DownloadActionButton()),
+                ],
               ),
             ),
-            _optionMenu(
-              'sort-picker',
-              '排序: ${LibraryFilters.sorts[_sort]}',
-              LibraryFilters.sorts,
-              (v) => _sort = v,
-            ),
-            _optionMenu(
-              'status-picker',
-              LibraryFilters.statuses[_status]!,
-              LibraryFilters.statuses,
-              (v) => _status = v,
-            ),
-            _optionMenu(
-              'words-picker',
-              LibraryFilters.wordCounts[_wordCount]!,
-              LibraryFilters.wordCounts,
-              (v) => _wordCount = v,
-            ),
+            _searchBar(),
           ],
         ),
       ),
-      if (_catalogError != null || _catalogCached)
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              Text(
-                _catalogError ?? '分类使用上次缓存',
-                style: const TextStyle(
-                  fontSize: 12,
-                  color: AppTheme.textSecondary,
+      Container(
+        color: Colors.white,
+        width: double.infinity,
+        child: Column(
+          children: [
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+              child: SizedBox(
+                width: double.infinity,
+                child: Wrap(
+                  alignment: WrapAlignment.spaceBetween,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: [_genderSegment(), _advancedFilterButton()],
                 ),
               ),
-              TextButton(
-                onPressed: () => _reload(refreshCatalog: true),
-                child: const Text('更新分类'),
+            ),
+            SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Row(
+                children: [
+                  Material(
+                    color: Colors.transparent,
+                    child: InkWell(
+                      key: const ValueKey('category-picker'),
+                      borderRadius: BorderRadius.circular(16),
+                      onTap: _catalogLoading && _categories.isEmpty
+                          ? null
+                          : _pickCategory,
+                      child: _chipContent(
+                        _category.name,
+                        icon: Icons.category_outlined,
+                        active: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  _optionMenu(
+                    'sort-picker',
+                    LibraryFilters.sorts[_sort]!,
+                    LibraryFilters.sorts,
+                    _sort,
+                    (v) => _sort = v,
+                    icon: Icons.sort_rounded,
+                    active: _sort != 0,
+                  ),
+                  const SizedBox(width: 8),
+                  _optionMenu(
+                    'status-picker',
+                    LibraryFilters.statuses[_status]!,
+                    LibraryFilters.statuses,
+                    _status,
+                    (v) => _status = v,
+                    active: _status != -1,
+                  ),
+                  const SizedBox(width: 8),
+                  _optionMenu(
+                    'words-picker',
+                    LibraryFilters.wordCounts[_wordCount]!,
+                    LibraryFilters.wordCounts,
+                    _wordCount,
+                    (v) => _wordCount = v,
+                    active: _wordCount != -1,
+                  ),
+                ],
               ),
-            ],
-          ),
+            ),
+            if (_catalogError != null || _catalogCached)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                child: Row(
+                  children: [
+                    const Icon(
+                      Icons.info_outline_rounded,
+                      size: 14,
+                      color: AppTheme.textSecondary,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        _catalogError ?? '分类使用上次缓存',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AppTheme.textSecondary,
+                        ),
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () => _reload(refreshCatalog: true),
+                      child: const Text('更新分类'),
+                    ),
+                  ],
+                ),
+              ),
+          ],
         ),
+      ),
     ],
   );
 
@@ -514,18 +870,26 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => Scaffold(
-    body: SafeArea(
-      bottom: false,
-      child: LayoutBuilder(
-        builder: (context, bounds) => Column(
-          children: [
-            ConstrainedBox(
-              constraints: BoxConstraints(maxHeight: bounds.maxHeight * .55),
-              child: SingleChildScrollView(child: _header()),
-            ),
-            Expanded(child: _bookList()),
-          ],
+  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
+    value: const SystemUiOverlayStyle(
+      statusBarColor: Colors.transparent,
+      statusBarIconBrightness: Brightness.dark,
+      statusBarBrightness: Brightness.light,
+    ),
+    child: Scaffold(
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: LayoutBuilder(
+          builder: (context, bounds) => Column(
+            children: [
+              ConstrainedBox(
+                constraints: BoxConstraints(maxHeight: bounds.maxHeight * .55),
+                child: SingleChildScrollView(child: _header()),
+              ),
+              Expanded(child: _bookList()),
+            ],
+          ),
         ),
       ),
     ),

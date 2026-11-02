@@ -5,6 +5,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../widgets/reader_status_bar.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
@@ -3366,42 +3367,16 @@ class _ReaderScreenState extends State<ReaderScreen>
         final remaining = metric == null ? null :
             _activity.remainingMinutes(widget.book.bookId, metric.total - metric.offset);
 
-        return Container(
-          height: math.max(
-            22,
-            MediaQuery.textScalerOf(context).scale(10) * 1.4 + 4,
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          color: theme.backgroundColor,
-          child: Row(
-            children: [
-              Expanded(
-                child: Text(
-                  remaining == null ? ch.title : '本章约 $remaining 分钟',
-                  style: TextStyle(fontSize: 10, color: theme.secondaryColor),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              const SizedBox(width: 8),
-              Flexible(
-                child: Text(
-                  '$_currentTimeStr${_batteryLevel >= 0 ? ' · $_batteryLevel%' : ''}',
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  semanticsLabel:
-                      '时间 $_currentTimeStr${_batteryLevel >= 0 ? '，电量 $_batteryLevel%' : ''}',
-                  style: TextStyle(fontSize: 10, color: theme.secondaryColor),
-                ),
-              ),
-              const SizedBox(width: 8),
-              Text(
-                '$percentStr%',
-                semanticsLabel: '约完成 $percentStr%',
-                style: TextStyle(fontSize: 10, color: theme.secondaryColor),
-              ),
-            ],
-          ),
+        return ReaderStatusBar(
+          chapterLabel: remaining == null ? ch.title : '本章约 $remaining 分钟',
+          clockLabel:
+              '$_currentTimeStr${_batteryLevel >= 0 ? ' · $_batteryLevel%' : ''}',
+          clockSemantics:
+              '时间 $_currentTimeStr${_batteryLevel >= 0 ? '，电量 $_batteryLevel%' : ''}',
+          progressLabel: '$percentStr%',
+          progressSemantics: '约完成 $percentStr%',
+          backgroundColor: theme.backgroundColor,
+          textColor: theme.secondaryColor,
         );
       },
     );

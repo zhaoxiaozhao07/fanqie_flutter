@@ -122,6 +122,7 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
             flutter test integration_test/discovery_platform_test.dart -d emulator-5554 --reporter expanded
+            flutter test integration_test/reader_status_platform_test.dart -d emulator-5554 --reporter expanded
             bash scripts/test_android_platform.sh
             PLATFORM_TEST_TARGET=integration_test/reader_soak_test.dart SOAK_SECONDS=1800 PLATFORM_TEST_LOG=/tmp/fanqie-soak.log bash scripts/test_android_platform.sh
       - name: 保存平台测试证据
