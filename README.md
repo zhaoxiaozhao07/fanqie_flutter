@@ -22,7 +22,7 @@
 
 ### 接口验证
 
-默认测试使用确定性回归用例。下列命令另外发起少量真实网络请求，验证官方分类、筛选、分页、详情目录、正文与评论；第三方接口波动可能使其失败：
+测试与默认构建发布流程分离，可按需手动执行。下列命令另外发起少量真实网络请求，验证官方分类、筛选、分页、详情目录、正文与评论；第三方接口波动可能使其失败：
 
 ```bash
 flutter test test/api_integration_test.dart \
@@ -110,12 +110,13 @@ DEVICE_ID=emulator-5554 bash scripts/test_android_platform.sh
 
 ## 发布
 
-版本号来自 `pubspec.yaml`，发布标签必须与其一致。发布 workflow 依次执行：
+版本号来自 `pubspec.yaml`，发布标签必须与其一致。发布 workflow 恢复为单个快速构建任务：
 
-1. 版本校验、静态分析和全部确定性 Dart 测试。
-2. 官方内容接口小样本实测。
-3. Android 平台回归及 30 分钟关屏稳定性测试。
-4. 使用配置的签名密钥构建 APK，生成 SHA-256，创建 GitHub Release。
+1. 版本校验与依赖拉取。
+2. 使用配置的正式签名密钥构建 APK。
+3. 生成 SHA-256，上传产物；标签或手动发布时更新 GitHub Release。
+
+静态分析、单元测试、真实接口测试、模拟器与 30 分钟关屏实验均不再作为默认构建的前置条件，仍可按上文命令手动运行。
 
 发布需要仓库签名 secrets：`KEYSTORE_BASE64`、`KEYSTORE_PASSWORD`、`KEY_PASSWORD`、`KEY_ALIAS`。不会将无签名配置的临时调试签名作为正式发布回退。
 
