@@ -99,7 +99,7 @@ SOAK_SECONDS=1800 PLATFORM_TEST_LOG=/tmp/fanqie-soak.log \
 DEVICE_ID=emulator-5554 bash scripts/test_android_platform.sh
 ```
 
-测试结果与实施记录见 [实施与验证记录](docs/V3_2_0_IMPLEMENTATION_STATUS.md)。
+测试结果见 [v3.3.0 实施与验证记录](docs/V3_3_0_VERIFICATION.md)；已有阅读功能的记录见 [v3.2.0](docs/V3_2_0_IMPLEMENTATION_STATUS.md)。
 
 ## 发布
 

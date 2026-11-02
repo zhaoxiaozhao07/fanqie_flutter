@@ -40,6 +40,17 @@
 
 云端结果以该标签的 Actions 与 Release 记录为准。接口或任何必要测试失败时不发布。
 
+### 云端完成记录（2026-11-02）
+
+- 源码提交：`fe3cb405a17d1e8af2590f6c4b4b1fbe25abfa14`，标签 `v3.3.0`。
+- [主分支 CI](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/runs/41409105018)：通过。
+- [标签发布 workflow](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/runs/41409105011)：四个必要任务全部通过。
+- 云端平台日志：9 个平台测试通过；`FANQIE_SOAK_DURATION=1800`，实际持续约 30:06，关屏测试通过。
+- [正式 Release](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/tag/v3.3.0)：非草稿、非预发布，已成为最新正式版。
+- APK 下载后重新验证 SHA-256、APK 签名、包名与版本；签名证书与 v3.2.0 一致，无需因本次发布更换签名而卸载旧版。
+- APK：`fanqie-v3.3.0.apk`，versionName `3.3.0` / versionCode `330`。
+- SHA-256：`74d0f1246af274e7fa8220bd79cb0b44cc4dc81a3754926d0452176f5a692173`。
+
 ## 保留边界
 
 - 第三方接口持续可用性不受项目控制。界面显示可重试错误，不用无关搜索或网页预览掩盖失败。
