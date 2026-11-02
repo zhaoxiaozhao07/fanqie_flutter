@@ -4,12 +4,12 @@
 
 [最新版本](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/latest) · [发布验证](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/release.yml)
 
-## v3.3.1 界面布局修正
+## v3.3.0 界面布局修正（覆盖更新）
 
 - 首页恢复淡红到白色的顶部渐变、居中标题与圆角搜索栏；频道切换、高级筛选及快捷条件统一为紧凑胶囊布局。
 - 高级筛选弹层的确认操作固定在底部，选项区域可滚动；保留大字、窄屏与横屏适配。
 - 阅读器时间、电量和进度成组靠右，修正松散弹性布局造成的空白偏移；滚动与分页模式共用安全区域定位。
-- 本轮通过 [仅构建签名 APK workflow](.github/workflows/build-apk.yml) 生成补丁安装包，不覆盖已发布的 v3.3.0，也不自动创建新发布标签。
+- 本轮继续使用 `v3.3.0` 标签覆盖更新同名发布，构建号递增至 `332`，通过原发布 workflow 更新签名 APK 与校验文件。
 
 ## v3.3.0 官方书库对齐与正文可靠性
 
