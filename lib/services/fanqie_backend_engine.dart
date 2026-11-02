@@ -5,15 +5,17 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import '../models/discovery.dart';
 import '../models/book.dart';
 import '../models/chapter.dart';
 import 'font_decryptor.dart';
 import 'reader_cache_service.dart';
 
 /// 番茄小说内置后端引擎
-/// 原 fanqie-backend 服务完整移植至 Dart，直接在前端内置运行：
+/// 直接请求已验证的官方接口，不依赖旧第三方代理节点：
 /// - 搜索服务 (novel.snssdk.com 接口对接与字体解密)
-/// - 发现/书库多维筛选与榜单浏览 (fanqienovel.com/api/author/library 与动态降级检索)
+/// - 官方动态分类元数据与书库多维筛选；不以关键词搜索伪造榜单
 /// - 书籍详情与双向卷/章节目录智能解析 (提取 window.__INITIAL_STATE__)
 /// - 章节正文阅读与本地持久化磁盘缓存
 /// - 高性能并发下载接口（由后端引擎控制并发度与持久化，前端不设人为限速与批次延迟）
@@ -23,142 +25,23 @@ class FanqieBackendEngine {
       'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36';
   static const String dalvikUserAgent = 'Dalvik/2.1.0 (Linux; U; Android 10)';
 
-  static const String defaultCookie =
-      'novel_web_id=7681901428650247732; ttwid=1%7CkNjzN_Ynh0Ldvq6ZsJ1XOGEtGdkmNVkY3Yf0RiQ2QFQ%7C1788583129%7Caeac7d8d47e102419b7794dc3b2d6074a57a447772af6dbffc3bd1c303981dc6';
+  FanqieBackendEngine({
+    http.Client? client,
+    ReaderCacheService? cache,
+    Future<String?> Function(String)? chapterLoader,
+  }) : _client = client ?? http.Client(),
+       readerCache = cache ?? ReaderCacheService(),
+       _chapterLoader = chapterLoader;
 
-  static const Map<int, String> categoryMap = {
-    1: "都市",
-    2: "修仙",
-    3: "现代言情",
-    4: "校园",
-    5: "古代言情",
-    7: "玄幻",
-    8: "科幻",
-    10: "悬疑",
-    11: "乡村",
-    12: "历史",
-    15: "体育",
-    16: "武侠",
-    17: "鉴宝",
-    19: "系统",
-    20: "神豪",
-    23: "种田",
-    24: "快穿",
-    25: "赘婿",
-    26: "神医",
-    27: "战神",
-    28: "萌宝",
-    29: "总裁",
-    30: "宠妻",
-    32: "幻想言情",
-    34: "婚恋",
-    36: "重生",
-    37: "穿越",
-    39: "二次元",
-    40: "海岛",
-    42: "奶爸",
-    43: "娱乐圈",
-    44: "空间",
-    61: "推理",
-    66: "洪荒",
-    67: "三国",
-    68: "末世",
-    69: "直播",
-    70: "无限流",
-    71: "诸天万界",
-    72: "兽世",
-    73: "大唐",
-    74: "宠物",
-    75: "外卖",
-    76: "清穿",
-    77: "星际",
-    78: "美食",
-    79: "年代",
-    80: "剑道",
-    81: "盗墓",
-    82: "学霸",
-    83: "公主",
-    84: "皇后",
-    85: "王妃",
-    86: "女强",
-    87: "皇叔",
-    88: "嫡女",
-    91: "多女主",
-    93: "扮猪吃虎",
-    94: "团宠",
-    95: "虐文",
-    96: "甜宠",
-    100: "灵异",
-    124: "都市修真",
-    125: "家庭",
-    126: "明朝",
-    127: "职场",
-    246: "宫斗宅斗",
-    247: "医术",
-    248: "玄幻言情",
-    253: "古言脑洞",
-    257: "玄幻脑洞",
-    258: "传统玄幻",
-    259: "奇幻仙侠",
-    261: "都市日常",
-    262: "都市脑洞",
-    263: "都市种田",
-    265: "先婚后爱",
-    266: "马甲",
-    267: "现言脑洞",
-    272: "历史脑洞",
-    273: "历史古代",
-    275: "双男主",
-    504: "抗战谍战",
-    539: "悬疑脑洞",
-    704: "双女主",
-    718: "动漫衍生",
-    745: "星光璀璨",
-    746: "游戏体育",
-    747: "女频悬疑",
-    748: "豪门总裁",
-    749: "青春甜宠",
-    750: "职场婚恋",
-    751: "悬疑灵异",
-    1014: "都市高武",
-    1015: "女频衍生",
-    1016: "男频衍生",
-    1017: "民国言情",
-    1139: "古风世情",
-    1140: "东方仙侠",
-    1141: "西方奇幻",
-  };
-
-  static const List<String> categoryFallbackOrder = [
-    "玄幻", "都市", "修仙", "科幻", "历史", "悬疑", "言情", "战神",
-    "重生", "穿越", "种田", "游戏", "末世", "系统", "同人", "二次元"
-  ];
-
-  static const Map<String, String> rankKeywordMap = {
-    "巅峰榜": "高分",
-    "热搜榜": "热门",
-    "黑马榜": "新书",
-    "爆更榜": "连载",
-    "推荐榜": "精选",
-    "完结榜": "完结",
-    "出版榜": "出版",
-  };
-
-  static final FanqieBackendEngine _instance = FanqieBackendEngine._internal();
-  factory FanqieBackendEngine({http.Client? client}) {
-    if (client != null) {
-      _instance._client = client;
-    }
-    return _instance;
-  }
-  FanqieBackendEngine._internal() : _client = http.Client();
-
-  http.Client _client;
-  final ReaderCacheService readerCache = ReaderCacheService();
+  final http.Client _client;
+  final ReaderCacheService readerCache;
+  final Future<String?> Function(String)? _chapterLoader;
   final ValueNotifier<String?> cacheWarning = ValueNotifier(null);
 
   Future<void> _cacheForReading(
-    String bookId, String itemId, String content,
+    String bookId,
+    String itemId,
+    String content,
   ) async {
     try {
       await readerCache.write(bookId, itemId, content);
@@ -175,10 +58,10 @@ class FanqieBackendEngine {
 
   Map<String, String> get _browserHeaders => {
     'User-Agent': defaultUserAgent,
-    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+    'Accept':
+        'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
     'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
     'Referer': 'https://fanqienovel.com/',
-    'Cookie': defaultCookie,
   };
 
   /// 缓存目录
@@ -204,12 +87,7 @@ class FanqieBackendEngine {
   /// 获取书籍离线持久化存储目录 (持久保存在文档目录，支持离线阅读与快速读取)
   Future<Directory> getOfflineBookDir(String bookId) async {
     final cleanId = ReaderCacheService.segment(bookId.trim());
-    Directory baseDir;
-    try {
-      baseDir = await getApplicationDocumentsDirectory();
-    } catch (_) {
-      baseDir = Directory.systemTemp;
-    }
+    final baseDir = await readerCache.documents();
     final dir = Directory('${baseDir.path}/offline_books/$cleanId');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
@@ -245,7 +123,8 @@ class FanqieBackendEngine {
       ]) {
         if (!await dir.exists()) continue;
         await for (final file in dir.list(followLinks: false)) {
-          if (file is File && file.path.endsWith('.txt') &&
+          if (file is File &&
+              file.path.endsWith('.txt') &&
               ReaderCacheService.isReadable(await file.readAsString())) {
             names.add(file.uri.pathSegments.last);
           }
@@ -259,44 +138,30 @@ class FanqieBackendEngine {
   Future<List<Book>> searchBooks(
     String keyword, {
     int offset = 0,
-    int tabType = 3,
     int count = 20,
   }) async {
     final cleanKeyword = keyword.trim();
     if (cleanKeyword.isEmpty) return [];
 
-    if (cleanKeyword == 'test_conn') {
-      return [
-        Book(
-          bookId: 'test',
-          bookName: '内置引擎已就绪',
-          author: 'System',
-          abstract: '番茄小说内置后端运行正常',
-          category: '系统',
-          wordNumber: 0,
-          serialCount: 0,
-          creationStatus: '连载中',
-          tags: ['测试', '内置引擎'],
-          score: '10.0',
-        ),
-      ];
-    }
-
     final uri = Uri.parse(
       'https://novel.snssdk.com/api/novel/channel/homepage/search/search/v1/?'
-      'q=${Uri.encodeComponent(cleanKeyword)}&aid=1967&offset=$offset&count=$count&tab_type=$tabType',
+      'q=${Uri.encodeComponent(cleanKeyword)}&aid=1967&offset=$offset&count=$count&tab_type=3',
     );
 
     try {
-      final response = await _client.get(
-        uri,
-        headers: {'User-Agent': dalvikUserAgent},
-      ).timeout(timeout);
+      final response = await _client
+          .get(uri, headers: {'User-Agent': dalvikUserAgent})
+          .timeout(timeout);
 
       if (response.statusCode == 200) {
         final data = json.decode(utf8.decode(response.bodyBytes));
+        if (data['code'] != 0) {
+          throw const FanqieApiException('搜索暂时不可用，请稍后重试');
+        }
         final retData = data['data']?['ret_data'] as List?;
-        if (retData == null) return [];
+        if (retData == null) {
+          throw const FanqieApiException('搜索响应不完整，请稍后重试');
+        }
 
         final books = <Book>[];
         for (final item in retData) {
@@ -323,131 +188,185 @@ class FanqieBackendEngine {
               author: FontDecryptor.decryptText(rawAuthor.toString()),
               abstract: FontDecryptor.decryptText(rawAbstract.toString()),
               category: decryptedCat,
-              thumbUrl: item['thumb_url']?.toString() ?? item['audio_thumb_uri']?.toString(),
-              wordNumber: int.tryParse(item['word_count']?.toString() ?? item['word_number']?.toString() ?? '0') ?? 0,
-              serialCount: int.tryParse(item['serial_count']?.toString() ?? item['chapter_count']?.toString() ?? '0') ?? 0,
+              thumbUrl:
+                  item['thumb_url']?.toString() ??
+                  item['audio_thumb_uri']?.toString(),
+              wordNumber:
+                  int.tryParse(
+                    item['word_count']?.toString() ??
+                        item['word_number']?.toString() ??
+                        '0',
+                  ) ??
+                  0,
+              serialCount:
+                  int.tryParse(
+                    item['serial_count']?.toString() ??
+                        item['chapter_count']?.toString() ??
+                        '0',
+                  ) ??
+                  0,
               creationStatus: creationStatus,
               tags: tags,
-              score: item['score']?.toString() ?? '9.0',
+              score: item['score']?.toString(),
             ),
           );
         }
         return books;
       }
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('FanqieBackendEngine search error: $e');
-      }
+    } catch (_) {
+      throw const FanqieApiException('搜索暂时不可用，请稍后重试');
     }
-    return [];
+    throw const FanqieApiException('搜索暂时不可用，请稍后重试');
   }
 
-  /// 2. 发现/分类/榜单接口
-  Future<List<Book>> discoverBooks({
-    String? bdtype,
-    int? type,
+  /// Metadata is fetched per audience. Last successful metadata is an explicit
+  /// offline fallback, never a hard-coded or guessed ID-to-name table.
+  Future<CategoryCatalog> getCategories({int gender = 1}) async {
+    final serverGender = LibraryFilters.serverGender(gender);
+    final cacheKey = 'library_categories_v1_$serverGender';
+    try {
+      final uri = Uri.https(
+        'fanqienovel.com',
+        '/api/author/book/category_list/v0/',
+        {'gender': '$serverGender'},
+      );
+      final response = await _client
+          .get(uri, headers: _browserHeaders)
+          .timeout(timeout);
+      final body = jsonDecode(utf8.decode(response.bodyBytes));
+      if (response.statusCode != 200 ||
+          body is! Map ||
+          body['code'] != 0 ||
+          body['data'] is! List) {
+        throw const FormatException('Invalid category response');
+      }
+      final categories = LibraryCategory.parseList(body['data'] as List);
+      if (categories.isEmpty) {
+        throw const FormatException('Empty category metadata');
+      }
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString(
+          cacheKey,
+          jsonEncode(categories.map((c) => c.toJson()).toList()),
+        );
+      } catch (_) {
+        /* Metadata remains usable if local storage is unavailable. */
+      }
+      return CategoryCatalog(categories);
+    } catch (_) {
+      try {
+        final prefs = await SharedPreferences.getInstance();
+        final raw = prefs.getString(cacheKey);
+        if (raw != null) {
+          final data = jsonDecode(raw);
+          if (data is List) {
+            final categories = LibraryCategory.parseList(data);
+            if (categories.isNotEmpty) {
+              return CategoryCatalog(categories, isCached: true);
+            }
+          }
+        }
+      } catch (_) {
+        /* Corrupt cache must not invent category choices. */
+      }
+      throw const FanqieApiException('分类加载失败，请联网重试');
+    }
+  }
+
+  /// A successful empty page terminates pagination. Failures do not silently
+  /// fall back to unrelated search results or drop the selected filters.
+  Future<LibraryPage> discoverBooks({
+    int categoryId = -1,
     int gender = 1,
-    bool isRanking = false,
-    int genreType = 0,
-    int? creationStatus,
-    int? wordCount,
+    int creationStatus = -1,
+    int wordCount = -1,
     int sort = 0,
     int page = 1,
   }) async {
-    final pageCount = 20;
-    final pageIndex = (page - 1).clamp(0, 9999);
-
-    // 性别映射：1=男频(1)，2=女频(0)，-1/0=全部(-1)
-    int libGender = -1;
-    if (gender == 2) {
-      libGender = 0;
-    } else if (gender == 1) {
-      libGender = 1;
+    final serverGender = LibraryFilters.serverGender(gender);
+    if ((categoryId != -1 && categoryId <= 0) ||
+        page < 1 ||
+        !LibraryFilters.statuses.containsKey(creationStatus) ||
+        !LibraryFilters.wordCounts.containsKey(wordCount) ||
+        !LibraryFilters.sorts.containsKey(sort)) {
+      throw ArgumentError('无效的书库筛选条件');
     }
-
-    final libCatId = (type != null && type > 0) ? type : -1;
-    final cStatus = creationStatus ?? -1;
-    final wCount = wordCount ?? -1;
-
-    // 1. 优先调用番茄官方书库 API（支持完整多维筛选与分页）
+    final uri =
+        Uri.https('fanqienovel.com', '/api/author/library/book_list/v0/', {
+          'page_count': '20',
+          'page_index': '${page - 1}',
+          'gender': '$serverGender',
+          'category_id': '$categoryId',
+          'creation_status': '$creationStatus',
+          'word_count': '$wordCount',
+          'book_type': '-1',
+          'sort': '$sort',
+        });
     try {
-      final queryParams = {
-        'page_count': '$pageCount',
-        'page_index': '$pageIndex',
-        'gender': '$libGender',
-        'category_id': '$libCatId',
-        'creation_status': '$cStatus',
-        'word_count': '$wCount',
-        'book_type': '-1',
-        'sort': '$sort',
-      };
-      final uri = Uri.https('fanqienovel.com', '/api/author/library/book_list/v0/', queryParams);
-      final response = await _client.get(uri, headers: _browserHeaders).timeout(timeout);
-
-      if (response.statusCode == 200) {
-        final data = json.decode(utf8.decode(response.bodyBytes));
-        final bookList = data['data']?['book_list'] as List?;
-        if (bookList != null && bookList.isNotEmpty) {
-          final books = <Book>[];
-          for (final b in bookList) {
-            if (b is! Map) continue;
-            final rawName = b['book_name']?.toString() ?? '';
-            final rawAuthor = b['author']?.toString() ?? '';
-            final rawAbstract = b['abstract']?.toString() ?? '';
-            final rawCat = b['category']?.toString() ?? '';
-            final catName = FontDecryptor.decryptLibText(rawCat);
-
-            final statusVal = FontDecryptor.parseIntSafe(b['creation_status'], 1);
-
-            books.add(
-              Book(
-                bookId: b['book_id']?.toString() ?? '',
-                bookName: FontDecryptor.decryptLibText(rawName),
-                author: FontDecryptor.decryptLibText(rawAuthor),
-                abstract: FontDecryptor.decryptLibText(rawAbstract),
-                category: catName,
-                thumbUrl: b['thumb_url']?.toString() ?? b['thumb_uri']?.toString(),
-                wordNumber: FontDecryptor.parseIntSafe(b['word_count']),
-                serialCount: FontDecryptor.parseIntSafe(b['serial_count'] ?? b['chapter_count']),
-                creationStatus: statusVal == 1 ? '连载中' : '完结',
-                tags: catName.isNotEmpty ? [catName] : [],
-                score: b['score']?.toString() ?? '9.5',
-              ),
-            );
-          }
-          if (books.isNotEmpty) return books;
-        }
+      final response = await _client
+          .get(uri, headers: _browserHeaders)
+          .timeout(timeout);
+      final body = jsonDecode(utf8.decode(response.bodyBytes));
+      if (response.statusCode != 200 ||
+          body is! Map ||
+          body['code'] != 0 ||
+          body['data'] is! Map) {
+        throw const FormatException('Invalid library response');
       }
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('FanqieBackendEngine discover library API error: $e');
+      final data = body['data'] as Map;
+      final items = data['book_list'];
+      if (items is! List) throw const FormatException('Missing book list');
+      final books = <Book>[];
+      final seen = <String>{};
+      for (final item in items) {
+        if (item is! Map) continue;
+        final id = item['book_id']?.toString() ?? '';
+        final name = FontDecryptor.decryptLibText(
+          item['book_name']?.toString() ?? '',
+        );
+        if (id.isEmpty || name.isEmpty || !seen.add(id)) continue;
+        final category = FontDecryptor.decryptLibText(
+          item['category']?.toString() ?? '',
+        );
+        books.add(
+          Book(
+            bookId: id,
+            bookName: name,
+            author: FontDecryptor.decryptLibText(
+              item['author']?.toString() ?? '',
+            ),
+            abstract: FontDecryptor.decryptLibText(
+              item['abstract']?.toString() ?? '',
+            ),
+            category: category.isEmpty ? null : category,
+            thumbUrl:
+                item['thumb_url']?.toString() ?? item['thumb_uri']?.toString(),
+            wordNumber: FontDecryptor.parseIntSafe(item['word_count']),
+            serialCount: FontDecryptor.parseIntSafe(
+              item['serial_count'] ?? item['chapter_count'],
+            ),
+            creationStatus:
+                FontDecryptor.parseIntSafe(item['creation_status'], 1) == 1
+                ? '连载中'
+                : '完结',
+            tags: category.isEmpty ? const [] : [category],
+            score: item['score']?.toString(),
+          ),
+        );
       }
-    }
-
-    // 2. 动态关键词搜索降级方案
-    final offset = pageIndex * pageCount;
-    if (isRanking || (bdtype != null && (type == null || type <= 0))) {
-      final rankName = bdtype ?? '巅峰榜';
-      String kw = rankKeywordMap[rankName] ?? '热门';
-      if (gender == 2) {
-        kw = '$kw女频';
+      if (items.isNotEmpty && books.isEmpty) {
+        throw const FormatException('Invalid books');
       }
-      return searchBooks(kw, offset: offset, count: pageCount);
-    } else {
-      String catName = '都市';
-      if (type != null && categoryMap.containsKey(type)) {
-        catName = categoryMap[type]!;
-      } else if (type != null && type > 0 && type < categoryFallbackOrder.length) {
-        catName = categoryFallbackOrder[type];
-      } else if (gender == 2) {
-        catName = '言情';
-      }
-
-      String queryWord = catName;
-      if (gender == 2 && !catName.contains('女') && !catName.contains('言情') && !catName.contains('宠')) {
-        queryWord = '$catName言情';
-      }
-      return searchBooks(queryWord, offset: offset, count: pageCount);
+      return LibraryPage(
+        List.unmodifiable(books),
+        hasMore:
+            books.isNotEmpty &&
+            (data['has_more'] == true || data['has_more'] == 1),
+        total: int.tryParse(data['total_count']?.toString() ?? ''),
+      );
+    } catch (_) {
+      throw const FanqieApiException('书库加载失败，请稍后重试');
     }
   }
 
@@ -458,12 +377,18 @@ class FanqieBackendEngine {
 
     final uri = Uri.parse('https://fanqienovel.com/page/$cleanId');
     try {
-      final response = await _client.get(uri, headers: _browserHeaders).timeout(timeout);
+      final response = await _client
+          .get(uri, headers: _browserHeaders)
+          .timeout(timeout);
       if (response.statusCode == 200) {
         final html = utf8.decode(response.bodyBytes);
         final state = _extractInitialState(html);
         if (state != null && state['page'] is Map) {
           final p = state['page'] as Map<String, dynamic>;
+          if (p['bookId']?.toString() != cleanId ||
+              (p['bookName']?.toString() ?? '').isEmpty) {
+            return null;
+          }
 
           String cat = p['category']?.toString() ?? '';
           if (cat.isEmpty && p['categoryV2'] != null) {
@@ -478,12 +403,19 @@ class FanqieBackendEngine {
           final statusVal = p['creationStatus'] ?? p['status'] ?? 1;
           final creationStatus = statusVal.toString() == '1' ? '连载中' : '完结';
 
-          final decryptedName = FontDecryptor.decryptText(p['bookName']?.toString() ?? '');
-          final decryptedAuthor = FontDecryptor.decryptText(p['author']?.toString() ?? '');
-          final decryptedAbstract = FontDecryptor.decryptText(p['abstract']?.toString() ?? '');
+          final decryptedName = FontDecryptor.decryptText(
+            p['bookName']?.toString() ?? '',
+          );
+          final decryptedAuthor = FontDecryptor.decryptText(
+            p['author']?.toString() ?? '',
+          );
+          final decryptedAbstract = FontDecryptor.decryptText(
+            p['abstract']?.toString() ?? '',
+          );
           final decryptedCat = FontDecryptor.decryptText(cat);
 
-          final itemIds = (p['itemIds'] as List?)?.map((e) => e.toString()).toList() ?? [];
+          final itemIds =
+              (p['itemIds'] as List?)?.map((e) => e.toString()).toList() ?? [];
           final chapterVols = p['chapterListWithVolume'] as List? ?? [];
 
           // 保存详情元数据以便获取完整目录
@@ -500,10 +432,14 @@ class FanqieBackendEngine {
             category: decryptedCat,
             thumbUrl: p['thumbUrl']?.toString() ?? p['thumbUri']?.toString(),
             wordNumber: int.tryParse(p['wordNumber']?.toString() ?? '0') ?? 0,
-            serialCount: int.tryParse(p['chapterTotal']?.toString() ?? '${itemIds.length}') ?? itemIds.length,
+            serialCount:
+                int.tryParse(
+                  p['chapterTotal']?.toString() ?? '${itemIds.length}',
+                ) ??
+                itemIds.length,
             creationStatus: creationStatus,
             tags: decryptedCat.isNotEmpty ? [decryptedCat] : [],
-            score: p['score']?.toString() ?? '9.5',
+            score: p['score']?.toString(),
           );
         }
       }
@@ -527,7 +463,9 @@ class FanqieBackendEngine {
       if (await dirFile.exists()) {
         final raw = await dirFile.readAsString();
         final List<dynamic> list = json.decode(raw);
-        return list.map((e) => Chapter.fromDirectoryJson(e as Map<String, dynamic>, 0)).toList();
+        return list
+            .map((e) => Chapter.fromDirectoryJson(e as Map<String, dynamic>, 0))
+            .toList();
       }
     } catch (_) {}
 
@@ -546,8 +484,11 @@ class FanqieBackendEngine {
           if (vol is List) {
             for (final ch in vol) {
               if (ch is Map) {
-                final itemId = ch['itemId']?.toString() ?? ch['item_id']?.toString() ?? '';
-                final title = FontDecryptor.decryptText(ch['title']?.toString() ?? '');
+                final itemId =
+                    ch['itemId']?.toString() ?? ch['item_id']?.toString() ?? '';
+                final title = FontDecryptor.decryptText(
+                  ch['title']?.toString() ?? '',
+                );
                 if (itemId.isNotEmpty) {
                   lists.add(
                     Chapter(
@@ -603,9 +544,11 @@ class FanqieBackendEngine {
         for (final ch in vol) {
           if (ch is Map) {
             volChapters.add({
-              'itemId': ch['itemId']?.toString() ?? ch['item_id']?.toString() ?? '',
+              'itemId':
+                  ch['itemId']?.toString() ?? ch['item_id']?.toString() ?? '',
               'title': FontDecryptor.decryptText(ch['title']?.toString() ?? ''),
-              'realChapterOrder': int.tryParse(ch['realChapterOrder']?.toString() ?? '1') ?? 1,
+              'realChapterOrder':
+                  int.tryParse(ch['realChapterOrder']?.toString() ?? '1') ?? 1,
             });
           }
         }
@@ -646,8 +589,11 @@ class FanqieBackendEngine {
 
     // 3. 优先通过移动端通道获取完整无锁正文 (对接 reading.snssdk.com 移动端专属接口)
     try {
-      final mobileContent = await _mobileGateway.fetchChapter(cleanId);
-      if (mobileContent != null && mobileContent.length > 50 &&
+      final mobileContent =
+          await (_chapterLoader?.call(cleanId) ??
+              _mobileGateway.fetchChapter(cleanId));
+      if (mobileContent != null &&
+          mobileContent.length > 50 &&
           ReaderCacheService.isReadable(mobileContent)) {
         // 成功获取完整正文，持久化缓存（实现无下载时的阅读自动缓存）
         await _cacheForReading(cacheBook, cleanId, mobileContent);
@@ -659,47 +605,8 @@ class FanqieBackendEngine {
       }
     }
 
-    // 4. 兜底回退到 Web 端阅览接口
-    final uri = Uri.parse('https://fanqienovel.com/reader/$cleanId');
-    for (int retry = 0; retry < 2; retry++) {
-      try {
-        final response = await _client.get(uri, headers: _browserHeaders).timeout(timeout);
-        if (response.statusCode == 200) {
-          final html = utf8.decode(response.bodyBytes);
-          if (!html.contains('验证码')) {
-            final state = _extractInitialState(html);
-            if (state != null && state['reader'] is Map) {
-              final reader = state['reader'] as Map<String, dynamic>;
-              final ch = reader['chapterData'];
-              if (ch is Map) {
-                final rawContent = ch['content']?.toString() ?? '';
-                final isLocked = ch['isChapterLock'] == true;
-
-                if (rawContent.isNotEmpty) {
-                  final decrypted = FontDecryptor.decryptHtmlToText(rawContent);
-                  if (decrypted.isNotEmpty) {
-                    if (isLocked || decrypted.length <= 200) {
-                      return '$decrypted\n\n[提示：本章为番茄APP端专享/锁章章节，当前官方Web端仅提供试读预览]';
-                    } else {
-                      await _cacheForReading(cacheBook, cleanId, decrypted);
-                      return decrypted;
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-      } catch (e) {
-        if (kDebugMode) {
-          debugPrint('FanqieBackendEngine getChapterContent ($cleanId) retry $retry: $e');
-        }
-        if (retry < 1) {
-          await Future.delayed(const Duration(milliseconds: 300));
-        }
-      }
-    }
-
+    // The web reader only guarantees a preview. Never return it as chapter
+    // content or persist it as a successfully downloaded/offline chapter.
     return null;
   }
 
@@ -837,7 +744,10 @@ class FanqieBackendEngine {
       }
     }
 
-    final reg = RegExp(r'window\.__INITIAL_STATE__\s*=\s*(\{.+?\});', dotAll: true);
+    final reg = RegExp(
+      r'window\.__INITIAL_STATE__\s*=\s*(\{.+?\});',
+      dotAll: true,
+    );
     final m = reg.firstMatch(html);
     if (m != null) {
       String jsonStr = m.group(1)!;

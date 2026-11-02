@@ -63,13 +63,17 @@ class _SearchResultsScreenState extends State<SearchResultsScreen> {
         offset: _offset,
       );
 
+      if (!mounted) return;
       setState(() {
-        _books.addAll(books);
-        _hasMore = books.length >= _pageSize;
+        final seen = _books.map((b) => b.bookId).toSet();
+        final added = books.where((b) => seen.add(b.bookId)).toList();
+        _books.addAll(added);
+        _hasMore = books.length >= _pageSize && added.isNotEmpty;
         _offset += books.length;
         _isLoading = false;
       });
     } catch (e) {
+      if (!mounted) return;
       setState(() {
         _errorMessage = '搜索失败: $e';
         _isLoading = false;

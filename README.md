@@ -4,7 +4,26 @@
 
 [最新版本](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/latest) · [发布验证](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/release.yml)
 
-## v3.2.0 阅读体验增强
+## v3.3.0 官方书库对齐与正文可靠性
+
+- 首页按当前频道读取官方分类接口，保留上游分类名称、ID 与分组；支持分类查找、全部分类和上次成功数据的离线缓存。
+- 修正字数筛选为官方 `0–4` 五档；使用接口 `has_more` 停止分页，合并时去重，切换频道/筛选后忽略迟到响应。
+- 移除以普通书库或关键词搜索冒充的七个榜单入口、旧分类降级表、伪健康检查和未使用的正文通道别名。当前首页是官方书库，不宣称已接入真实榜单。
+- 移动端正文首次读取时协商密钥，服务端密钥变化后有界刷新与重试；不再使用过期内置正文密钥。网页正文仅有预览，不作为失败回退、离线章节或成功下载。
+- 接口业务错误明确提示，不用无关搜索结果掩盖；下载管理按钮只在确有活动任务时运行动画。
+- 原有书架、阅读位置、本地导入、离线文件、批注与备份继续保留。
+
+### 接口验证
+
+默认测试使用确定性回归用例。下列命令另外发起少量真实网络请求，验证官方分类、筛选、分页、详情目录、正文与评论；第三方接口波动可能使其失败：
+
+```bash
+flutter test test/api_integration_test.dart \
+  --dart-define=FANQIE_LIVE_API=true \
+  --plain-name "ApiService Built-in Backend Endpoints Tests"
+```
+
+## 已有阅读体验
 
 ### 阅读连续性
 - 原文锚点保存章节 ID、段落与字符位置，字号、字体、横竖屏和阅读模式变化后继续定位原文。
@@ -86,9 +105,10 @@ DEVICE_ID=emulator-5554 bash scripts/test_android_platform.sh
 
 版本号来自 `pubspec.yaml`，发布标签必须与其一致。发布 workflow 依次执行：
 
-1. 版本校验、静态分析和全部 Dart 测试。
-2. Android 平台回归及 30 分钟关屏稳定性测试。
-3. 使用配置的签名密钥构建 APK，生成 SHA-256，创建 GitHub Release。
+1. 版本校验、静态分析和全部确定性 Dart 测试。
+2. 官方内容接口小样本实测。
+3. Android 平台回归及 30 分钟关屏稳定性测试。
+4. 使用配置的签名密钥构建 APK，生成 SHA-256，创建 GitHub Release。
 
 发布需要仓库签名 secrets：`KEYSTORE_BASE64`、`KEYSTORE_PASSWORD`、`KEY_PASSWORD`、`KEY_ALIAS`。不会将无签名配置的临时调试签名作为正式发布回退。
 

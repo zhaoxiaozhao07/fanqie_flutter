@@ -24,11 +24,23 @@ class _DownloadActionButtonState extends State<DownloadActionButton>
     _animController = AnimationController(
       vsync: this,
       duration: const Duration(milliseconds: 1400),
-    )..repeat();
+    );
+    _downloadService.addListener(_syncAnimation);
+    _syncAnimation();
+  }
+
+  void _syncAnimation() {
+    if (_downloadService.activeTasks.isNotEmpty) {
+      if (!_animController.isAnimating) _animController.repeat();
+    } else {
+      _animController.stop();
+      _animController.value = 0;
+    }
   }
 
   @override
   void dispose() {
+    _downloadService.removeListener(_syncAnimation);
     _animController.dispose();
     super.dispose();
   }
@@ -65,7 +77,11 @@ class _DownloadActionButtonState extends State<DownloadActionButton>
             backgroundColor: AppTheme.primaryColor,
             label: Text(
               '$activeCount',
-              style: const TextStyle(fontSize: 10, color: Colors.white, fontWeight: FontWeight.bold),
+              style: const TextStyle(
+                fontSize: 10,
+                color: Colors.white,
+                fontWeight: FontWeight.bold,
+              ),
             ),
             child: iconWidget,
           ),

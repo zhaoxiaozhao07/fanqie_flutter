@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
 import '../models/book.dart';
+import '../models/discovery.dart';
 import '../models/chapter.dart';
 import '../models/comment.dart';
 import 'fanqie_backend_engine.dart';
@@ -13,15 +14,12 @@ import 'atomic_file.dart';
 
 /// API 服务 - 接入内置番茄小说后端引擎
 /// 覆盖原有全部接口并直接内置运行：
-/// - checkHealth: 健康检查
 /// - searchBooks: 搜索书籍
-/// - discoverBooks: 发现/榜单/分类多维筛选
+/// - getCategories / discoverBooks: 官方分类与书库多维筛选
 /// - getBookDetail: 书籍详情
 /// - getBookDirectory: 简化章节目录
 /// - getBookFull: 完整书籍与目录备用
 /// - getBookChapters: 智能多级回退获取目录
-/// - getIosChapterContent: 章节正文（优先通道）
-/// - getNormalChapterContent: 章节正文（备用通道）
 /// - getChapterContent: 获取章节正文
 /// - getBookCover: 获取书籍封面图片数据
 /// - downloadChapters: 高性能全章节并发下载
@@ -33,10 +31,12 @@ class ApiService {
   final Map<String, DateTime> _commentRefreshes = {};
   bool _disposed = false;
 
-  ApiService({http.Client? client, FanqieBackendEngine? engine,
-    this.chapterStatsLoader})
-      : _client = client ?? http.Client(),
-        _engine = engine ?? FanqieBackendEngine(client: client);
+  ApiService({
+    http.Client? client,
+    FanqieBackendEngine? engine,
+    this.chapterStatsLoader,
+  }) : _client = client ?? http.Client(),
+       _engine = engine ?? FanqieBackendEngine(client: client);
 
   void _refreshComments(String key, Future<Object?> Function() fetch) {
     if (_disposed) return;
@@ -51,64 +51,27 @@ class ApiService {
 
   FanqieBackendEngine get engine => _engine;
 
-  /// 1. 健康检查接口（内置引擎恒定可用）
-  Future<bool> checkHealth([String? targetUrl]) async {
-    return true;
-  }
+  Future<List<Book>> searchBooks(String keyword, {int offset = 0}) =>
+      _engine.searchBooks(keyword, offset: offset);
 
-  /// 2. 搜索书籍接口
-  Future<List<Book>> searchBooks(
-    String keyword, {
-    int offset = 0,
-    int tabType = 3,
-  }) async {
-    return _engine.searchBooks(keyword, offset: offset, tabType: tabType);
-  }
+  Future<CategoryCatalog> getCategories({int gender = 1}) =>
+      _engine.getCategories(gender: gender);
 
-  /// 3. 发现/榜单/分类多维筛选接口
-  Future<List<Book>> discoverBooks({
-    String? bdtype,
-    int? type,
+  Future<LibraryPage> discoverBooks({
+    int categoryId = -1,
     int gender = 1,
-    bool isRanking = false,
-    int genreType = 0,
-    int? creationStatus,
-    int? wordCount,
+    int creationStatus = -1,
+    int wordCount = -1,
     int sort = 0,
     int page = 1,
-  }) async {
-    return _engine.discoverBooks(
-      bdtype: bdtype,
-      type: type,
-      gender: gender,
-      isRanking: isRanking,
-      genreType: genreType,
-      creationStatus: creationStatus,
-      wordCount: wordCount,
-      sort: sort,
-      page: page,
-    );
-  }
-
-  /// 发现/分类快捷接口
-  Future<List<Book>> discoverByType({
-    required int type,
-    int gender = 1,
-    int page = 1,
-    int? creationStatus,
-    int? wordCount,
-    int sort = 0,
-  }) {
-    return discoverBooks(
-      type: type,
-      gender: gender,
-      page: page,
-      creationStatus: creationStatus,
-      wordCount: wordCount,
-      sort: sort,
-      isRanking: false,
-    );
-  }
+  }) => _engine.discoverBooks(
+    categoryId: categoryId,
+    gender: gender,
+    creationStatus: creationStatus,
+    wordCount: wordCount,
+    sort: sort,
+    page: page,
+  );
 
   /// 4. 书籍详情接口
   Future<Book?> getBookDetail(String bookId) async {
@@ -166,20 +129,6 @@ class ApiService {
     return [];
   }
 
-  /// 7. 章节正文接口（iOS 通道）
-  Future<String?> getIosChapterContent(String itemId, {String? bookId}) async {
-    return _engine.getChapterContent(itemId, bookId: bookId);
-  }
-
-  /// 8. 章节正文接口（普通通道）
-  Future<String?> getNormalChapterContent(
-    String itemId, {
-    String tab = '小说',
-    String? bookId,
-  }) async {
-    return _engine.getChapterContent(itemId, bookId: bookId);
-  }
-
   /// 获取单个章节内容
   Future<String?> getChapterContent(String itemId, {String? bookId}) async {
     return _engine.getChapterContent(itemId, bookId: bookId);
@@ -222,24 +171,32 @@ class ApiService {
 
   /// 获取章节段评数量统计（支持离线缓存回退）
   Future<ChapterCommentStats?> getChapterCommentStats(
-    String itemId, {String? bookId, bool preferCache = true}
-  ) async {
+    String itemId, {
+    String? bookId,
+    bool preferCache = true,
+  }) async {
     final cleanId = itemId.trim();
     if (cleanId.isEmpty) return null;
     if (preferCache) {
       final cached = await _loadCommentStatsFromDisk(cleanId, bookId: bookId);
       if (cached != null) {
-        _refreshComments('stats:$cleanId', () => getChapterCommentStats(
-          cleanId, bookId: bookId, preferCache: false,
-        ));
+        _refreshComments(
+          'stats:$cleanId',
+          () => getChapterCommentStats(
+            cleanId,
+            bookId: bookId,
+            preferCache: false,
+          ),
+        );
         return cached;
       }
     }
 
     // 1. 尝试在线获取
     try {
-      final stats = await (chapterStatsLoader?.call(cleanId) ??
-          _mobileGateway.fetchChapterCommentStats(cleanId));
+      final stats =
+          await (chapterStatsLoader?.call(cleanId) ??
+              _mobileGateway.fetchChapterCommentStats(cleanId));
       if (stats != null) {
         await _saveCommentStatsToDisk(cleanId, stats, bookId: bookId);
         return stats;
@@ -254,7 +211,11 @@ class ApiService {
     return _loadCommentStatsFromDisk(cleanId, bookId: bookId);
   }
 
-  Future<void> _saveCommentStatsToDisk(String itemId, ChapterCommentStats stats, {String? bookId}) async {
+  Future<void> _saveCommentStatsToDisk(
+    String itemId,
+    ChapterCommentStats stats, {
+    String? bookId,
+  }) async {
     try {
       final jsonStr = jsonEncode(stats.toJson());
       final dir = await _getCommentCacheDir(bookId: bookId);
@@ -270,7 +231,10 @@ class ApiService {
     } catch (_) {}
   }
 
-  Future<ChapterCommentStats?> _loadCommentStatsFromDisk(String itemId, {String? bookId}) async {
+  Future<ChapterCommentStats?> _loadCommentStatsFromDisk(
+    String itemId, {
+    String? bookId,
+  }) async {
     try {
       if (bookId != null && bookId.isNotEmpty) {
         final offlineDir = await _getCommentCacheDir(bookId: bookId);
@@ -302,11 +266,20 @@ class ApiService {
     final cleanItemId = itemId.trim();
     final cleanBookId = bookId.trim();
     if (preferCache && offset == 0) {
-      final cached = await _loadChapterCommentsFromDisk(cleanBookId, cleanItemId);
+      final cached = await _loadChapterCommentsFromDisk(
+        cleanBookId,
+        cleanItemId,
+      );
       if (cached != null) {
-        _refreshComments('chapter:$cleanBookId:$cleanItemId', () => getChapterComments(
-          cleanBookId, cleanItemId, count: count, preferCache: false,
-        ));
+        _refreshComments(
+          'chapter:$cleanBookId:$cleanItemId',
+          () => getChapterComments(
+            cleanBookId,
+            cleanItemId,
+            count: count,
+            preferCache: false,
+          ),
+        );
         return cached;
       }
     }
@@ -338,7 +311,11 @@ class ApiService {
     return null;
   }
 
-  void _saveChapterCommentsToDisk(String bookId, String itemId, CommentPageData page) async {
+  void _saveChapterCommentsToDisk(
+    String bookId,
+    String itemId,
+    CommentPageData page,
+  ) async {
     try {
       final jsonStr = jsonEncode(page.toJson());
       final dir = await _getCommentCacheDir(bookId: bookId);
@@ -347,7 +324,10 @@ class ApiService {
     } catch (_) {}
   }
 
-  Future<CommentPageData?> _loadChapterCommentsFromDisk(String bookId, String itemId) async {
+  Future<CommentPageData?> _loadChapterCommentsFromDisk(
+    String bookId,
+    String itemId,
+  ) async {
     try {
       final dir = await _getCommentCacheDir(bookId: bookId);
       final file = File('${dir.path}/chapter_${itemId}_comments.json');
@@ -374,12 +354,23 @@ class ApiService {
     final cleanBookId = bookId.trim();
     if (preferCache && cursor.isEmpty) {
       final cached = await _loadParagraphCommentsFromDisk(
-        cleanBookId, cleanItemId, paraIndex, sort,
+        cleanBookId,
+        cleanItemId,
+        paraIndex,
+        sort,
       );
       if (cached != null) {
-        _refreshComments('para:$cleanBookId:$cleanItemId:$paraIndex:$sort',
-            () => getParagraphComments(cleanBookId, cleanItemId, paraIndex,
-              sort: sort, count: count, preferCache: false));
+        _refreshComments(
+          'para:$cleanBookId:$cleanItemId:$paraIndex:$sort',
+          () => getParagraphComments(
+            cleanBookId,
+            cleanItemId,
+            paraIndex,
+            sort: sort,
+            count: count,
+            preferCache: false,
+          ),
+        );
         return cached;
       }
     }
@@ -397,7 +388,13 @@ class ApiService {
       if (page != null) {
         // 仅对第一页做本地离线缓存
         if (cursor.isEmpty) {
-          _saveParagraphCommentsToDisk(cleanBookId, cleanItemId, paraIndex, sort, page);
+          _saveParagraphCommentsToDisk(
+            cleanBookId,
+            cleanItemId,
+            paraIndex,
+            sort,
+            page,
+          );
         }
         return page;
       }
@@ -409,7 +406,12 @@ class ApiService {
 
     // 2. 离线/网络失败回退（首屏）
     if (cursor.isEmpty) {
-      return _loadParagraphCommentsFromDisk(cleanBookId, cleanItemId, paraIndex, sort);
+      return _loadParagraphCommentsFromDisk(
+        cleanBookId,
+        cleanItemId,
+        paraIndex,
+        sort,
+      );
     }
     return null;
   }
@@ -454,7 +456,11 @@ class ApiService {
     String cursor = '',
     int count = 20,
   }) async {
-    return _mobileGateway.fetchCommentReplies(commentId, cursor: cursor, count: count);
+    return _mobileGateway.fetchCommentReplies(
+      commentId,
+      cursor: cursor,
+      count: count,
+    );
   }
 
   /// 获取全书读者书评列表 (书籍详情页)
@@ -464,7 +470,12 @@ class ApiService {
     String cursor = '',
     int count = 20,
   }) async {
-    return _mobileGateway.fetchBookReviews(bookId, sort: sort, cursor: cursor, count: count);
+    return _mobileGateway.fetchBookReviews(
+      bookId,
+      sort: sort,
+      cursor: cursor,
+      count: count,
+    );
   }
 
   /// 获取书籍封面图片数据

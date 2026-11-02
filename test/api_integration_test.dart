@@ -6,13 +6,17 @@ import 'package:fanqie_flutter/models/chapter.dart';
 import 'package:fanqie_flutter/services/api_service.dart';
 import 'package:fanqie_flutter/services/font_decryptor.dart';
 import 'package:fanqie_flutter/services/download_service.dart';
+import 'package:fanqie_flutter/services/fanqie_mobile_gateway.dart';
+import 'package:fanqie_flutter/services/fanqie_backend_engine.dart';
+import 'package:fanqie_flutter/services/reader_cache_service.dart';
 
 class _RealHttpOverrides extends HttpOverrides {}
+
+const _liveApi = bool.fromEnvironment('FANQIE_LIVE_API');
 
 void main() {
   setUp(() {
     TestWidgetsFlutterBinding.ensureInitialized();
-    HttpOverrides.global = _RealHttpOverrides();
     SharedPreferences.setMockInitialValues({});
   });
 
@@ -31,18 +35,38 @@ void main() {
 
   group('ApiService Built-in Backend Endpoints Tests', () {
     late ApiService apiService;
+    late HttpOverrides? previousOverrides;
+    late Directory directory;
 
-    setUp(() {
-      apiService = ApiService();
+    setUp(() async {
+      previousOverrides = HttpOverrides.current;
+      HttpOverrides.global = _RealHttpOverrides();
+      directory = await Directory.systemTemp.createTemp('fanqie-live-api-');
+      apiService = ApiService(
+        engine: FanqieBackendEngine(
+          cache: ReaderCacheService(documents: () async => directory),
+        ),
+      );
     });
 
-    tearDown(() {
+    tearDown(() async {
       apiService.dispose();
+      HttpOverrides.global = previousOverrides;
+      await directory.delete(recursive: true);
     });
 
-    test('1. checkHealth (Built-in engine always ready)', () async {
-      final healthy = await apiService.checkHealth();
-      expect(healthy, isTrue);
+    test('1. Official category metadata', () async {
+      for (final gender in [0, 1, 2]) {
+        final catalog = await apiService.getCategories(gender: gender);
+        expect(catalog.isCached, isFalse);
+        expect(catalog.categories, isNotEmpty);
+        if (gender == 1) {
+          expect(
+            catalog.categories.any((c) => c.id == 12 && c.name == '历史'),
+            isTrue,
+          );
+        }
+      }
     });
 
     test('2. GET /api/search via built-in engine', () async {
@@ -52,25 +76,36 @@ void main() {
       expect(books.first.bookId, isNotEmpty);
     });
 
-    test('3. GET /api/discover via built-in library API & ranking fallback', () async {
-      final rankingBooks = await apiService.discoverBooks(
-        bdtype: '巅峰榜',
+    test('3. Official library filters and pagination', () async {
+      final first = await apiService.discoverBooks(
+        categoryId: 7,
         gender: 1,
-        isRanking: true,
-        page: 1,
-      );
-      expect(rankingBooks, isNotEmpty);
-
-      final categoryBooks = await apiService.discoverBooks(
-        type: 7,
-        gender: 1,
-        isRanking: false,
         creationStatus: 1,
-        wordCount: 3,
-        sort: 0,
-        page: 1,
+        wordCount: 2,
       );
-      expect(categoryBooks, isNotEmpty);
+      expect(first.books, isNotEmpty);
+      expect(
+        first.books.every(
+          (b) => b.wordNumber >= 500000 && b.wordNumber <= 1000000,
+        ),
+        isTrue,
+      );
+      expect(first.books.every((b) => b.creationStatus == '连载中'), isTrue);
+      final second = await apiService.discoverBooks(
+        categoryId: 7,
+        gender: 1,
+        creationStatus: 1,
+        wordCount: 2,
+        page: 2,
+      );
+      expect(second.books, isNotEmpty);
+      expect(
+        first.books
+            .map((b) => b.bookId)
+            .toSet()
+            .intersection(second.books.map((b) => b.bookId).toSet()),
+        isEmpty,
+      );
     });
 
     test('4. GET /api/detail via built-in engine', () async {
@@ -81,7 +116,9 @@ void main() {
     });
 
     test('5. GET /api/directory & GET /api/book via built-in engine', () async {
-      final dirChapters = await apiService.getBookDirectory('7069948840148732967');
+      final dirChapters = await apiService.getBookDirectory(
+        '7069948840148732967',
+      );
       expect(dirChapters, isNotEmpty);
       expect(dirChapters.first.itemId, isNotEmpty);
 
@@ -97,6 +134,13 @@ void main() {
       expect(chapters, isNotEmpty);
       final firstItemId = chapters.first.itemId;
 
+      // This direct gateway probe cannot pass merely because an old disk cache
+      // exists. A fresh process must negotiate a usable server key.
+      final freshContent = await FanqieMobileGateway().fetchChapter(
+        firstItemId,
+      );
+      expect(freshContent, isNotNull);
+      expect(freshContent!.length, greaterThan(1500));
       final content = await apiService.getChapterContent(firstItemId);
       expect(content, isNotNull);
       expect(content!.length, greaterThan(20));
@@ -105,31 +149,74 @@ void main() {
       final cachedContent = await apiService.getChapterContent(firstItemId);
       expect(cachedContent, equals(content));
 
-      // Test mobile gateway on chapter 101 (which was locked with 200 chars on Web)
-      final fullContent = await apiService.getChapterContent('7202445625546736180');
+      // Probe an ID from the current directory, not a stale hard-coded chapter.
+      final fullContent = await FanqieMobileGateway().fetchChapter(
+        chapters[100].itemId,
+      );
       expect(fullContent, isNotNull);
       expect(fullContent!.length, greaterThan(1500));
       expect(fullContent.contains('APP端专享/锁章章节'), isFalse);
     });
 
-    test('7. Offline book resources priority and persistent chapter cache', () async {
-      const testBookId = 'test_offline_book_999';
-      const testItemId = 'test_item_999';
-      const mockContent = '这是测试的离线本地正文内容，阅读时必须优先读取本地已下载资源！这是测试章节的第二段内容，确保文本长度超过五十个字符以通过有效性检验。';
+    test(
+      '7. Offline book resources priority and persistent chapter cache',
+      () async {
+        const testBookId = 'test_offline_book_999';
+        const testItemId = 'test_item_999';
+        const mockContent =
+            '这是测试的离线本地正文内容，阅读时必须优先读取本地已下载资源！这是测试章节的第二段内容，确保文本长度超过五十个字符以通过有效性检验。';
 
-      final offlineFile = await apiService.engine.getOfflineChapterFile(testBookId, testItemId);
-      await offlineFile.writeAsString(mockContent);
+        final offlineFile = await apiService.engine.getOfflineChapterFile(
+          testBookId,
+          testItemId,
+        );
+        await offlineFile.writeAsString(mockContent);
 
-      final isOffline = await apiService.isChapterOffline(testBookId, testItemId);
-      expect(isOffline, isTrue);
+        final isOffline = await apiService.isChapterOffline(
+          testBookId,
+          testItemId,
+        );
+        expect(isOffline, isTrue);
 
-      final fetchedContent = await apiService.getChapterContent(testItemId, bookId: testBookId);
-      expect(fetchedContent, equals(mockContent));
+        final fetchedContent = await apiService.getChapterContent(
+          testItemId,
+          bookId: testBookId,
+        );
+        expect(fetchedContent, equals(mockContent));
 
-      final offlineCount = await apiService.getOfflineChapterCount(testBookId);
-      expect(offlineCount, greaterThanOrEqualTo(1));
-    });
-  });
+        final offlineCount = await apiService.getOfflineChapterCount(
+          testBookId,
+        );
+        expect(offlineCount, greaterThanOrEqualTo(1));
+      },
+    );
+
+    test(
+      '8. Current native paragraph stats, chapter comments and book reviews',
+      () async {
+        final chapters = await apiService.getBookChapters(
+          '7069948840148732967',
+        );
+        final gateway = FanqieMobileGateway();
+        final stats = await gateway.fetchChapterCommentStats(
+          chapters.first.itemId,
+        );
+        expect(stats, isNotNull);
+        final chapterComments = await gateway.fetchChapterComments(
+          '7069948840148732967',
+          chapters.first.itemId,
+          count: 5,
+        );
+        expect(chapterComments, isNotNull);
+        final reviews = await gateway.fetchBookReviews(
+          '7069948840148732967',
+          count: 5,
+        );
+        expect(reviews, isNotNull);
+        expect(reviews!.comments, isNotEmpty);
+      },
+    );
+  }, skip: !_liveApi);
 
   group('DownloadService Background Download Tests', () {
     test('DownloadService task management and non-blocking download', () async {
