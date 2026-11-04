@@ -1,3 +1,4 @@
+import '../widgets/book_page_route.dart';
 import 'package:flutter/material.dart';
 import '../widgets/book_cover_widget.dart';
 import '../app_theme.dart';
@@ -23,7 +24,8 @@ class HistoryScreen extends StatefulWidget {
   HistoryScreenState createState() => HistoryScreenState();
 }
 
-class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderStateMixin {
+class HistoryScreenState extends State<HistoryScreen>
+    with SingleTickerProviderStateMixin {
   final HistoryService _downloadHistoryService = HistoryService();
   final ReadingHistoryService _readingHistoryService = ReadingHistoryService();
   final ApiService _apiService = ApiService();
@@ -57,7 +59,9 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
 
   @override
   void dispose() {
-    _readingHistoryService.changeNotifier.removeListener(_onReadingHistoryChanged);
+    _readingHistoryService.changeNotifier.removeListener(
+      _onReadingHistoryChanged,
+    );
     _downloadService.removeListener(_onDownloadServiceChanged);
     _tabController.dispose();
     _apiService.dispose();
@@ -80,10 +84,7 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
   }
 
   Future<void> _loadAllHistory() async {
-    await Future.wait([
-      _loadReadingHistory(),
-      _loadDownloadHistory(),
-    ]);
+    await Future.wait([_loadReadingHistory(), _loadDownloadHistory()]);
   }
 
   Future<void> _loadReadingHistory({bool silent = false}) async {
@@ -128,11 +129,13 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
     }
   }
 
-  bool get _isCurrentSelectionMode =>
-      _tabController.index == 0 ? _isReadingSelectionMode : _isDownloadSelectionMode;
+  bool get _isCurrentSelectionMode => _tabController.index == 0
+      ? _isReadingSelectionMode
+      : _isDownloadSelectionMode;
 
-  int get _currentSelectedCount =>
-      _tabController.index == 0 ? _selectedReadingIds.length : _selectedDownloadIds.length;
+  int get _currentSelectedCount => _tabController.index == 0
+      ? _selectedReadingIds.length
+      : _selectedDownloadIds.length;
 
   int get _currentListCount =>
       _tabController.index == 0 ? _readingList.length : _downloadList.length;
@@ -177,7 +180,10 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
         title: const Text('删除记录'),
         content: Text('确定要删除选中的 $count 条历史记录吗？'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('删除', style: TextStyle(color: Colors.red)),
@@ -188,21 +194,25 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
 
     if (confirmed == true && mounted) {
       if (_tabController.index == 0) {
-        await _readingHistoryService.deleteHistories(_selectedReadingIds.toList());
+        await _readingHistoryService.deleteHistories(
+          _selectedReadingIds.toList(),
+        );
         _isReadingSelectionMode = false;
         _selectedReadingIds.clear();
         _loadReadingHistory();
       } else {
-        await _downloadHistoryService.deleteHistories(_selectedDownloadIds.toList());
+        await _downloadHistoryService.deleteHistories(
+          _selectedDownloadIds.toList(),
+        );
         _isDownloadSelectionMode = false;
         _selectedDownloadIds.clear();
         _loadDownloadHistory();
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已删除选中的记录')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('已删除选中的记录')));
       }
     }
   }
@@ -218,7 +228,10 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
         title: Text(title),
         content: Text(content),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('取消'),
+          ),
           TextButton(
             onPressed: () => Navigator.pop(ctx, true),
             child: const Text('清空', style: TextStyle(color: Colors.red)),
@@ -237,9 +250,9 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
       }
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已清空全部记录')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('已清空全部记录')));
       }
     }
   }
@@ -268,7 +281,7 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
     if (chapters.isEmpty) {
       Navigator.push(
         context,
-        MaterialPageRoute(builder: (_) => BookDetailScreen(book: book)),
+        BookPageRoute(builder: (_) => BookDetailScreen(book: book)),
       );
       return;
     }
@@ -278,7 +291,7 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
     if (!mounted) return;
     Navigator.push(
       context,
-      MaterialPageRoute(
+      BookPageRoute(
         builder: (_) => ReaderScreen(
           book: book,
           chapters: chapters,
@@ -314,8 +327,7 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
               )
             : null,
         actions: [
-          if (!_isCurrentSelectionMode)
-            const DownloadActionButton(),
+          if (!_isCurrentSelectionMode) const DownloadActionButton(),
           if (!_isCurrentSelectionMode && _currentListCount > 0) ...[
             IconButton(
               icon: const Icon(Icons.checklist_rounded),
@@ -343,7 +355,9 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
                     ? Icons.deselect_rounded
                     : Icons.select_all_rounded,
               ),
-              tooltip: _currentSelectedCount == _currentListCount ? '取消全选' : '全选',
+              tooltip: _currentSelectedCount == _currentListCount
+                  ? '取消全选'
+                  : '全选',
               onPressed: _toggleSelectAll,
             ),
         ],
@@ -352,7 +366,10 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
           indicatorColor: AppTheme.primaryColor,
           labelColor: AppTheme.primaryColor,
           unselectedLabelColor: AppTheme.textSecondary,
-          labelStyle: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+          labelStyle: const TextStyle(
+            fontWeight: FontWeight.bold,
+            fontSize: 15,
+          ),
           tabs: [
             Tab(text: '阅读历史 (${_readingList.length})'),
             Tab(text: '下载历史 (${_downloadList.length})'),
@@ -361,12 +378,11 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
       ),
       body: TabBarView(
         controller: _tabController,
-        children: [
-          _buildReadingHistoryList(),
-          _buildDownloadHistoryList(),
-        ],
+        children: [_buildReadingHistoryList(), _buildDownloadHistoryList()],
       ),
-      bottomNavigationBar: _isCurrentSelectionMode ? _buildBatchBottomBar() : null,
+      bottomNavigationBar: _isCurrentSelectionMode
+          ? _buildBatchBottomBar()
+          : null,
     );
   }
 
@@ -405,128 +421,165 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
                 ),
               ],
             ),
-            child: ListTile(
-              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-              leading: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  if (_isReadingSelectionMode)
-                    Padding(
-                      padding: const EdgeInsets.only(right: 8),
-                      child: Checkbox(
-                        value: isSelected,
-                        onChanged: (_) {
-                          setState(() {
-                            if (isSelected) {
-                              _selectedReadingIds.remove(item.bookId);
-                              if (_selectedReadingIds.isEmpty) {
-                                _isReadingSelectionMode = false;
+            child: Material(
+              color: Colors.transparent,
+              borderRadius: BorderRadius.circular(12),
+              child: ListTile(
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
+                leading: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (_isReadingSelectionMode)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: Checkbox(
+                          value: isSelected,
+                          onChanged: (_) {
+                            setState(() {
+                              if (isSelected) {
+                                _selectedReadingIds.remove(item.bookId);
+                                if (_selectedReadingIds.isEmpty) {
+                                  _isReadingSelectionMode = false;
+                                }
+                              } else {
+                                _selectedReadingIds.add(item.bookId);
                               }
-                            } else {
-                              _selectedReadingIds.add(item.bookId);
-                            }
-                          });
-                        },
-                      ),
-                    ),
-                  ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: SizedBox(
-                      width: 50,
-                      height: 70,
-                      child: BookCoverWidget(
-                        bookId: item.bookId,
-                        bookName: item.bookName,
-                        thumbUrl: item.thumbUrl,
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-              title: Text(
-                item.bookName,
-                style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-              ),
-              subtitle: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  const SizedBox(height: 4),
-                  Text(
-                    '作者: ${item.author}',
-                    style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
-                    maxLines: 1,
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          '读至: ${item.lastReadChapterTitle}',
-                          style: const TextStyle(
-                            fontSize: 11,
-                            color: AppTheme.primaryColor,
-                            fontWeight: FontWeight.w500,
-                          ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
+                            });
+                          },
                         ),
                       ),
-                      Text(
-                        _formatTime(item.lastReadTime),
-                        style: const TextStyle(fontSize: 10, color: AppTheme.textHint),
+                    ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: SizedBox(
+                        width: 50,
+                        height: 70,
+                        child: BookCoverWidget(
+                          bookId: item.bookId,
+                          bookName: item.bookName,
+                          thumbUrl: item.thumbUrl,
+                        ),
                       ),
-                    ],
-                  ),
-                  if (item.lastReadPreview.isNotEmpty) Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(item.lastReadPreview, maxLines: 2, overflow: TextOverflow.ellipsis,
-                      style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary)),
-                  ),
-                ],
-              ),
-              trailing: !_isReadingSelectionMode
-                  ? OutlinedButton(
-                      onPressed: () => _continueReading(item),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                        minimumSize: const Size(0, 32),
-                        side: BorderSide(color: AppTheme.primaryColor.withValues(alpha: 0.6)),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                      ),
-                      child: const Text('续读', style: TextStyle(fontSize: 12, color: AppTheme.primaryColor)),
-                    )
-                  : null,
-              onTap: () {
-                if (_isReadingSelectionMode) {
-                  setState(() {
-                    if (isSelected) {
-                      _selectedReadingIds.remove(item.bookId);
-                      if (_selectedReadingIds.isEmpty) {
-                        _isReadingSelectionMode = false;
-                      }
-                    } else {
-                      _selectedReadingIds.add(item.bookId);
-                    }
-                  });
-                } else {
-                  Navigator.push(
-                    context,
-                    MaterialPageRoute(
-                      builder: (_) => BookDetailScreen(book: item.toBook()),
                     ),
-                  ).then((_) => _loadReadingHistory(silent: true));
-                }
-              },
-              onLongPress: () {
-                if (!_isReadingSelectionMode) {
-                  setState(() {
-                    _isReadingSelectionMode = true;
-                    _selectedReadingIds.add(item.bookId);
-                  });
-                }
-              },
+                  ],
+                ),
+                title: Text(
+                  item.bookName,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 4),
+                    Text(
+                      '作者: ${item.author}',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: AppTheme.textSecondary,
+                      ),
+                      maxLines: 1,
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            '读至: ${item.lastReadChapterTitle}',
+                            style: const TextStyle(
+                              fontSize: 11,
+                              color: AppTheme.primaryColor,
+                              fontWeight: FontWeight.w500,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        Text(
+                          _formatTime(item.lastReadTime),
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: AppTheme.textHint,
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (item.lastReadPreview.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.only(top: 4),
+                        child: Text(
+                          item.lastReadPreview,
+                          maxLines: 2,
+                          overflow: TextOverflow.ellipsis,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: AppTheme.textSecondary,
+                          ),
+                        ),
+                      ),
+                  ],
+                ),
+                trailing: !_isReadingSelectionMode
+                    ? OutlinedButton(
+                        onPressed: () => _continueReading(item),
+                        style: OutlinedButton.styleFrom(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 4,
+                          ),
+                          minimumSize: const Size(0, 32),
+                          side: BorderSide(
+                            color: AppTheme.primaryColor.withValues(alpha: 0.6),
+                          ),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(16),
+                          ),
+                        ),
+                        child: const Text(
+                          '续读',
+                          style: TextStyle(
+                            fontSize: 12,
+                            color: AppTheme.primaryColor,
+                          ),
+                        ),
+                      )
+                    : null,
+                onTap: () {
+                  if (_isReadingSelectionMode) {
+                    setState(() {
+                      if (isSelected) {
+                        _selectedReadingIds.remove(item.bookId);
+                        if (_selectedReadingIds.isEmpty) {
+                          _isReadingSelectionMode = false;
+                        }
+                      } else {
+                        _selectedReadingIds.add(item.bookId);
+                      }
+                    });
+                  } else {
+                    Navigator.push(
+                      context,
+                      BookPageRoute(
+                        builder: (_) => BookDetailScreen(book: item.toBook()),
+                      ),
+                    ).then((_) => _loadReadingHistory(silent: true));
+                  }
+                },
+                onLongPress: () {
+                  if (!_isReadingSelectionMode) {
+                    setState(() {
+                      _isReadingSelectionMode = true;
+                      _selectedReadingIds.add(item.bookId);
+                    });
+                  }
+                },
+              ),
             ),
           );
         },
@@ -586,8 +639,9 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
                   } else {
                     Navigator.push(
                       context,
-                      MaterialPageRoute(
-                        builder: (context) => BookDetailScreen(book: history.toBook()),
+                      BookPageRoute(
+                        builder: (context) =>
+                            BookDetailScreen(book: history.toBook()),
                       ),
                     );
                   }
@@ -651,13 +705,19 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
                         Expanded(
                           child: Text(
                             task.book.bookName,
-                            style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                            style: const TextStyle(
+                              fontWeight: FontWeight.bold,
+                              fontSize: 15,
+                            ),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
                           decoration: BoxDecoration(
                             color: AppTheme.primaryColor.withValues(alpha: 0.1),
                             borderRadius: BorderRadius.circular(4),
@@ -676,12 +736,18 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
                     const SizedBox(height: 4),
                     Text(
                       '作者: ${task.book.author}',
-                      style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: AppTheme.textSecondary,
+                      ),
                     ),
                     const SizedBox(height: 4),
                     Text(
                       task.message,
-                      style: const TextStyle(fontSize: 11, color: AppTheme.primaryColor),
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AppTheme.primaryColor,
+                      ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -691,7 +757,8 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
               IconButton(
                 icon: const Icon(Icons.cancel_outlined, color: Colors.red),
                 tooltip: '取消下载',
-                onPressed: () => _downloadService.cancelDownload(task.book.bookId),
+                onPressed: () =>
+                    _downloadService.cancelDownload(task.book.bookId),
               ),
             ],
           ),
@@ -711,7 +778,10 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
             children: [
               Text(
                 '下载中: ${task.current} / ${task.total} 章',
-                style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+                style: const TextStyle(
+                  fontSize: 11,
+                  color: AppTheme.textSecondary,
+                ),
               ),
               Text(
                 '${(task.progress * 100).toStringAsFixed(1)}%',
@@ -730,7 +800,12 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
 
   Widget _buildBatchBottomBar() {
     return Container(
-      padding: EdgeInsets.fromLTRB(16, 8, 16, MediaQuery.of(context).padding.bottom + 8),
+      padding: EdgeInsets.fromLTRB(
+        16,
+        8,
+        16,
+        MediaQuery.of(context).padding.bottom + 8,
+      ),
       decoration: BoxDecoration(
         color: Colors.white,
         boxShadow: [
@@ -748,10 +823,7 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
             style: const TextStyle(fontSize: 14, color: AppTheme.textSecondary),
           ),
           const Spacer(),
-          TextButton(
-            onPressed: _exitSelectionMode,
-            child: const Text('取消'),
-          ),
+          TextButton(onPressed: _exitSelectionMode, child: const Text('取消')),
           const SizedBox(width: 8),
           ElevatedButton.icon(
             onPressed: _currentSelectedCount == 0 ? null : _deleteSelected,
@@ -760,7 +832,9 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
             style: ElevatedButton.styleFrom(
               backgroundColor: Colors.red,
               foregroundColor: Colors.white,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(20),
+              ),
             ),
           ),
         ],

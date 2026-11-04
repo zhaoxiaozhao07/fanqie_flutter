@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/download_history.dart';
 
@@ -14,10 +15,12 @@ class HistoryService {
 
   // 私有构造函数
   HistoryService._internal();
+  HistoryService.forTesting();
 
   SharedPreferences? _prefs;
   List<DownloadHistory> _historyList = [];
   bool _initialized = false;
+  final ValueNotifier<int> changeNotifier = ValueNotifier(0);
 
   /// 初始化服务
   Future<void> initialize() async {
@@ -51,6 +54,7 @@ class HistoryService {
       final jsonList = _historyList.map((item) => item.toJson()).toList();
       final jsonString = json.encode(jsonList);
       await _prefs?.setString(_storageKey, jsonString);
+      changeNotifier.value++;
     } catch (e) {
       // 保存失败
     }
@@ -95,7 +99,9 @@ class HistoryService {
   Future<void> updateCover(String bookId, String thumbUrl) async {
     await initialize();
     final index = _historyList.indexWhere((item) => item.bookId == bookId);
-    if (index != -1 && (_historyList[index].thumbUrl == null || _historyList[index].thumbUrl!.isEmpty)) {
+    if (index != -1 &&
+        (_historyList[index].thumbUrl == null ||
+            _historyList[index].thumbUrl!.isEmpty)) {
       _historyList[index] = _historyList[index].copyWithCover(thumbUrl);
       await _saveHistory();
     }

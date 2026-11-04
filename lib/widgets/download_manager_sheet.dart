@@ -1,3 +1,4 @@
+import 'book_page_route.dart';
 import 'book_cover_widget.dart';
 import 'package:flutter/material.dart';
 import '../app_theme.dart';
@@ -5,6 +6,7 @@ import '../models/book.dart';
 import '../screens/reader_screen.dart';
 import '../services/api_service.dart';
 import '../services/download_service.dart';
+import '../services/reader_settings_repository.dart';
 
 /// 下载任务管理面板 (ModalBottomSheet)
 /// 点击主界面右上角下载图标后弹出，实时查看后台下载进度与历史
@@ -431,14 +433,17 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
       final chapters = await _apiService.getBookChapters(book.bookId);
       if (!mounted) return;
       if (chapters.isEmpty) throw const FormatException('章节目录暂不可用，请重试');
+      final settings = await ReaderSettingsRepository().load(book.bookId);
+      if (!mounted) return;
       final navigator = Navigator.of(context);
       navigator.pop();
       navigator.push(
-        MaterialPageRoute(
+        BookPageRoute(
           builder: (context) => ReaderScreen(
             book: book,
             chapters: chapters,
             initialChapterIndex: 0,
+            initialSettings: settings,
           ),
         ),
       );

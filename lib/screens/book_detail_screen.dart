@@ -1,3 +1,4 @@
+import '../widgets/book_page_route.dart';
 import 'dart:async';
 import 'package:flutter/material.dart';
 import '../widgets/book_cover_widget.dart';
@@ -226,7 +227,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     if (!mounted) return;
     Navigator.push(
       context,
-      MaterialPageRoute(
+      BookPageRoute(
         builder: (context) => ReaderScreen(
           book: _bookDetail ?? widget.book,
           chapters: _chapters!,

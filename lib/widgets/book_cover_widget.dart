@@ -15,6 +15,7 @@ class BookCoverWidget extends StatefulWidget {
   final String? epubPath;
   final BoxFit fit;
   final double iconSize;
+  final CoverCacheService? cacheService;
 
   const BookCoverWidget({
     super.key,
@@ -24,6 +25,7 @@ class BookCoverWidget extends StatefulWidget {
     this.epubPath,
     this.fit = BoxFit.cover,
     this.iconSize = 28,
+    this.cacheService,
   });
 
   @override
@@ -31,13 +33,18 @@ class BookCoverWidget extends StatefulWidget {
 }
 
 class _BookCoverWidgetState extends State<BookCoverWidget> {
-  final CoverCacheService _cacheService = CoverCacheService();
+  late final CoverCacheService _cacheService =
+      widget.cacheService ?? CoverCacheService();
   File? _localCoverFile;
+  int _localRevision = 0;
+  bool _networkFallback = false;
   int _generation = 0;
 
   @override
   void initState() {
     super.initState();
+    _localCoverFile = _cacheService.peekCover(widget.bookId);
+    _localRevision = _cacheService.coverRevision(widget.bookId);
     _checkCoverSource();
   }
 
@@ -47,6 +54,11 @@ class _BookCoverWidgetState extends State<BookCoverWidget> {
     if (oldWidget.bookId != widget.bookId ||
         oldWidget.thumbUrl != widget.thumbUrl ||
         oldWidget.epubPath != widget.epubPath) {
+      if (oldWidget.bookId != widget.bookId) {
+        _localCoverFile = _cacheService.peekCover(widget.bookId);
+        _localRevision = _cacheService.coverRevision(widget.bookId);
+        _networkFallback = false;
+      }
       _checkCoverSource();
     }
   }
@@ -56,7 +68,6 @@ class _BookCoverWidgetState extends State<BookCoverWidget> {
     final bookId = widget.bookId;
     final epubPath = widget.epubPath;
     final url = _cleanUrl(widget.thumbUrl);
-    if (mounted) setState(() => _localCoverFile = null);
     try {
       File? file;
       if (await _cacheService.hasLocalCover(bookId)) {
@@ -68,10 +79,16 @@ class _BookCoverWidgetState extends State<BookCoverWidget> {
       if (file == null && url != null) {
         file = await _cacheService.cacheNetworkCover(bookId, url);
       }
-      if (mounted && generation == _generation && file != null) {
-        await FileImage(file).evict();
-        if (mounted && generation == _generation) {
-          setState(() => _localCoverFile = file);
+      if (mounted && generation == _generation) {
+        final revision = _cacheService.coverRevision(bookId);
+        if (_localCoverFile?.path != file?.path ||
+            _localRevision != revision ||
+            _networkFallback != (file == null && url != null)) {
+          setState(() {
+            _localCoverFile = file;
+            _localRevision = revision;
+            _networkFallback = file == null && url != null;
+          });
         }
       }
     } catch (_) {
@@ -87,23 +104,41 @@ class _BookCoverWidgetState extends State<BookCoverWidget> {
 
   @override
   Widget build(BuildContext context) {
-    // 本地持久化文件优先
-    if (_localCoverFile != null && _localCoverFile!.existsSync()) {
-      return Image.file(
-        _localCoverFile!,
-        fit: widget.fit,
-        errorBuilder: (context, error, stackTrace) => _buildPlaceholder(),
+    // No synchronous disk reads or unconditional image-cache eviction in build.
+    final file = _localCoverFile;
+    if (file != null) {
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final width = constraints.hasBoundedWidth
+              ? constraints.maxWidth
+              : 128.0;
+          final pixels = (width * MediaQuery.devicePixelRatioOf(context))
+              .ceil()
+              .clamp(64, 512);
+          return Image(
+            image: ResizeImage.resizeIfNeeded(
+              pixels,
+              null,
+              _VersionedCoverImage(file, _localRevision),
+            ),
+            fit: widget.fit,
+            gaplessPlayback: true,
+            errorBuilder: (_, _, _) => _buildPlaceholder(),
+          );
+        },
       );
     }
-
     final netUrl = _cleanUrl(widget.thumbUrl);
-    if (netUrl != null && netUrl.isNotEmpty) {
+    if (_networkFallback && netUrl != null) {
       return CachedNetworkImage(
         imageUrl: netUrl,
         fit: widget.fit,
         cacheManager: BookCoverCacheManager.instance,
-        placeholder: (context, url) => Container(color: AppTheme.primaryLight),
-        errorWidget: (context, url, error) => _buildPlaceholder(),
+        memCacheWidth: 256,
+        fadeInDuration: Duration.zero,
+        fadeOutDuration: Duration.zero,
+        placeholder: (_, _) => _buildPlaceholder(),
+        errorWidget: (_, _, _) => _buildPlaceholder(),
       );
     }
 
@@ -144,4 +179,19 @@ class _BookCoverWidgetState extends State<BookCoverWidget> {
       ),
     );
   }
+}
+
+/// A new file revision gets a new codec key without evicting warm images used by
+/// other rows/routes. Unchanged covers retain exactly the same decoded image.
+class _VersionedCoverImage extends FileImage {
+  final int revision;
+  const _VersionedCoverImage(super.file, this.revision);
+  @override
+  bool operator ==(Object other) =>
+      other is _VersionedCoverImage &&
+      other.file.path == file.path &&
+      other.scale == scale &&
+      other.revision == revision;
+  @override
+  int get hashCode => Object.hash(file.path, scale, revision);
 }

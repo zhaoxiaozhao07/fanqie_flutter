@@ -29,6 +29,7 @@ class _MainScreenState extends State<MainScreen> {
           const SearchScreen(),
           BookshelfScreen(
             key: _bookshelfKey,
+            isActive: _currentIndex == 1,
             onGoToDiscover: () {
               setState(() => _currentIndex = 0);
             },
@@ -44,9 +45,7 @@ class _MainScreenState extends State<MainScreen> {
             selectedIndex: _currentIndex,
             onDestinationSelected: (index) {
               setState(() => _currentIndex = index);
-              if (index == 1) {
-                _bookshelfKey.currentState?.refresh();
-              } else if (index == 2) {
+              if (index == 2) {
                 _historyKey.currentState?.refreshHistory();
               }
             },

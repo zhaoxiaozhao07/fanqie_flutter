@@ -135,6 +135,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   _ReaderPageAddress? _chapterTransition;
   bool _positionNeedsReflow = true;
   bool _restoringPosition = false;
+  bool _initialRestorePending = false;
   bool _deferredPageRefresh = false;
   bool _deferredCommentRefresh = false;
   ui.Image? _restorationImage;
@@ -1280,6 +1281,14 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _captureRestorationImage({bool fromPage = false}) {
+    final route = ModalRoute.of(context);
+    if (_isLoadingHead ||
+        _initialRestorePending ||
+        !_readerRouteActive ||
+        (route?.animation != null &&
+            route!.animation!.status != AnimationStatus.completed)) {
+      return;
+    }
     final boundary = (fromPage ? _pagePaintKey : _verticalPaintKey)
         .currentContext
         ?.findRenderObject();
@@ -1421,6 +1430,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     } finally {
       if (mounted && generation == _verticalRestoreGeneration) {
         _restoringPosition = false;
+        if (_initialRestorePending) {
+          setState(() => _initialRestorePending = false);
+        }
         _lastDetectPixels = _scrollController.hasClients
             ? _scrollController.offset
             : 0;
@@ -1956,6 +1968,13 @@ class _ReaderScreenState extends State<ReaderScreen>
       } else {
         if (hasVisibleContent && !_isPageMode) _captureRestorationImage();
         setState(() {
+          _initialRestorePending =
+              !hasVisibleContent &&
+              !_isPageMode &&
+              (requestedPosition.paragraphIndex > 0 ||
+                  requestedPosition.characterOffset > 0 ||
+                  requestedPosition.viewportFraction > 0 ||
+                  requestedPosition.imageId != null);
           _currentActiveIndex = index;
           _activeChapterNotifier.value = index;
           _anchorChapterIndex = index;
@@ -2368,7 +2387,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     // A repaired missing/corrupt file can have identical content-addressed
     // metadata. Re-resolve the file even then, rather than retaining a failed
     // FutureBuilder until the user closes the book.
-    if (!changed && error != null) return;
+    if (!changed && (error != null || images.isEmpty)) return;
     _applyReaderSetting(
       () {
         _onlineImages[index] = images;
@@ -3308,55 +3327,71 @@ class _ReaderScreenState extends State<ReaderScreen>
     return Stack(
       fit: StackFit.expand,
       children: [
-        RepaintBoundary(
-          key: _verticalPaintKey,
-          child: NotificationListener<ScrollNotification>(
-            onNotification: _onVerticalScrollNotification,
-            child: Scrollbar(
-              controller: _scrollController,
-              child: CustomScrollView(
-                controller: _scrollController,
-                center: afterAndCenterChapters.isNotEmpty
-                    ? _centerSliverKey
-                    : null,
-                // ignore: deprecated_member_use
-                cacheExtent: 650.0,
-                physics: const BouncingScrollPhysics(
-                  parent: AlwaysScrollableScrollPhysics(),
+        IgnorePointer(
+          ignoring: _initialRestorePending,
+          child: Opacity(
+            opacity: _initialRestorePending ? 0 : 1,
+            child: RepaintBoundary(
+              key: _verticalPaintKey,
+              child: NotificationListener<ScrollNotification>(
+                onNotification: _onVerticalScrollNotification,
+                child: Scrollbar(
+                  controller: _scrollController,
+                  child: CustomScrollView(
+                    controller: _scrollController,
+                    center: afterAndCenterChapters.isNotEmpty
+                        ? _centerSliverKey
+                        : null,
+                    // ignore: deprecated_member_use
+                    cacheExtent: 650.0,
+                    physics: const BouncingScrollPhysics(
+                      parent: AlwaysScrollableScrollPhysics(),
+                    ),
+                    slivers: [
+                      // 顶部上一章指示器/触发器（位于反向增长区最顶端）
+                      if (beforeChapters.isNotEmpty)
+                        _buildTopPrevIndicatorSliver(theme),
+
+                      // 锚点之前的章节（向上无缝生长，零位移跳动）
+                      for (int i = 0; i < beforeChapters.length; i++)
+                        _buildChapterSliver(
+                          beforeChapters[i],
+                          theme,
+                          isFirst: i == 0,
+                          isCenter: false,
+                          isBeforeCenter: true,
+                        ),
+
+                      // 锚点章节及之后的章节（向下无限延伸）
+                      for (int i = 0; i < afterAndCenterChapters.length; i++)
+                        _buildChapterSliver(
+                          afterAndCenterChapters[i],
+                          theme,
+                          isFirst: beforeChapters.isEmpty && i == 0,
+                          isCenter: i == 0,
+                          isBeforeCenter: false,
+                          includeTopIndicator: beforeChapters.isEmpty && i == 0,
+                        ),
+
+                      // 底部下拉预加载指示器
+                      _buildBottomNextIndicatorSliver(theme),
+                    ],
+                  ),
                 ),
-                slivers: [
-                  // 顶部上一章指示器/触发器（位于反向增长区最顶端）
-                  if (beforeChapters.isNotEmpty)
-                    _buildTopPrevIndicatorSliver(theme),
-
-                  // 锚点之前的章节（向上无缝生长，零位移跳动）
-                  for (int i = 0; i < beforeChapters.length; i++)
-                    _buildChapterSliver(
-                      beforeChapters[i],
-                      theme,
-                      isFirst: i == 0,
-                      isCenter: false,
-                      isBeforeCenter: true,
-                    ),
-
-                  // 锚点章节及之后的章节（向下无限延伸）
-                  for (int i = 0; i < afterAndCenterChapters.length; i++)
-                    _buildChapterSliver(
-                      afterAndCenterChapters[i],
-                      theme,
-                      isFirst: beforeChapters.isEmpty && i == 0,
-                      isCenter: i == 0,
-                      isBeforeCenter: false,
-                      includeTopIndicator: beforeChapters.isEmpty && i == 0,
-                    ),
-
-                  // 底部下拉预加载指示器
-                  _buildBottomNextIndicatorSliver(theme),
-                ],
               ),
             ),
           ),
         ),
+        if (_initialRestorePending)
+          Positioned.fill(
+            child: ColoredBox(
+              key: const ValueKey('reader-initial-position'),
+              color: theme.backgroundColor,
+              child: Center(
+                child: CircularProgressIndicator(color: theme.secondaryColor),
+              ),
+            ),
+          ),
         if (_restorationImage != null)
           Positioned.fill(
             child: AbsorbPointer(

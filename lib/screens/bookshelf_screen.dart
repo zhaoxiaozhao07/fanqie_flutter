@@ -1,4 +1,8 @@
+import '../widgets/book_page_route.dart';
 import 'dart:io';
+import 'dart:convert';
+import 'dart:async';
+import '../services/reader_route_observer.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../app_theme.dart';
@@ -32,17 +36,30 @@ enum BookshelfViewMode {
 
 class BookshelfScreen extends StatefulWidget {
   final VoidCallback? onGoToDiscover;
+  final bool isActive;
+  final BookshelfService? bookshelfService;
+  final HistoryService? historyService;
+  final ApiService? apiService;
 
-  const BookshelfScreen({super.key, this.onGoToDiscover});
+  const BookshelfScreen({
+    super.key,
+    this.onGoToDiscover,
+    this.isActive = true,
+    this.bookshelfService,
+    this.historyService,
+    this.apiService,
+  });
 
   @override
   State<BookshelfScreen> createState() => BookshelfScreenState();
 }
 
-class BookshelfScreenState extends State<BookshelfScreen> {
-  final BookshelfService _bookshelfService = BookshelfService();
-  final HistoryService _downloadHistoryService = HistoryService();
-  final ApiService _apiService = ApiService();
+class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
+  late final BookshelfService _bookshelfService =
+      widget.bookshelfService ?? BookshelfService();
+  late final HistoryService _downloadHistoryService =
+      widget.historyService ?? HistoryService();
+  late final ApiService _apiService = widget.apiService ?? ApiService();
 
   // 0: 全部收藏, 1: 已下载
   int _currentSubTab = 0;
@@ -50,6 +67,12 @@ class BookshelfScreenState extends State<BookshelfScreen> {
   List<BookshelfBook> _books = [];
   List<DownloadHistory> _downloadedBooks = [];
   bool _isLoading = true;
+  bool _loaded = false, _reloadRequested = false, _covered = false;
+  Future<void>? _loadRequest, _coverRequest;
+  String? _snapshot;
+  final Map<String, DateTime> _coverAttempts = {};
+  PageRoute<dynamic>? _route;
+  String? _openingBookId;
 
   bool _isSelectionMode = false;
   final Set<String> _selectedBookIds = {};
@@ -60,27 +83,83 @@ class BookshelfScreenState extends State<BookshelfScreen> {
   void initState() {
     super.initState();
     _loadPreferences().then((_) {
-      _loadData();
+      if (!mounted) return;
+      _loadData().then((_) => _startBackgroundMaintenance());
     });
     _bookshelfService.changeNotifier.addListener(_onBookshelfChanged);
+    _downloadHistoryService.changeNotifier.addListener(_onBookshelfChanged);
   }
 
   @override
   void dispose() {
     _bookshelfService.changeNotifier.removeListener(_onBookshelfChanged);
+    _downloadHistoryService.changeNotifier.removeListener(_onBookshelfChanged);
+    readerRouteObserver.unsubscribe(this);
     _apiService.dispose();
     super.dispose();
   }
 
-  void _onBookshelfChanged() {
-    if (mounted) {
-      _loadData(silent: true);
+  @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    final route = ModalRoute.of(context);
+    if (route is PageRoute && !identical(route, _route)) {
+      readerRouteObserver.unsubscribe(this);
+      _route = route;
+      readerRouteObserver.subscribe(this, route);
     }
   }
 
-  /// 外部调用刷新方法
-  void refresh() {
-    _loadData();
+  @override
+  void didUpdateWidget(covariant BookshelfScreen oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (!oldWidget.isActive && widget.isActive) {
+      _startBackgroundMaintenance();
+    }
+  }
+
+  @override
+  void didPushNext() => _covered = true;
+
+  @override
+  void didPopNext() {
+    _covered = false;
+    if (_reloadRequested) unawaited(_loadData());
+  }
+
+  void _onBookshelfChanged() {
+    if (!mounted) return;
+    _reloadRequested = true;
+    if (!_covered) unawaited(_loadData());
+  }
+
+  /// Refresh the local snapshot without blanking content or starting network work.
+  Future<void> refresh() => _loadData();
+
+  void _startBackgroundMaintenance() {
+    if (!mounted || !_loaded || !widget.isActive || _covered) return;
+    unawaited(_backgroundMaintenance());
+  }
+
+  Future<void> _backgroundMaintenance() async {
+    try {
+      await Future.wait([
+        _bookshelfService.checkBookshelfUpdates(),
+        _fetchMissingCovers(),
+      ]);
+    } catch (_) {
+      /* Preserve the visible local snapshot on storage/network failure. */
+    }
+  }
+
+  Future<void> _refreshFromNetwork() async {
+    try {
+      await Future.wait([
+        _bookshelfService.checkBookshelfUpdates(force: true),
+        _fetchMissingCovers(force: true),
+      ]);
+    } catch (_) {}
+    if (mounted) await _loadData();
   }
 
   Future<void> _loadPreferences() async {
@@ -128,78 +207,51 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     _loadData(silent: true);
   }
 
-  Future<void> _loadData({bool silent = false}) async {
-    if (!silent) {
-      setState(() => _isLoading = true);
-    }
-    await _bookshelfService.initialize();
-
-    var shelfList = List<BookshelfBook>.from(_bookshelfService.books);
-    _sortBooks(shelfList);
-
-    List<DownloadHistory> downloads = [];
-    try {
-      downloads = await _downloadHistoryService.getHistoryList();
-    } catch (_) {}
-
-    // 1. 跨数据源封面互相补全 (双索引：同时支持 bookId 与 bookName 匹配，并转换为永久 CDN 直链)
-    final Map<String, String> coverByBookId = {};
-    final Map<String, String> coverByName = {};
-
-    for (final d in downloads) {
-      if (d.thumbUrl != null && d.thumbUrl!.isNotEmpty) {
-        final clean = cleanCoverUrl(d.thumbUrl!);
-        if (clean != null && clean.isNotEmpty) {
-          coverByBookId[d.bookId] = clean;
-          coverByName[d.bookName.trim()] = clean;
-        }
-      }
-    }
-    for (final b in shelfList) {
-      if (b.thumbUrl != null && b.thumbUrl!.isNotEmpty) {
-        final clean = cleanCoverUrl(b.thumbUrl!);
-        if (clean != null && clean.isNotEmpty) {
-          coverByBookId[b.bookId] = clean;
-          coverByName[b.bookName.trim()] = clean;
-        }
-      }
-    }
-
-    // 互相补全缺失的书封（无论是 bookId 相同还是书名相同）
-    for (int i = 0; i < shelfList.length; i++) {
-      final b = shelfList[i];
-      final resolvedCover =
-          coverByBookId[b.bookId] ?? coverByName[b.bookName.trim()];
-      if ((b.thumbUrl == null || b.thumbUrl!.isEmpty) &&
-          resolvedCover != null) {
-        shelfList[i] = b.copyWithCover(resolvedCover);
-        _bookshelfService.updateCover(b.bookId, resolvedCover);
-      }
-    }
-    for (int i = 0; i < downloads.length; i++) {
-      final d = downloads[i];
-      final resolvedCover =
-          coverByBookId[d.bookId] ?? coverByName[d.bookName.trim()];
-      if ((d.thumbUrl == null || d.thumbUrl!.isEmpty) &&
-          resolvedCover != null) {
-        downloads[i] = d.copyWithCover(resolvedCover);
-        _downloadHistoryService.updateCover(d.bookId, resolvedCover);
-      }
-    }
-
-    if (mounted) {
-      setState(() {
-        _books = shelfList;
-        _downloadedBooks = downloads;
-        _isLoading = false;
-      });
-    }
-
-    // 2. 针对依然没有有效封面的早期历史数据，静默后台搜索补全并持久化
-    _autoFetchMissingCovers(shelfList, downloads);
-
-    // 3. 静默检测连载追更更新
-    _bookshelfService.checkBookshelfUpdates();
+  Future<void> _loadData({bool silent = false}) {
+    if (!mounted) return Future.value();
+    _reloadRequested = true;
+    final pending = _loadRequest;
+    if (pending != null) return pending;
+    late final Future<void> request;
+    request =
+        () async {
+          do {
+            _reloadRequested = false;
+            await _bookshelfService.initialize();
+            List<DownloadHistory> downloads;
+            try {
+              downloads = await _downloadHistoryService.getHistoryList();
+            } catch (_) {
+              downloads = _downloadedBooks;
+            }
+            if (!mounted) return;
+            if (_covered && _loaded) {
+              _reloadRequested = true;
+              return;
+            }
+            // Read the current shelf AFTER asynchronous work; never publish a stale
+            // pre-await snapshot over a more recent reading-progress notification.
+            final shelf = List<BookshelfBook>.of(_bookshelfService.books);
+            _sortBooks(shelf);
+            final snapshot = jsonEncode([
+              shelf.map((b) => b.toJson()).toList(),
+              downloads.map((b) => b.toJson()).toList(),
+            ]);
+            if (!_loaded || _snapshot != snapshot) {
+              setState(() {
+                _books = shelf;
+                _downloadedBooks = downloads;
+                _snapshot = snapshot;
+                _isLoading = false;
+                _loaded = true;
+              });
+            }
+          } while (_reloadRequested && !_covered);
+        }().whenComplete(() {
+          if (identical(_loadRequest, request)) _loadRequest = null;
+        });
+    _loadRequest = request;
+    return request;
   }
 
   /// 安全的 URL 清洗（升级协议为 https，保留完整有效链接）
@@ -212,55 +264,61 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     return clean.startsWith('https://') ? clean : null;
   }
 
-  void _autoFetchMissingCovers(
-    List<BookshelfBook> shelfList,
-    List<DownloadHistory> downloads,
-  ) async {
-    final missingBooks = <String, String>{}; // bookId -> bookName
-    for (final b in shelfList) {
-      if (b.thumbUrl == null || b.thumbUrl!.isEmpty) {
-        missingBooks[b.bookId] = b.bookName;
-      }
-    }
-    for (final d in downloads) {
-      if (d.thumbUrl == null || d.thumbUrl!.isEmpty) {
-        missingBooks[d.bookId] = d.bookName;
-      }
-    }
+  Future<void> _fetchMissingCovers({bool force = false}) {
+    final pending = _coverRequest;
+    if (pending != null) return pending;
+    late final Future<void> request;
+    request = _repairMissingCovers(force).whenComplete(() {
+      if (identical(_coverRequest, request)) _coverRequest = null;
+    });
+    _coverRequest = request;
+    return request;
+  }
 
-    if (missingBooks.isEmpty) return;
-
-    bool hasUpdated = false;
-    for (final entry in missingBooks.entries) {
+  Future<void> _repairMissingCovers(bool force) async {
+    final shelf = _bookshelfService.books;
+    final downloads = await _downloadHistoryService.getHistoryList();
+    final covers = <String, String>{};
+    final missing = <String, String>{};
+    for (final b in [
+      ...shelf.map((b) => b.toBook()),
+      ...downloads.map((d) => d.toBook()),
+    ]) {
+      final cover = cleanCoverUrl(b.thumbUrl);
+      if (cover != null) covers[b.bookId] = cover;
+      if (cover == null) missing[b.bookId] = b.bookName;
+    }
+    for (final entry in missing.entries) {
       if (!mounted) return;
-      final bookId = entry.key;
-      final bookName = entry.value;
-      try {
-        // 优先通过书名搜索获取最新封面
-        final searchRes = await _apiService.searchBooks(bookName);
-        String? newCover;
-        if (searchRes.isNotEmpty &&
-            searchRes.first.thumbUrl != null &&
-            searchRes.first.thumbUrl!.isNotEmpty) {
-          newCover = cleanCoverUrl(searchRes.first.thumbUrl);
-        } else {
-          final detail = await _apiService.getBookDetail(bookId);
-          if (detail?.thumbUrl != null && detail!.thumbUrl!.isNotEmpty) {
-            newCover = cleanCoverUrl(detail.thumbUrl);
+      final id = entry.key;
+      var cover = covers[id];
+      if (cover == null && !id.startsWith('local_')) {
+        final now = DateTime.now();
+        if (!force &&
+            _coverAttempts[id] != null &&
+            now.difference(_coverAttempts[id]!) <
+                BookshelfService.updateInterval) {
+          continue;
+        }
+        _coverAttempts[id] = now;
+        try {
+          final results = await _apiService.searchBooks(entry.value);
+          for (final book in results) {
+            if (book.bookId == id) {
+              cover = cleanCoverUrl(book.thumbUrl);
+              break;
+            }
           }
-        }
-
-        if (newCover != null && newCover.isNotEmpty) {
-          final cover = newCover;
-          await _bookshelfService.updateCover(bookId, cover);
-          await _downloadHistoryService.updateCover(bookId, cover);
-          hasUpdated = true;
-        }
-      } catch (_) {}
-    }
-
-    if (hasUpdated && mounted) {
-      _loadData(silent: true);
+          cover ??= cleanCoverUrl(
+            (await _apiService.getBookDetail(id))?.thumbUrl,
+          );
+        } catch (_) {}
+      }
+      if (!mounted) return;
+      if (cover != null) {
+        await _bookshelfService.updateCover(id, cover);
+        await _downloadHistoryService.updateCover(id, cover);
+      }
     }
   }
 
@@ -270,14 +328,21 @@ class BookshelfScreenState extends State<BookshelfScreen> {
         list.sort((a, b) {
           final aTime = a.lastReadTime ?? a.addedTime;
           final bTime = b.lastReadTime ?? b.addedTime;
-          return bTime.compareTo(aTime);
+          final order = bTime.compareTo(aTime);
+          return order != 0 ? order : a.bookId.compareTo(b.bookId);
         });
         break;
       case BookshelfSortType.recentAdded:
-        list.sort((a, b) => b.addedTime.compareTo(a.addedTime));
+        list.sort((a, b) {
+          final order = b.addedTime.compareTo(a.addedTime);
+          return order != 0 ? order : a.bookId.compareTo(b.bookId);
+        });
         break;
       case BookshelfSortType.bookName:
-        list.sort((a, b) => a.bookName.compareTo(b.bookName));
+        list.sort((a, b) {
+          final order = a.bookName.compareTo(b.bookName);
+          return order != 0 ? order : a.bookId.compareTo(b.bookId);
+        });
         break;
     }
   }
@@ -371,119 +436,70 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     }
   }
 
-  /// 阅读书架中的书籍
-  Future<void> _continueReading(BookshelfBook shelfBook) async {
-    final book = shelfBook.toBook();
-    _bookshelfService.clearBookUpdateBadge(shelfBook.bookId);
+  Future<void> _continueReading(BookshelfBook book) =>
+      _openShelfReader(book.toBook(), book.lastReadChapterIndex ?? 0);
 
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
-
-    List<Chapter> chapters = [];
-    try {
-      chapters = await _apiService.getBookChapters(book.bookId);
-    } catch (_) {}
-
-    if (mounted) {
-      Navigator.pop(context);
-    }
-
-    if (!mounted) return;
-
-    if (chapters.isEmpty) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(builder: (_) => BookDetailScreen(book: book)),
-      );
-      return;
-    }
-
-    final targetIndex = (shelfBook.lastReadChapterIndex ?? 0).clamp(
-      0,
-      chapters.length - 1,
-    );
-    final readerSettings = await ReaderSettingsRepository().load(book.bookId);
-    if (!mounted) return;
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ReaderScreen(
-          book: book,
-          chapters: chapters,
-          initialChapterIndex: targetIndex,
-          initialSettings: readerSettings,
-        ),
-      ),
-    ).then((_) => _loadData(silent: true));
-  }
-
-  /// 跳转到书籍详情页
   void _openBookDetail(Book book) {
-    _bookshelfService.clearBookUpdateBadge(book.bookId);
     Navigator.push(
       context,
-      MaterialPageRoute(builder: (_) => BookDetailScreen(book: book)),
-    ).then((_) => _loadData(silent: true));
+      BookPageRoute(builder: (_) => BookDetailScreen(book: book)),
+    ).then((_) {
+      if (mounted) _loadData();
+    });
   }
 
-  /// 直接阅读已下载的小说
   Future<void> _readDownloadedBook(DownloadHistory download) async {
-    final book = download.toBook();
-
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
-
-    List<Chapter> chapters = [];
-    // 优先尝试联网获取完整章节结构
-    try {
-      chapters = await _apiService.getBookChapters(book.bookId);
-    } catch (_) {}
-
-    // 如果未获取到章节，尝试从本地文件解析
-    if (chapters.isEmpty) {
-      chapters = await _parseChaptersFromLocalFile(download.filePath);
-    }
-
-    if (mounted) {
-      Navigator.pop(context);
-    }
-
-    if (!mounted) return;
-
-    if (chapters.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('无法解析小说章节，请检查网络或文件')));
-      }
-      return;
-    }
-
-    // 读取最后阅读进度
     final prefs = await SharedPreferences.getInstance();
-    final savedIndex = prefs.getInt('read_progress_index_${book.bookId}') ?? 0;
-    final targetIndex = savedIndex.clamp(0, chapters.length - 1);
-    final readerSettings = await ReaderSettingsRepository().load(book.bookId);
     if (!mounted) return;
+    await _openShelfReader(
+      download.toBook(),
+      prefs.getInt('read_progress_index_${download.bookId}') ?? 0,
+      filePath: download.filePath,
+    );
+  }
 
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (_) => ReaderScreen(
-          book: book,
-          chapters: chapters,
-          initialChapterIndex: targetIndex,
-          initialSettings: readerSettings,
+  Future<void> _openShelfReader(
+    Book book,
+    int index, {
+    String? filePath,
+  }) async {
+    if (_openingBookId != null) return;
+    setState(() => _openingBookId = book.bookId);
+    try {
+      List<Chapter> chapters = [];
+      try {
+        chapters = await _apiService.getBookChapters(book.bookId);
+      } catch (_) {}
+      if (chapters.isEmpty && filePath != null) {
+        chapters = await _parseChaptersFromLocalFile(filePath);
+      }
+      if (!mounted) return;
+      if (chapters.isEmpty) {
+        _openBookDetail(book);
+        return;
+      }
+      final settings = await ReaderSettingsRepository().load(book.bookId);
+      if (!mounted) return;
+      final route = Navigator.push(
+        context,
+        BookPageRoute(
+          builder: (_) => ReaderScreen(
+            book: book,
+            chapters: chapters,
+            initialChapterIndex: index.clamp(0, chapters.length - 1),
+            initialSettings: settings,
+          ),
         ),
-      ),
-    ).then((_) => _loadData(silent: true));
+      );
+      unawaited(_bookshelfService.clearBookUpdateBadge(book.bookId));
+      unawaited(
+        route.then((_) {
+          if (mounted) _loadData();
+        }),
+      );
+    } finally {
+      if (mounted) setState(() => _openingBookId = null);
+    }
   }
 
   /// 从本地 TXT 文件解析章节
@@ -536,6 +552,8 @@ class BookshelfScreenState extends State<BookshelfScreen> {
         title: Text(
           _isSelectionMode
               ? '已选择 ${_selectedBookIds.length} 项'
+              : MediaQuery.sizeOf(context).width < 400
+              ? '书架'
               : '我的书架 (${_currentSubTab == 0 ? _books.length : _downloadedBooks.length})',
         ),
         leading: _isSelectionMode
@@ -560,8 +578,10 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                 if (value == 'import') {
                   await _showImportLocalBookDialog();
                 } else if (value == 'activity') {
-                  await showDialog<void>(context: context,
-                    builder: (_) => const ReadingActivityDialog());
+                  await showDialog<void>(
+                    context: context,
+                    builder: (_) => const ReadingActivityDialog(),
+                  );
                 } else {
                   await showDialog<void>(
                     context: context,
@@ -640,6 +660,12 @@ class BookshelfScreenState extends State<BookshelfScreen> {
       body: Column(
         children: [
           _buildSubTabBar(),
+          SizedBox(
+            height: 2,
+            child: _openingBookId == null
+                ? null
+                : const LinearProgressIndicator(key: ValueKey('shelf-opening')),
+          ),
           Expanded(child: _buildBody()),
         ],
       ),
@@ -649,25 +675,24 @@ class BookshelfScreenState extends State<BookshelfScreen> {
 
   /// 顶部快捷子标签：全部收藏 vs 已下载
   Widget _buildSubTabBar() {
-    return Container(
+    return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       child: Row(
         children: [
-          _buildPillTab(
-            0,
-            '全部收藏 (${_books.length})',
-            Icons.collections_bookmark_rounded,
+          Expanded(
+            child: _buildPillTab(
+              0,
+              '全部收藏 (${_books.length})',
+              Icons.collections_bookmark_rounded,
+            ),
           ),
           const SizedBox(width: 8),
-          _buildPillTab(
-            1,
-            '已下载 (${_downloadedBooks.length})',
-            Icons.download_done_rounded,
-          ),
-          const Spacer(),
-          Text(
-            _viewMode == BookshelfViewMode.grid3 ? '三列视图' : '单列列表',
-            style: const TextStyle(fontSize: 12, color: AppTheme.textHint),
+          Expanded(
+            child: _buildPillTab(
+              1,
+              '已下载 (${_downloadedBooks.length})',
+              Icons.download_done_rounded,
+            ),
           ),
         ],
       ),
@@ -711,14 +736,18 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                   : AppTheme.textSecondary,
             ),
             const SizedBox(width: 6),
-            Text(
-              label,
-              style: TextStyle(
-                fontSize: 13,
-                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                color: isSelected
-                    ? AppTheme.primaryColor
-                    : AppTheme.textSecondary,
+            Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                  color: isSelected
+                      ? AppTheme.primaryColor
+                      : AppTheme.textSecondary,
+                ),
               ),
             ),
           ],
@@ -792,10 +821,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     }
 
     return RefreshIndicator(
-      onRefresh: () async {
-        await _bookshelfService.checkBookshelfUpdates(force: true);
-        await _loadData(silent: true);
-      },
+      onRefresh: _refreshFromNetwork,
       child: _viewMode == BookshelfViewMode.grid3
           ? _buildFavoritesGrid()
           : _buildFavoritesList(),
@@ -805,6 +831,11 @@ class BookshelfScreenState extends State<BookshelfScreen> {
   /// 单列列表呈现
   Widget _buildFavoritesList() {
     return ListView.builder(
+      key: const PageStorageKey('favorites-list'),
+      findChildIndexCallback: (key) {
+        final index = _books.indexWhere((b) => ValueKey(b.bookId) == key);
+        return index < 0 ? null : index;
+      },
       padding: const EdgeInsets.symmetric(vertical: 4),
       itemCount: _books.length,
       itemBuilder: (context, index) {
@@ -812,6 +843,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
         final isSelected = _selectedBookIds.contains(shelfBook.bookId);
 
         return Container(
+          key: ValueKey(shelfBook.bookId),
           margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
           decoration: BoxDecoration(
             color: Colors.white,
@@ -824,196 +856,201 @@ class BookshelfScreenState extends State<BookshelfScreen> {
               ),
             ],
           ),
-          child: ListTile(
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 6,
-            ),
-            leading: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_isSelectionMode)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: Checkbox(
-                      value: isSelected,
-                      onChanged: (_) => _toggleSelection(shelfBook.bookId),
-                    ),
-                  ),
-                // 点击书封 -> 立即进入阅读！
-                GestureDetector(
-                  onTap: () {
-                    if (_isSelectionMode) {
-                      _toggleSelection(shelfBook.bookId);
-                    } else {
-                      _continueReading(shelfBook);
-                    }
-                  },
-                  child: Stack(
-                    children: [
-                      ClipRRect(
-                        borderRadius: BorderRadius.circular(6),
-                        child: SizedBox(
-                          width: 52,
-                          height: 74,
-                          child: BookCoverWidget(
-                            bookId: shelfBook.bookId,
-                            bookName: shelfBook.bookName,
-                            thumbUrl: shelfBook.thumbUrl,
-                            iconSize: 22,
-                          ),
-                        ),
-                      ),
-                      if (shelfBook.hasUpdate)
-                        Positioned(
-                          top: 0,
-                          right: 0,
-                          child: Container(
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 4,
-                              vertical: 1,
-                            ),
-                            decoration: const BoxDecoration(
-                              color: Colors.redAccent,
-                              borderRadius: BorderRadius.only(
-                                topRight: Radius.circular(6),
-                                bottomLeft: Radius.circular(6),
-                              ),
-                            ),
-                            child: const Text(
-                              '更新',
-                              style: TextStyle(
-                                color: Colors.white,
-                                fontSize: 9,
-                                fontWeight: FontWeight.bold,
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ],
-            ),
-            // 点击书名 -> 进入书籍详情！
-            title: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () {
-                if (_isSelectionMode) {
-                  _toggleSelection(shelfBook.bookId);
-                } else {
-                  _openBookDetail(shelfBook.toBook());
-                }
-              },
-              child: Text(
-                shelfBook.bookName,
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 15,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+          child: Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(12),
+            child: ListTile(
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 6,
               ),
-            ),
-            subtitle: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () {
-                if (_isSelectionMode) {
-                  _toggleSelection(shelfBook.bookId);
-                } else {
-                  _openBookDetail(shelfBook.toBook());
-                }
-              },
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              leading: Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  const SizedBox(height: 4),
-                  Text(
-                    '作者: ${shelfBook.author}',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: AppTheme.textSecondary,
+                  if (_isSelectionMode)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Checkbox(
+                        value: isSelected,
+                        onChanged: (_) => _toggleSelection(shelfBook.bookId),
+                      ),
                     ),
-                    maxLines: 1,
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Expanded(
-                        child: Text(
-                          shelfBook.lastReadChapterTitle != null
-                              ? '读至: ${shelfBook.lastReadChapterTitle}'
-                              : '尚未开始阅读',
-                          style: TextStyle(
-                            fontSize: 11,
-                            color: shelfBook.lastReadChapterTitle != null
-                                ? AppTheme.primaryColor
-                                : AppTheme.textHint,
-                            fontWeight: shelfBook.lastReadChapterTitle != null
-                                ? FontWeight.w500
-                                : FontWeight.normal,
+                  // 点击书封 -> 立即进入阅读！
+                  GestureDetector(
+                    onTap: () {
+                      if (_isSelectionMode) {
+                        _toggleSelection(shelfBook.bookId);
+                      } else {
+                        _continueReading(shelfBook);
+                      }
+                    },
+                    child: Stack(
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: SizedBox(
+                            width: 52,
+                            height: 74,
+                            child: BookCoverWidget(
+                              bookId: shelfBook.bookId,
+                              bookName: shelfBook.bookName,
+                              thumbUrl: shelfBook.thumbUrl,
+                              iconSize: 22,
+                            ),
                           ),
-                          maxLines: 1,
-                          overflow: TextOverflow.ellipsis,
                         ),
-                      ),
-                      Text(
-                        _formatTime(shelfBook.lastReadTime),
-                        style: const TextStyle(
-                          fontSize: 10,
-                          color: AppTheme.textHint,
-                        ),
-                      ),
-                    ],
+                        if (shelfBook.hasUpdate)
+                          Positioned(
+                            top: 0,
+                            right: 0,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 4,
+                                vertical: 1,
+                              ),
+                              decoration: const BoxDecoration(
+                                color: Colors.redAccent,
+                                borderRadius: BorderRadius.only(
+                                  topRight: Radius.circular(6),
+                                  bottomLeft: Radius.circular(6),
+                                ),
+                              ),
+                              child: const Text(
+                                '更新',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ),
+                          ),
+                      ],
+                    ),
                   ),
                 ],
               ),
-            ),
-            trailing: !_isSelectionMode
-                ? OutlinedButton(
-                    onPressed: () => _continueReading(shelfBook),
-                    style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 4,
-                      ),
-                      minimumSize: const Size(0, 32),
-                      side: BorderSide(
-                        color: AppTheme.primaryColor.withValues(alpha: 0.6),
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                    ),
-                    child: Text(
-                      shelfBook.lastReadChapterIndex != null ? '续读' : '开读',
+              // 点击书名 -> 进入书籍详情！
+              title: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {
+                  if (_isSelectionMode) {
+                    _toggleSelection(shelfBook.bookId);
+                  } else {
+                    _openBookDetail(shelfBook.toBook());
+                  }
+                },
+                child: Text(
+                  shelfBook.bookName,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              subtitle: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {
+                  if (_isSelectionMode) {
+                    _toggleSelection(shelfBook.bookId);
+                  } else {
+                    _openBookDetail(shelfBook.toBook());
+                  }
+                },
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 4),
+                    Text(
+                      '作者: ${shelfBook.author}',
                       style: const TextStyle(
                         fontSize: 12,
-                        color: AppTheme.primaryColor,
+                        color: AppTheme.textSecondary,
                       ),
+                      maxLines: 1,
                     ),
-                  )
-                : null,
-            onTap: () {
-              if (_isSelectionMode) {
-                _toggleSelection(shelfBook.bookId);
-              } else {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => BookDetailScreen(book: shelfBook.toBook()),
-                  ),
-                ).then((_) => _loadData(silent: true));
-              }
-            },
-            onLongPress: () {
-              if (!_isSelectionMode) {
-                setState(() {
-                  _isSelectionMode = true;
-                  _selectedBookIds.add(shelfBook.bookId);
-                });
-              }
-            },
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            shelfBook.lastReadChapterTitle != null
+                                ? '读至: ${shelfBook.lastReadChapterTitle}'
+                                : '尚未开始阅读',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: shelfBook.lastReadChapterTitle != null
+                                  ? AppTheme.primaryColor
+                                  : AppTheme.textHint,
+                              fontWeight: shelfBook.lastReadChapterTitle != null
+                                  ? FontWeight.w500
+                                  : FontWeight.normal,
+                            ),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        Text(
+                          _formatTime(shelfBook.lastReadTime),
+                          style: const TextStyle(
+                            fontSize: 10,
+                            color: AppTheme.textHint,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              trailing: !_isSelectionMode
+                  ? OutlinedButton(
+                      onPressed: () => _continueReading(shelfBook),
+                      style: OutlinedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                        minimumSize: const Size(0, 32),
+                        side: BorderSide(
+                          color: AppTheme.primaryColor.withValues(alpha: 0.6),
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                      ),
+                      child: Text(
+                        shelfBook.lastReadChapterIndex != null ? '续读' : '开读',
+                        style: const TextStyle(
+                          fontSize: 12,
+                          color: AppTheme.primaryColor,
+                        ),
+                      ),
+                    )
+                  : null,
+              onTap: () {
+                if (_isSelectionMode) {
+                  _toggleSelection(shelfBook.bookId);
+                } else {
+                  Navigator.push(
+                    context,
+                    BookPageRoute(
+                      builder: (_) =>
+                          BookDetailScreen(book: shelfBook.toBook()),
+                    ),
+                  ).then((_) => _loadData(silent: true));
+                }
+              },
+              onLongPress: () {
+                if (!_isSelectionMode) {
+                  setState(() {
+                    _isSelectionMode = true;
+                    _selectedBookIds.add(shelfBook.bookId);
+                  });
+                }
+              },
+            ),
           ),
         );
       },
@@ -1024,15 +1061,24 @@ class BookshelfScreenState extends State<BookshelfScreen> {
   Widget _buildFavoritesGrid() {
     final screenWidth = MediaQuery.of(context).size.width;
     final isWide = screenWidth > 900;
+    final width = ((isWide ? 900.0 : screenWidth) - 60) / 3;
+    final scaler = MediaQuery.textScalerOf(context);
+    final titleHeight = 36 * scaler.scale(13) / 13;
+    final authorHeight = 16 * scaler.scale(11) / 11;
 
     return Center(
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: isWide ? 900 : double.infinity),
         child: GridView.builder(
+          key: const PageStorageKey('favorites-grid'),
+          findChildIndexCallback: (key) {
+            final index = _books.indexWhere((b) => ValueKey(b.bookId) == key);
+            return index < 0 ? null : index;
+          },
           padding: const EdgeInsets.all(16),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: 3,
-            childAspectRatio: 0.49,
+            mainAxisExtent: width * 1.42 + titleHeight + authorHeight + 12,
             crossAxisSpacing: 14,
             mainAxisSpacing: 16,
           ),
@@ -1042,6 +1088,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
             final isSelected = _selectedBookIds.contains(shelfBook.bookId);
 
             return Column(
+              key: ValueKey(shelfBook.bookId),
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 // 1. 封面容器（严格固定 1 : 1.42 长方形比例，点击进入阅读）
@@ -1201,7 +1248,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       SizedBox(
-                        height: 36, // 严格固定两行高度，确保所有卡片对齐
+                        height: titleHeight, // 严格固定两行高度，确保所有卡片对齐
                         child: Text(
                           shelfBook.bookName,
                           style: const TextStyle(
@@ -1215,7 +1262,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                       ),
                       const SizedBox(height: 2),
                       SizedBox(
-                        height: 16,
+                        height: authorHeight,
                         child: Text(
                           shelfBook.author,
                           style: const TextStyle(
@@ -1290,7 +1337,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
     }
 
     return RefreshIndicator(
-      onRefresh: () => _loadData(silent: false),
+      onRefresh: _refreshFromNetwork,
       child: _viewMode == BookshelfViewMode.grid3
           ? _buildDownloadsGrid()
           : _buildDownloadsList(),
@@ -1300,6 +1347,13 @@ class BookshelfScreenState extends State<BookshelfScreen> {
   /// 已下载书籍单列列表
   Widget _buildDownloadsList() {
     return ListView.builder(
+      key: const PageStorageKey('downloads-list'),
+      findChildIndexCallback: (key) {
+        final index = _downloadedBooks.indexWhere(
+          (b) => ValueKey(b.bookId) == key,
+        );
+        return index < 0 ? null : index;
+      },
       padding: const EdgeInsets.symmetric(vertical: 4),
       itemCount: _downloadedBooks.length,
       itemBuilder: (context, index) {
@@ -1307,6 +1361,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
         final isSelected = _selectedBookIds.contains(download.bookId);
 
         return Container(
+          key: ValueKey(download.bookId),
           margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
           decoration: BoxDecoration(
             color: Colors.white,
@@ -1319,150 +1374,154 @@ class BookshelfScreenState extends State<BookshelfScreen> {
               ),
             ],
           ),
-          child: ListTile(
-            contentPadding: const EdgeInsets.symmetric(
-              horizontal: 12,
-              vertical: 6,
-            ),
-            leading: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                if (_isSelectionMode)
-                  Padding(
-                    padding: const EdgeInsets.only(right: 8),
-                    child: Checkbox(
-                      value: isSelected,
-                      onChanged: (_) => _toggleSelection(download.bookId),
-                    ),
-                  ),
-                // 点击书封 -> 立即进入阅读！
-                GestureDetector(
-                  onTap: () {
-                    if (_isSelectionMode) {
-                      _toggleSelection(download.bookId);
-                    } else {
-                      _readDownloadedBook(download);
-                    }
-                  },
-                  child: ClipRRect(
-                    borderRadius: BorderRadius.circular(6),
-                    child: SizedBox(
-                      width: 52,
-                      height: 74,
-                      child: BookCoverWidget(
-                        bookId: download.bookId,
-                        bookName: download.bookName,
-                        thumbUrl: download.thumbUrl,
-                        epubPath: download.filePath,
-                        iconSize: 22,
-                      ),
-                    ),
-                  ),
-                ),
-              ],
-            ),
-            // 点击书名 -> 进入书籍详情！
-            title: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () {
-                if (_isSelectionMode) {
-                  _toggleSelection(download.bookId);
-                } else {
-                  _openBookDetail(download.toBook());
-                }
-              },
-              child: Text(
-                download.bookName,
-                style: const TextStyle(
-                  fontWeight: FontWeight.bold,
-                  fontSize: 15,
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+          child: Material(
+            color: Colors.transparent,
+            borderRadius: BorderRadius.circular(12),
+            child: ListTile(
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 6,
               ),
-            ),
-            subtitle: GestureDetector(
-              behavior: HitTestBehavior.opaque,
-              onTap: () {
-                if (_isSelectionMode) {
-                  _toggleSelection(download.bookId);
-                } else {
-                  _openBookDetail(download.toBook());
-                }
-              },
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
+              leading: Row(
+                mainAxisSize: MainAxisSize.min,
                 children: [
-                  const SizedBox(height: 4),
-                  Text(
-                    '作者: ${download.author}',
-                    style: const TextStyle(
-                      fontSize: 12,
-                      color: AppTheme.textSecondary,
+                  if (_isSelectionMode)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 8),
+                      child: Checkbox(
+                        value: isSelected,
+                        onChanged: (_) => _toggleSelection(download.bookId),
+                      ),
                     ),
-                    maxLines: 1,
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 6,
-                          vertical: 2,
-                        ),
-                        decoration: BoxDecoration(
-                          color: AppTheme.primaryColor.withValues(alpha: 0.1),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text(
-                          download.format,
-                          style: const TextStyle(
-                            fontSize: 10,
-                            color: AppTheme.primaryColor,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 8),
-                      Text(
-                        download.formattedFileSize,
-                        style: const TextStyle(
-                          fontSize: 11,
-                          color: AppTheme.textHint,
+                  // 点击书封 -> 立即进入阅读！
+                  GestureDetector(
+                    onTap: () {
+                      if (_isSelectionMode) {
+                        _toggleSelection(download.bookId);
+                      } else {
+                        _readDownloadedBook(download);
+                      }
+                    },
+                    child: ClipRRect(
+                      borderRadius: BorderRadius.circular(6),
+                      child: SizedBox(
+                        width: 52,
+                        height: 74,
+                        child: BookCoverWidget(
+                          bookId: download.bookId,
+                          bookName: download.bookName,
+                          thumbUrl: download.thumbUrl,
+                          epubPath: download.filePath,
+                          iconSize: 22,
                         ),
                       ),
-                    ],
+                    ),
                   ),
                 ],
               ),
-            ),
-            trailing: !_isSelectionMode
-                ? ElevatedButton.icon(
-                    onPressed: () => _readDownloadedBook(download),
-                    icon: const Icon(Icons.menu_book_rounded, size: 16),
-                    label: const Text('阅读', style: TextStyle(fontSize: 12)),
-                    style: ElevatedButton.styleFrom(
-                      backgroundColor: AppTheme.primaryColor,
-                      foregroundColor: Colors.white,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 12,
-                        vertical: 6,
+              // 点击书名 -> 进入书籍详情！
+              title: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {
+                  if (_isSelectionMode) {
+                    _toggleSelection(download.bookId);
+                  } else {
+                    _openBookDetail(download.toBook());
+                  }
+                },
+                child: Text(
+                  download.bookName,
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 15,
+                  ),
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              subtitle: GestureDetector(
+                behavior: HitTestBehavior.opaque,
+                onTap: () {
+                  if (_isSelectionMode) {
+                    _toggleSelection(download.bookId);
+                  } else {
+                    _openBookDetail(download.toBook());
+                  }
+                },
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 4),
+                    Text(
+                      '作者: ${download.author}',
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: AppTheme.textSecondary,
                       ),
-                      minimumSize: const Size(0, 32),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(16),
-                      ),
+                      maxLines: 1,
                     ),
-                  )
-                : null,
-            onLongPress: () {
-              if (!_isSelectionMode) {
-                setState(() {
-                  _isSelectionMode = true;
-                  _selectedBookIds.add(download.bookId);
-                });
-              }
-            },
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 6,
+                            vertical: 2,
+                          ),
+                          decoration: BoxDecoration(
+                            color: AppTheme.primaryColor.withValues(alpha: 0.1),
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                          child: Text(
+                            download.format,
+                            style: const TextStyle(
+                              fontSize: 10,
+                              color: AppTheme.primaryColor,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Text(
+                          download.formattedFileSize,
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: AppTheme.textHint,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              trailing: !_isSelectionMode
+                  ? ElevatedButton.icon(
+                      onPressed: () => _readDownloadedBook(download),
+                      icon: const Icon(Icons.menu_book_rounded, size: 16),
+                      label: const Text('阅读', style: TextStyle(fontSize: 12)),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: AppTheme.primaryColor,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 6,
+                        ),
+                        minimumSize: const Size(0, 32),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(16),
+                        ),
+                      ),
+                    )
+                  : null,
+              onLongPress: () {
+                if (!_isSelectionMode) {
+                  setState(() {
+                    _isSelectionMode = true;
+                    _selectedBookIds.add(download.bookId);
+                  });
+                }
+              },
+            ),
           ),
         );
       },
@@ -1473,15 +1532,26 @@ class BookshelfScreenState extends State<BookshelfScreen> {
   Widget _buildDownloadsGrid() {
     final screenWidth = MediaQuery.of(context).size.width;
     final isWide = screenWidth > 900;
+    final width = ((isWide ? 900.0 : screenWidth) - 60) / 3;
+    final scaler = MediaQuery.textScalerOf(context);
+    final titleHeight = 36 * scaler.scale(13) / 13;
+    final authorHeight = 16 * scaler.scale(11) / 11;
 
     return Center(
       child: ConstrainedBox(
         constraints: BoxConstraints(maxWidth: isWide ? 900 : double.infinity),
         child: GridView.builder(
+          key: const PageStorageKey('downloads-grid'),
+          findChildIndexCallback: (key) {
+            final index = _downloadedBooks.indexWhere(
+              (b) => ValueKey(b.bookId) == key,
+            );
+            return index < 0 ? null : index;
+          },
           padding: const EdgeInsets.all(16),
-          gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
+          gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
             crossAxisCount: 3,
-            childAspectRatio: 0.49,
+            mainAxisExtent: width * 1.42 + titleHeight + authorHeight + 12,
             crossAxisSpacing: 14,
             mainAxisSpacing: 16,
           ),
@@ -1491,6 +1561,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
             final isSelected = _selectedBookIds.contains(download.bookId);
 
             return Column(
+              key: ValueKey(download.bookId),
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 // 1. 封面容器（严格固定 1 : 1.42 比例，点击进入阅读）
@@ -1613,7 +1684,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       SizedBox(
-                        height: 36, // 严格固定两行高度
+                        height: titleHeight, // 严格固定两行高度
                         child: Text(
                           download.bookName,
                           style: const TextStyle(
@@ -1627,7 +1698,7 @@ class BookshelfScreenState extends State<BookshelfScreen> {
                       ),
                       const SizedBox(height: 2),
                       SizedBox(
-                        height: 16,
+                        height: authorHeight,
                         child: Text(
                           '${download.author} · ${download.formattedFileSize}',
                           style: const TextStyle(

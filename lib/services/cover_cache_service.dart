@@ -16,6 +16,13 @@ class CoverCacheService {
   Future<Directory> Function()? documents;
   http.Client? client;
 
+  final Map<String, _CoverRecord> _validated = {};
+  final Map<String, Future<File?>> _requests = {};
+  int _revision = 0;
+
+  File? peekCover(String bookId) => _validated[bookId]?.file;
+  int coverRevision(String bookId) => _validated[bookId]?.revision ?? 0;
+
   /// 获取书籍持久化存储目录
   Future<Directory> _getBookDir(String bookId) async {
     final cleanId = ReaderCacheService.segment(bookId.trim());
@@ -42,13 +49,21 @@ class CoverCacheService {
   Future<bool> hasLocalCover(String bookId) async {
     try {
       final file = await getCoverFile(bookId);
-      if (await FileSystemEntity.type(file.path, followLinks: false) ==
-              FileSystemEntityType.file &&
-          await file.length() <= BookImageFetcher.maxBytes) {
+      final stat = await file.stat();
+      if (!await FileSystemEntity.isLink(file.path) &&
+          stat.type == FileSystemEntityType.file &&
+          stat.size <= BookImageFetcher.maxBytes) {
+        final fingerprint = (file.path, stat.size, stat.modified, stat.changed);
+        if (_validated[bookId]?.fingerprint == fingerprint) return true;
         await BookImageFetcher.validate(await file.readAsBytes());
+        _validated[bookId] = _CoverRecord(file, fingerprint, ++_revision);
+        if (_validated.length > 500) _validated.remove(_validated.keys.first);
         return true;
       }
-    } catch (_) {}
+      _validated.remove(bookId);
+    } catch (_) {
+      _validated.remove(bookId);
+    }
     return false;
   }
 
@@ -83,7 +98,7 @@ class CoverCacheService {
           await BookImageFetcher.validate(Uint8List.fromList(content));
           final localCover = await getCoverFile(bookId);
           await AtomicFile.writeBytes(localCover, content);
-          return localCover;
+          if (await hasLocalCover(bookId)) return localCover;
         }
       }
     } catch (e) {
@@ -93,7 +108,19 @@ class CoverCacheService {
   }
 
   /// 下载网络封面并持久化保存到本地离线目录
-  Future<File?> cacheNetworkCover(String bookId, String imageUrl) async {
+  Future<File?> cacheNetworkCover(String bookId, String imageUrl) {
+    final key = '$bookId:$imageUrl';
+    final pending = _requests[key];
+    if (pending != null) return pending;
+    late final Future<File?> request;
+    request = _cacheNetworkCover(bookId, imageUrl).whenComplete(() {
+      if (identical(_requests[key], request)) _requests.remove(key);
+    });
+    _requests[key] = request;
+    return request;
+  }
+
+  Future<File?> _cacheNetworkCover(String bookId, String imageUrl) async {
     if (imageUrl.isEmpty) return null;
     final connection = client ?? http.Client();
     try {
@@ -104,7 +131,7 @@ class CoverCacheService {
 
       final image = await BookImageFetcher(connection).fetch(imageUrl);
       await AtomicFile.writeBytes(localCover, image.bytes);
-      return localCover;
+      if (await hasLocalCover(bookId)) return localCover;
     } catch (e) {
       if (kDebugMode) debugPrint('cacheNetworkCover error: $e');
     } finally {
@@ -112,4 +139,11 @@ class CoverCacheService {
     }
     return null;
   }
+}
+
+class _CoverRecord {
+  final File file;
+  final Object fingerprint;
+  final int revision;
+  const _CoverRecord(this.file, this.fingerprint, this.revision);
 }
