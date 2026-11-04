@@ -79,8 +79,11 @@ class ApiService {
   }
 
   /// 5. 简化章节目录接口
-  Future<List<Chapter>> getBookDirectory(String bookId) async {
-    return _engine.getBookDirectory(bookId);
+  Future<List<Chapter>> getBookDirectory(
+    String bookId, {
+    bool refresh = false,
+  }) async {
+    return _engine.getBookDirectory(bookId, refresh: refresh);
   }
 
   /// 6. 完整书籍信息接口
@@ -88,46 +91,11 @@ class ApiService {
     return _engine.getBookFull(bookId);
   }
 
-  /// 获取书籍章节目录（优先简化目录，回退完整书籍）
-  Future<List<Chapter>> getBookChapters(String bookId) async {
-    final chapters = await _engine.getBookDirectory(bookId);
-    if (chapters.isNotEmpty) {
-      return chapters;
-    }
-
-    final full = await _engine.getBookFull(bookId);
-    if (full != null) {
-      final volumeList = full['chapterListWithVolume'] as List?;
-      if (volumeList != null && volumeList.isNotEmpty) {
-        final list = <Chapter>[];
-        for (var volume in volumeList) {
-          if (volume is List) {
-            for (var chapter in volume) {
-              if (chapter is Map) {
-                list.add(
-                  Chapter.fromBookJson(Map<String, dynamic>.from(chapter)),
-                );
-              }
-            }
-          }
-        }
-        if (list.isNotEmpty) return list;
-      }
-
-      final allIds = full['allItemIds'] as List?;
-      if (allIds != null && allIds.isNotEmpty) {
-        return allIds.asMap().entries.map((entry) {
-          return Chapter(
-            itemId: entry.value.toString(),
-            title: '第${entry.key + 1}章',
-            order: entry.key + 1,
-          );
-        }).toList();
-      }
-    }
-
-    return [];
-  }
+  /// A single retryable catalog path; never repeat a failed detail-page fetch.
+  Future<List<Chapter>> getBookChapters(
+    String bookId, {
+    bool refresh = false,
+  }) => _engine.getBookDirectory(bookId, refresh: refresh);
 
   /// 获取单个章节内容
   Future<String?> getChapterContent(String itemId, {String? bookId}) async {

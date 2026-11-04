@@ -13,6 +13,8 @@ import 'font_decryptor.dart';
 import 'reader_cache_service.dart';
 import 'online_chapter.dart';
 import 'online_illustration_store.dart';
+import 'book_directory_cache.dart';
+import 'book_directory_parser.dart';
 
 /// 番茄小说内置后端引擎
 /// 直接请求已验证的官方接口，不依赖旧第三方代理节点：
@@ -42,6 +44,9 @@ class FanqieBackendEngine {
   final Future<String?> Function(String)? _chapterLoader;
   final Future<OnlineChapter?> Function(String)? _chapterDocumentLoader;
   late final onlineImages = OnlineIllustrationStore(readerCache, _client);
+  late final directoryCache = BookDirectoryCache(readerCache);
+  final Map<String, Future<List<Chapter>>> _directoryRequests = {};
+  final ValueNotifier<String?> directoryWarning = ValueNotifier(null);
   final ValueNotifier<String?> cacheWarning = ValueNotifier(null);
 
   Future<void> _cacheForReading(
@@ -457,114 +462,122 @@ class FanqieBackendEngine {
     return null;
   }
 
-  /// 4. 章节目录接口
-  Future<List<Chapter>> getBookDirectory(String bookId) async {
-    final cleanId = bookId.trim();
-    if (cleanId.isEmpty) return [];
-
-    // 0. 优先检查本地离线/本地导入书籍的 directory.json
-    try {
-      final bookDir = await getOfflineBookDir(cleanId);
-      final dirFile = File('${bookDir.path}/directory.json');
-      if (await dirFile.exists()) {
-        final raw = await dirFile.readAsString();
-        final List<dynamic> list = json.decode(raw);
-        return list
-            .map((e) => Chapter.fromDirectoryJson(e as Map<String, dynamic>, 0))
-            .toList();
+  /// Catalog loading must not depend on whether the detail/marketing HTML page
+  /// rendered its SSR state. Coalesce retries and retain a usable offline copy.
+  Future<List<Chapter>> getBookDirectory(
+    String bookId, {
+    bool refresh = false,
+  }) {
+    final id = bookId.trim();
+    if (id.isEmpty) return Future.value([]);
+    final key = '$id:$refresh';
+    final existing = _directoryRequests[key];
+    if (existing != null) return existing;
+    late final Future<List<Chapter>> request;
+    request = _loadBookDirectory(id, refresh: refresh).whenComplete(() {
+      if (identical(_directoryRequests[key], request)) {
+        _directoryRequests.remove(key);
       }
-    } catch (_) {}
-
-    Map<String, dynamic>? meta = _detailCache[cleanId];
-    if (meta == null) {
-      await getBookDetail(cleanId);
-      meta = _detailCache[cleanId];
-    }
-
-    final lists = <Chapter>[];
-    if (meta != null) {
-      final vols = meta['chapterListWithVolume'] as List?;
-      if (vols != null && vols.isNotEmpty) {
-        int order = 1;
-        for (final vol in vols) {
-          if (vol is List) {
-            for (final ch in vol) {
-              if (ch is Map) {
-                final itemId =
-                    ch['itemId']?.toString() ?? ch['item_id']?.toString() ?? '';
-                final title = FontDecryptor.decryptText(
-                  ch['title']?.toString() ?? '',
-                );
-                if (itemId.isNotEmpty) {
-                  lists.add(
-                    Chapter(
-                      itemId: itemId,
-                      title: title.isNotEmpty ? title : '第$order章',
-                      order: order++,
-                    ),
-                  );
-                }
-              }
-            }
-          }
-        }
-      }
-
-      if (lists.isEmpty) {
-        final itemIds = meta['allItemIds'] as List?;
-        if (itemIds != null) {
-          for (int i = 0; i < itemIds.length; i++) {
-            lists.add(
-              Chapter(
-                itemId: itemIds[i].toString(),
-                title: '第${i + 1}章',
-                order: i + 1,
-              ),
-            );
-          }
-        }
-      }
-    }
-
-    return lists;
+    });
+    _directoryRequests[key] = request;
+    return request;
   }
 
-  /// 5. 完整书籍信息（含分卷目录备用）
-  Future<Map<String, dynamic>?> getBookFull(String bookId) async {
-    final cleanId = bookId.trim();
-    if (cleanId.isEmpty) return null;
-
-    Map<String, dynamic>? meta = _detailCache[cleanId];
-    if (meta == null) {
-      await getBookDetail(cleanId);
-      meta = _detailCache[cleanId];
+  Future<List<Chapter>> _loadBookDirectory(
+    String id, {
+    required bool refresh,
+  }) async {
+    final local = await directoryCache.readLocal(id);
+    if (id.startsWith('local_')) {
+      if (local != null) return local;
+      throw const FanqieApiException('本地章节目录缺失或损坏，请重新选择原文件导入');
     }
+    final saved = await directoryCache.readRemote(id);
+    final cached = saved?.chapters ?? local;
+    directoryWarning.value = null;
+    if (!refresh && cached != null && (saved?.complete ?? true)) return cached;
 
-    if (meta == null) return null;
-
-    final vols = meta['chapterListWithVolume'] as List? ?? [];
-    final cleanedVols = [];
-    for (final vol in vols) {
-      if (vol is List) {
-        final volChapters = [];
-        for (final ch in vol) {
-          if (ch is Map) {
-            volChapters.add({
-              'itemId':
-                  ch['itemId']?.toString() ?? ch['item_id']?.toString() ?? '',
-              'title': FontDecryptor.decryptText(ch['title']?.toString() ?? ''),
-              'realChapterOrder':
-                  int.tryParse(ch['realChapterOrder']?.toString() ?? '1') ?? 1,
-            });
-          }
-        }
-        cleanedVols.add(volChapters);
+    String failure;
+    try {
+      final uri = Uri.https('fanqienovel.com', '/api/reader/directory/detail', {
+        'bookId': id,
+      });
+      final response = await _client
+          .get(uri, headers: _browserHeaders)
+          .timeout(const Duration(seconds: 8));
+      if (response.statusCode != 200) {
+        throw FanqieApiException('目录接口 HTTP ${response.statusCode}');
       }
+      final body = jsonDecode(utf8.decode(response.bodyBytes));
+      if (body is! Map || body['code'] != 0 || body['data'] is! Map) {
+        throw const FormatException('目录接口未返回有效数据');
+      }
+      final chapters = parseBookDirectory(
+        Map<String, dynamic>.from(body['data'] as Map),
+      );
+      await _saveBookDirectory(id, chapters);
+      return chapters;
+    } catch (error) {
+      failure = switch (error) {
+        FanqieApiException() => error.message,
+        TimeoutException() => '目录请求超时',
+        SocketException() || http.ClientException() => '目录网络连接失败',
+        _ => '目录接口响应无效',
+      };
+    }
+    if (cached != null) {
+      directoryWarning.value = '$failure，已使用本地目录';
+      return cached;
     }
 
+    // A separate fallback, not a second wrapper around the same failed HTML.
+    try {
+      var meta = _detailCache[id];
+      if (meta != null) {
+        try {
+          final chapters = parseBookDirectory(meta);
+          await _saveBookDirectory(id, chapters);
+          return chapters;
+        } on FormatException {
+          /* Incomplete detail metadata is not a cache hit. */
+        }
+      }
+      await getBookDetail(id).timeout(const Duration(seconds: 10));
+      meta = _detailCache[id];
+      if (meta != null) {
+        final chapters = parseBookDirectory(meta);
+        await _saveBookDirectory(id, chapters);
+        return chapters;
+      }
+    } catch (_) {}
+    throw FanqieApiException('无法获取章节目录：$failure；详情页备用通道也未返回目录，请重试');
+  }
+
+  Future<void> _saveBookDirectory(String id, List<Chapter> chapters) async {
+    try {
+      await directoryCache.save(id, chapters, complete: true);
+    } on FileSystemException {
+      // Online reading still works, but never silently promise offline storage.
+      directoryWarning.value = '目录已加载，但保存失败，请检查存储空间';
+    }
+  }
+
+  /// Preserve the public full-book shape while using the independent catalog.
+  Future<Map<String, dynamic>?> getBookFull(String bookId) async {
+    final chapters = await getBookDirectory(bookId);
+    if (chapters.isEmpty) return null;
+    final groups = <String, List<Map<String, dynamic>>>{};
+    for (final chapter in chapters) {
+      groups.putIfAbsent(chapter.volumeTitle, () => []).add({
+        'itemId': chapter.itemId,
+        'title': chapter.title,
+        'realChapterOrder': chapter.order,
+        'volume_name': chapter.volumeTitle,
+      });
+    }
     return {
-      'chapterListWithVolume': cleanedVols,
-      'allItemIds': meta['allItemIds'] ?? [],
+      'chapterListWithVolume': groups.values.toList(),
+      'allItemIds': chapters.map((c) => c.itemId).toList(),
     };
   }
 
@@ -671,6 +684,8 @@ class FanqieBackendEngine {
     final total = chapters.length;
     if (total == 0) return;
 
+    if (isCancelled?.call() == true) return;
+    await directoryCache.saveDownloaded(bookId, chapters);
     final offlineDir = await getOfflineBookDir(bookId);
     int completed = 0;
     int nextIndex = 0;
@@ -761,9 +776,11 @@ class FanqieBackendEngine {
 
   /// 提取页面中 window.__INITIAL_STATE__ JSON 对象
   Map<String, dynamic>? _extractInitialState(String html) {
-    final idx = html.indexOf('window.__INITIAL_STATE__=');
-    if (idx != -1) {
-      int start = idx + 'window.__INITIAL_STATE__='.length;
+    final assignment = RegExp(
+      r'window\.__INITIAL_STATE__\s*=\s*',
+    ).firstMatch(html);
+    if (assignment != null) {
+      int start = assignment.end;
       while (start < html.length &&
           (html[start] == ' ' ||
               html[start] == '\n' ||

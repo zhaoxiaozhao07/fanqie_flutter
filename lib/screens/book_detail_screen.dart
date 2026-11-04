@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import '../widgets/book_cover_widget.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -18,15 +19,16 @@ import '../services/reader_settings_repository.dart';
 /// 书籍详情页面
 class BookDetailScreen extends StatefulWidget {
   final Book book;
+  final ApiService? apiService;
 
-  const BookDetailScreen({super.key, required this.book});
+  const BookDetailScreen({super.key, required this.book, this.apiService});
 
   @override
   State<BookDetailScreen> createState() => _BookDetailScreenState();
 }
 
 class _BookDetailScreenState extends State<BookDetailScreen> {
-  final ApiService _apiService = ApiService();
+  late final ApiService _apiService = widget.apiService ?? ApiService();
   final BookshelfService _bookshelfService = BookshelfService();
   final ReadingHistoryService _readingHistoryService = ReadingHistoryService();
   final DownloadService _downloadService = DownloadService();
@@ -34,6 +36,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   Book? _bookDetail;
   List<Chapter>? _chapters;
   bool _isLoading = true;
+  String? _directoryError;
+  String? _directoryNotice;
+  Future<void>? _directoryRequest;
   bool _abstractExpanded = false;
   bool _isInBookshelf = false;
   CommentPageData? _bookReviews;
@@ -55,38 +60,80 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     super.dispose();
   }
 
-  /// 加载书籍详情与章节
+  /// Detail HTML is optional metadata, not a prerequisite for reading.
   Future<void> _loadBookDetail() async {
-    setState(() => _isLoading = true);
+    unawaited(_loadMetadata());
+    await _loadDirectory(refresh: false);
+  }
 
+  Future<void> _loadMetadata() async {
     try {
       final detail = await _apiService.getBookDetail(widget.book.bookId);
-      final chapters = await _apiService.getBookChapters(widget.book.bookId);
-
-      if (mounted) {
-        setState(() {
-          _bookDetail = detail ?? widget.book;
-          _chapters = chapters;
-          _isLoading = false;
-        });
-      }
-      await _loadReadingProgress();
-    } catch (e) {
-      if (mounted) {
-        setState(() {
-          _bookDetail = widget.book;
-          _isLoading = false;
-        });
-      }
-      await _loadReadingProgress();
+      if (mounted && detail != null) setState(() => _bookDetail = detail);
+    } catch (_) {
+      /* Keep the book metadata supplied by home/search. */
     }
+  }
+
+  Future<void> _loadDirectory({bool refresh = true}) {
+    final pending = _directoryRequest;
+    if (pending != null) return pending;
+    setState(() {
+      _isLoading = _chapters == null;
+      _directoryError = null;
+    });
+    late final Future<void> request;
+    request =
+        () async {
+          try {
+            final chapters = await _apiService.getBookChapters(
+              widget.book.bookId,
+              refresh: refresh,
+            );
+            if (chapters.isEmpty) throw const FormatException('没有取得有效章节目录');
+            if (mounted) {
+              setState(() {
+                _chapters = chapters;
+                _directoryNotice = _apiService.engine.directoryWarning.value;
+              });
+            }
+          } catch (error) {
+            if (mounted) {
+              setState(() {
+                _chapters ??= [];
+                _directoryError = error.toString();
+              });
+            }
+          } finally {
+            if (mounted) setState(() => _isLoading = false);
+          }
+          if (mounted) await _loadReadingProgress();
+        }().whenComplete(() {
+          if (identical(_directoryRequest, request)) _directoryRequest = null;
+        });
+    _directoryRequest = request;
+    return request;
+  }
+
+  Future<bool> _ensureDirectory() async {
+    if (_chapters?.isNotEmpty == true) return true;
+    await _loadDirectory();
+    if (!mounted) return false;
+    if (_chapters?.isNotEmpty == true) return true;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(_directoryError ?? '章节目录暂不可用，请重试')));
+    return false;
   }
 
   /// 异步加载书籍评价与书评
   Future<void> _loadBookReviews() async {
     setState(() => _isLoadingReviews = true);
     try {
-      final reviews = await _apiService.getBookReviews(widget.book.bookId, count: 5);
+      final reviews = await _apiService.getBookReviews(
+        widget.book.bookId,
+        count: 5,
+      );
       if (mounted) {
         setState(() {
           _bookReviews = reviews;
@@ -121,7 +168,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     try {
       final prefs = await SharedPreferences.getInstance();
       final index = prefs.getInt('read_progress_index_${widget.book.bookId}');
-      final title = prefs.getString('read_progress_title_${widget.book.bookId}');
+      final title = prefs.getString(
+        'read_progress_title_${widget.book.bookId}',
+      );
       await _bookshelfService.initialize();
       final inShelf = _bookshelfService.isInBookshelf(widget.book.bookId);
 
@@ -137,7 +186,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       await _readingHistoryService.recordReading(
         book: _bookDetail ?? widget.book,
         chapterIndex: index ?? 0,
-        chapterTitle: title ?? (_chapters?.isNotEmpty == true ? _chapters!.first.title : '开始阅读'),
+        chapterTitle:
+            title ??
+            (_chapters?.isNotEmpty == true ? _chapters!.first.title : '开始阅读'),
       );
     } catch (_) {}
   }
@@ -156,7 +207,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       });
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text(added ? '已加入书架：《${book.bookName}》' : '已从书架移出：《${book.bookName}》'),
+          content: Text(
+            added ? '已加入书架：《${book.bookName}》' : '已从书架移出：《${book.bookName}》',
+          ),
           duration: const Duration(seconds: 2),
         ),
       );
@@ -164,15 +217,12 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   }
 
   Future<void> _openReader(int chapterIndex, {bool resume = false}) async {
-    if (_chapters == null || _chapters!.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('正在加载章节目录，请稍候...')),
-      );
-      return;
-    }
+    if (!await _ensureDirectory() || !mounted) return;
 
     final targetIndex = chapterIndex.clamp(0, _chapters!.length - 1);
-    final readerSettings = await ReaderSettingsRepository().load(widget.book.bookId);
+    final readerSettings = await ReaderSettingsRepository().load(
+      widget.book.bookId,
+    );
     if (!mounted) return;
     Navigator.push(
       context,
@@ -193,8 +243,8 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   }
 
   /// 显示完整章节目录弹窗
-  void _showAllChaptersModal() {
-    if (_chapters == null || _chapters!.isEmpty) return;
+  Future<void> _showAllChaptersModal() async {
+    if (!await _ensureDirectory() || !mounted) return;
 
     final searchController = TextEditingController();
     var isReverse = false;
@@ -258,7 +308,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       ),
                     ),
                     Padding(
-                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 16,
+                        vertical: 4,
+                      ),
                       child: TextField(
                         controller: searchController,
                         style: const TextStyle(fontSize: 14),
@@ -268,7 +321,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                           prefixIcon: const Icon(Icons.search, size: 20),
                           filled: true,
                           fillColor: const Color(0xFFF2F4F7),
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 12,
+                            vertical: 8,
+                          ),
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(10),
                             borderSide: BorderSide.none,
@@ -310,7 +366,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                                       vertical: 2,
                                     ),
                                     decoration: BoxDecoration(
-                                      color: AppTheme.primaryColor.withValues(alpha: 0.1),
+                                      color: AppTheme.primaryColor.withValues(
+                                        alpha: 0.1,
+                                      ),
                                       borderRadius: BorderRadius.circular(4),
                                     ),
                                     child: const Text(
@@ -342,22 +400,15 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   }
 
   /// 启动后台下载
-  void _startDownload(String format) {
-    if (_chapters == null || _chapters!.isEmpty) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('无法获取章节目录')),
-        );
-      }
-      return;
-    }
+  Future<void> _startDownload(String format) async {
+    if (!await _ensureDirectory() || !mounted) return;
 
     final book = _bookDetail ?? widget.book;
     if (_downloadService.isDownloading(book.bookId)) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('该书籍正在后台下载中')),
-        );
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('该书籍正在后台下载中')));
       }
       return;
     }
@@ -387,10 +438,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       return;
     }
 
-    final format = await DownloadDialog.show(
-      context,
-      book.bookName,
-    );
+    final format = await DownloadDialog.show(context, book.bookName);
 
     if (format != null && mounted) {
       _startDownload(format);
@@ -408,7 +456,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
           children: [
             Text('格式：${task.format}'),
             const SizedBox(height: 6),
-            Text('进度：${task.current} / ${task.total} (${(task.progress * 100).toStringAsFixed(1)}%)'),
+            Text(
+              '进度：${task.current} / ${task.total} (${(task.progress * 100).toStringAsFixed(1)}%)',
+            ),
             const SizedBox(height: 10),
             LinearProgressIndicator(
               value: task.progress > 0 ? task.progress : null,
@@ -416,7 +466,13 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               backgroundColor: AppTheme.primaryLight,
             ),
             const SizedBox(height: 10),
-            Text(task.message, style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary)),
+            Text(
+              task.message,
+              style: const TextStyle(
+                fontSize: 12,
+                color: AppTheme.textSecondary,
+              ),
+            ),
           ],
         ),
         actions: [
@@ -497,7 +553,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       : '下载',
                 ),
                 style: OutlinedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 12,
+                  ),
                   side: const BorderSide(color: AppTheme.primaryColor),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(24),
@@ -508,11 +567,15 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               // 阅读按钮
               Expanded(
                 child: ElevatedButton.icon(
-                  onPressed: () => _openReader(_lastReadIndex ?? 0, resume: true),
+                  onPressed: () =>
+                      _openReader(_lastReadIndex ?? 0, resume: true),
                   icon: const Icon(Icons.menu_book_rounded, size: 20),
                   label: Text(
                     readText,
-                    style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 15),
+                    style: const TextStyle(
+                      fontWeight: FontWeight.bold,
+                      fontSize: 15,
+                    ),
                   ),
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppTheme.primaryColor,
@@ -546,8 +609,15 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               pinned: true,
               actions: [
                 IconButton(
+                  icon: const Icon(Icons.refresh, color: Colors.white),
+                  tooltip: '刷新章节目录',
+                  onPressed: () => _loadDirectory(),
+                ),
+                IconButton(
                   icon: Icon(
-                    _isInBookshelf ? Icons.bookmark_added : Icons.bookmark_add_outlined,
+                    _isInBookshelf
+                        ? Icons.bookmark_added
+                        : Icons.bookmark_add_outlined,
                     color: Colors.white,
                   ),
                   tooltip: _isInBookshelf ? '已在书架（点击移出）' : '加入书架',
@@ -565,12 +635,17 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
             if (activeTask != null)
               SliverToBoxAdapter(
                 child: Container(
-                  margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+                  margin: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 6,
+                  ),
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
                     color: AppTheme.primaryLight,
                     borderRadius: BorderRadius.circular(12),
-                    border: Border.all(color: AppTheme.primaryColor.withValues(alpha: 0.3)),
+                    border: Border.all(
+                      color: AppTheme.primaryColor.withValues(alpha: 0.3),
+                    ),
                   ),
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
@@ -596,12 +671,16 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                           ),
                           const Spacer(),
                           TextButton(
-                            onPressed: () => _downloadService.cancelDownload(book.bookId),
+                            onPressed: () =>
+                                _downloadService.cancelDownload(book.bookId),
                             style: TextButton.styleFrom(
                               visualDensity: VisualDensity.compact,
                               padding: EdgeInsets.zero,
                             ),
-                            child: const Text('取消下载', style: TextStyle(color: Colors.red, fontSize: 12)),
+                            child: const Text(
+                              '取消下载',
+                              style: TextStyle(color: Colors.red, fontSize: 12),
+                            ),
                           ),
                         ],
                       ),
@@ -609,7 +688,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       ClipRRect(
                         borderRadius: BorderRadius.circular(3),
                         child: LinearProgressIndicator(
-                          value: activeTask.progress > 0 ? activeTask.progress : null,
+                          value: activeTask.progress > 0
+                              ? activeTask.progress
+                              : null,
                           backgroundColor: Colors.white,
                           color: AppTheme.primaryColor,
                           minHeight: 4,
@@ -618,9 +699,33 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       const SizedBox(height: 4),
                       Text(
                         activeTask.message,
-                        style: const TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AppTheme.textSecondary,
+                        ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+
+            if (_directoryError != null || _directoryNotice != null)
+              SliverToBoxAdapter(
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        _directoryError ?? _directoryNotice!,
+                        key: const ValueKey('directory-error'),
+                      ),
+                      TextButton.icon(
+                        onPressed: () => _loadDirectory(),
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('重试章节目录'),
                       ),
                     ],
                   ),
@@ -631,7 +736,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
             if (_chapters != null && _chapters!.isNotEmpty)
               SliverToBoxAdapter(
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 8,
+                  ),
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -651,7 +759,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       TextButton.icon(
                         onPressed: _showAllChaptersModal,
                         icon: const Icon(Icons.format_list_bulleted, size: 16),
-                        label: const Text('完整目录', style: TextStyle(fontSize: 13)),
+                        label: const Text(
+                          '完整目录',
+                          style: TextStyle(fontSize: 13),
+                        ),
                       ),
                     ],
                   ),
@@ -669,8 +780,12 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       '${index + 1}',
                       style: TextStyle(
                         fontSize: 13,
-                        color: isCurrent ? AppTheme.primaryColor : AppTheme.textSecondary,
-                        fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                        color: isCurrent
+                            ? AppTheme.primaryColor
+                            : AppTheme.textSecondary,
+                        fontWeight: isCurrent
+                            ? FontWeight.bold
+                            : FontWeight.normal,
                       ),
                     ),
                     title: Text(
@@ -679,13 +794,25 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       overflow: TextOverflow.ellipsis,
                       style: TextStyle(
                         fontSize: 14,
-                        color: isCurrent ? AppTheme.primaryColor : AppTheme.textPrimary,
-                        fontWeight: isCurrent ? FontWeight.bold : FontWeight.normal,
+                        color: isCurrent
+                            ? AppTheme.primaryColor
+                            : AppTheme.textPrimary,
+                        fontWeight: isCurrent
+                            ? FontWeight.bold
+                            : FontWeight.normal,
                       ),
                     ),
                     trailing: isCurrent
-                        ? const Icon(Icons.bookmark, size: 18, color: AppTheme.primaryColor)
-                        : const Icon(Icons.arrow_forward_ios, size: 12, color: AppTheme.textHint),
+                        ? const Icon(
+                            Icons.bookmark,
+                            size: 18,
+                            color: AppTheme.primaryColor,
+                          )
+                        : const Icon(
+                            Icons.arrow_forward_ios,
+                            size: 12,
+                            color: AppTheme.textHint,
+                          ),
                     onTap: () => _openReader(index),
                   );
                 }, childCount: _chapters!.length > 20 ? 20 : _chapters!.length),
@@ -699,7 +826,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                     child: OutlinedButton(
                       onPressed: _showAllChaptersModal,
                       style: OutlinedButton.styleFrom(
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(20),
+                        ),
                       ),
                       child: Text('查看剩余 ${_chapters!.length - 20} 章全部目录'),
                     ),
@@ -723,7 +852,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
           child: SizedBox(
             width: 18,
             height: 18,
-            child: CircularProgressIndicator(strokeWidth: 2, color: AppTheme.primaryColor),
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: AppTheme.primaryColor,
+            ),
           ),
         ),
       );
@@ -767,7 +899,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                   if (_bookReviews != null && _bookReviews!.total > 0)
                     Text(
                       '(${_bookReviews!.total}条)',
-                      style: const TextStyle(fontSize: 12, color: AppTheme.textSecondary),
+                      style: const TextStyle(
+                        fontSize: 12,
+                        color: AppTheme.textSecondary,
+                      ),
                     ),
                 ],
               ),
@@ -794,11 +929,16 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       CircleAvatar(
                         radius: 11,
                         backgroundColor: Colors.grey.shade200,
-                        backgroundImage: r.avatar.isNotEmpty ? NetworkImage(r.avatar) : null,
+                        backgroundImage: r.avatar.isNotEmpty
+                            ? NetworkImage(r.avatar)
+                            : null,
                         child: r.avatar.isEmpty
                             ? Text(
                                 r.userName.isNotEmpty ? r.userName[0] : '友',
-                                style: const TextStyle(fontSize: 9, color: AppTheme.textPrimary),
+                                style: const TextStyle(
+                                  fontSize: 9,
+                                  color: AppTheme.textPrimary,
+                                ),
                               )
                             : null,
                       ),
@@ -820,11 +960,18 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(Icons.thumb_up_alt_outlined, size: 11, color: AppTheme.textHint),
+                            const Icon(
+                              Icons.thumb_up_alt_outlined,
+                              size: 11,
+                              color: AppTheme.textHint,
+                            ),
                             const SizedBox(width: 3),
                             Text(
                               '${r.diggCount}',
-                              style: const TextStyle(fontSize: 11, color: AppTheme.textHint),
+                              style: const TextStyle(
+                                fontSize: 11,
+                                color: AppTheme.textHint,
+                              ),
                             ),
                           ],
                         ),
@@ -966,7 +1113,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                 borderRadius: BorderRadius.circular(16),
                 child: _buildTag(
                   _isInBookshelf ? '已在书架' : '+ 加入书架',
-                  _isInBookshelf ? AppTheme.primaryColor : AppTheme.tagCompleted,
+                  _isInBookshelf
+                      ? AppTheme.primaryColor
+                      : AppTheme.tagCompleted,
                 ),
               ),
               _buildTag(

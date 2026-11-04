@@ -9,7 +9,8 @@ import '../services/download_service.dart';
 /// 下载任务管理面板 (ModalBottomSheet)
 /// 点击主界面右上角下载图标后弹出，实时查看后台下载进度与历史
 class DownloadManagerSheet extends StatefulWidget {
-  const DownloadManagerSheet({super.key});
+  final ApiService? apiService;
+  const DownloadManagerSheet({super.key, this.apiService});
 
   static Future<void> show(BuildContext context) {
     return showModalBottomSheet(
@@ -26,7 +27,14 @@ class DownloadManagerSheet extends StatefulWidget {
 
 class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
   final DownloadService _downloadService = DownloadService();
-  final ApiService _apiService = ApiService();
+  late final ApiService _apiService = widget.apiService ?? ApiService();
+  bool _openingReader = false;
+
+  @override
+  void dispose() {
+    _apiService.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -56,7 +64,10 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
                 }
 
                 return ListView(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 12,
+                  ),
                   children: [
                     if (activeTasks.isNotEmpty) ...[
                       _buildSectionTitle('正在下载 (${activeTasks.length})'),
@@ -71,7 +82,9 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
                     if (allTasks.any((t) => !t.isActive)) ...[
                       _buildSectionTitle('最近任务'),
                       const SizedBox(height: 8),
-                      for (final task in allTasks.where((t) => !t.isActive)) ...[
+                      for (final task in allTasks.where(
+                        (t) => !t.isActive,
+                      )) ...[
                         _buildFinishedTaskCard(task),
                         const SizedBox(height: 10),
                       ],
@@ -104,7 +117,11 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
           ),
           Row(
             children: [
-              const Icon(Icons.downloading_rounded, color: AppTheme.primaryColor, size: 22),
+              const Icon(
+                Icons.downloading_rounded,
+                color: AppTheme.primaryColor,
+                size: 22,
+              ),
               const SizedBox(width: 8),
               const Text(
                 '下载任务管理',
@@ -116,7 +133,11 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
               ),
               const Spacer(),
               IconButton(
-                icon: const Icon(Icons.close, size: 20, color: AppTheme.textSecondary),
+                icon: const Icon(
+                  Icons.close,
+                  size: 20,
+                  color: AppTheme.textSecondary,
+                ),
                 onPressed: () => Navigator.pop(context),
               ),
             ],
@@ -180,7 +201,10 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
                     Row(
                       children: [
                         Container(
-                          padding: const EdgeInsets.symmetric(horizontal: 5, vertical: 1),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 5,
+                            vertical: 1,
+                          ),
                           decoration: BoxDecoration(
                             color: AppTheme.primaryLight,
                             borderRadius: BorderRadius.circular(4),
@@ -197,7 +221,10 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
                         const SizedBox(width: 8),
                         Text(
                           '${task.current} / ${task.total} 章',
-                          style: const TextStyle(fontSize: 11, color: AppTheme.textHint),
+                          style: const TextStyle(
+                            fontSize: 11,
+                            color: AppTheme.textHint,
+                          ),
                         ),
                       ],
                     ),
@@ -209,7 +236,10 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
                 style: OutlinedButton.styleFrom(
                   foregroundColor: Colors.red,
                   side: const BorderSide(color: Colors.redAccent, width: 0.8),
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 4,
+                  ),
                   minimumSize: Size.zero,
                   tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                 ),
@@ -286,10 +316,18 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  isSuccess ? '下载成功 (${task.format})' : (task.status == DownloadTaskStatus.cancelled ? '已取消' : '下载失败'),
+                  isSuccess
+                      ? '下载成功 (${task.format})'
+                      : (task.status == DownloadTaskStatus.cancelled
+                            ? '已取消'
+                            : '下载失败'),
                   style: TextStyle(
                     fontSize: 12,
-                    color: isSuccess ? Colors.green : (task.status == DownloadTaskStatus.cancelled ? Colors.grey : Colors.red),
+                    color: isSuccess
+                        ? Colors.green
+                        : (task.status == DownloadTaskStatus.cancelled
+                              ? Colors.grey
+                              : Colors.red),
                   ),
                 ),
               ],
@@ -298,7 +336,10 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
           if (isSuccess) ...[
             FilledButton.tonal(
               style: FilledButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 12,
+                  vertical: 6,
+                ),
                 minimumSize: Size.zero,
                 tapTargetSize: MaterialTapTargetSize.shrinkWrap,
               ),
@@ -307,7 +348,11 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
             ),
           ] else ...[
             IconButton(
-              icon: const Icon(Icons.delete_outline, size: 18, color: Colors.grey),
+              icon: const Icon(
+                Icons.delete_outline,
+                size: 18,
+                color: Colors.grey,
+              ),
               onPressed: () => _downloadService.removeTask(task.id),
             ),
           ],
@@ -335,7 +380,11 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          Icon(Icons.cloud_download_outlined, size: 54, color: Colors.grey.shade400),
+          Icon(
+            Icons.cloud_download_outlined,
+            size: 54,
+            color: Colors.grey.shade400,
+          ),
           const SizedBox(height: 12),
           const Text(
             '暂无进行中的下载任务',
@@ -375,19 +424,32 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
   }
 
   void _openReader(Book book) async {
-    Navigator.pop(context);
-    final chapters = await _apiService.getBookChapters(book.bookId);
-    if (!mounted || chapters.isEmpty) return;
-
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => ReaderScreen(
-          book: book,
-          chapters: chapters,
-          initialChapterIndex: 0,
+    if (_openingReader) return;
+    _openingReader = true;
+    try {
+      // Keep this route/context alive until the asynchronous catalog succeeds.
+      final chapters = await _apiService.getBookChapters(book.bookId);
+      if (!mounted) return;
+      if (chapters.isEmpty) throw const FormatException('章节目录暂不可用，请重试');
+      final navigator = Navigator.of(context);
+      navigator.pop();
+      navigator.push(
+        MaterialPageRoute(
+          builder: (context) => ReaderScreen(
+            book: book,
+            chapters: chapters,
+            initialChapterIndex: 0,
+          ),
         ),
-      ),
-    );
+      );
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(error.toString())));
+      }
+    } finally {
+      _openingReader = false;
+    }
   }
 }

@@ -194,7 +194,7 @@ class BookshelfService {
       if (!force && book.creationStatus == '已完结') continue;
 
       try {
-        final chapters = await apiService.getBookDirectory(book.bookId);
+        final chapters = await apiService.getBookDirectory(book.bookId, refresh: true);
         if (generation != _generation) return updatesFound;
         if (chapters.isNotEmpty) {
           final remoteCount = chapters.length;

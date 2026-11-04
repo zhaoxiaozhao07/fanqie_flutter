@@ -118,7 +118,12 @@ void onlineReaderTests({bool platform = false}) {
               ),
             ),
           );
-          for (var i = 0; i < 100; i++) {
+          final renderedPictures = find.descendant(
+            of: find.byType(ReaderIllustrationView),
+            matching: find.byType(RawImage),
+          );
+          var stableFrames = 0;
+          for (var i = 0; i < 200; i++) {
             if (platform) {
               await Future<void>.delayed(const Duration(milliseconds: 30));
             } else {
@@ -128,10 +133,15 @@ void onlineReaderTests({bool platform = false}) {
             }
             await tester.pump(const Duration(milliseconds: 30));
             if (tester
-                    .widgetList<RawImage>(find.byType(RawImage))
+                    .widgetList<RawImage>(renderedPictures)
                     .any((w) => w.image != null) &&
                 find.byType(CircularProgressIndicator).evaluate().isEmpty) {
-              break;
+              // A temporary restoration screenshot is not the illustration.
+              // Allow asynchronous repair/rebinding and the native codec to
+              // settle, rather than stopping on one transient ready frame.
+              if (++stableFrames >= 4) break;
+            } else {
+              stableFrames = 0;
             }
           }
           await tester.pumpAndSettle();
@@ -140,7 +150,7 @@ void onlineReaderTests({bool platform = false}) {
           expect(find.textContaining('本章内容为空'), findsNothing);
           expect(
             tester
-                .widgetList<RawImage>(find.byType(RawImage))
+                .widgetList<RawImage>(renderedPictures)
                 .any((w) => w.image != null),
             true,
           );

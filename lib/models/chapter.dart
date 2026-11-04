@@ -28,7 +28,7 @@ class Chapter {
     return Chapter(
       itemId: json['item_id']?.toString() ?? '',
       title: json['title']?.toString() ?? '第${index + 1}章',
-      order: index + 1,
+      order: int.tryParse(json['order']?.toString() ?? '') ?? index + 1,
       volumeTitle: vol,
       illustrations: ReaderIllustration.parseList(json['illustrations']),
     );
