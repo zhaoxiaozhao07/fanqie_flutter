@@ -111,6 +111,30 @@ class _Client extends Fake implements HttpClient {
 
 void main() {
   test(
+    'encrypted mobile payload preserves pictures before plain-text cleaning',
+    () async {
+      final response = _chapter(1);
+      (response['data'] as Map)['content'] = _encrypt(
+        utf8.encode(
+          '<h1>第一章</h1><p>图前<img src="https://p3-novel.byteimg.com/a.png"/>图后</p>',
+        ),
+        _key,
+      );
+      final client = _Client(
+        (uri, post) async => _Response(post ? _registration(1) : response),
+      );
+      final document = await FanqieMobileGateway(
+        client: client,
+      ).fetchChapterDocument('illustrated');
+      expect(document!.text, '图前图后');
+      expect(document.images.single.offset, 2);
+      expect(
+        document.images.single.source,
+        'https://p3-novel.byteimg.com/a.png',
+      );
+    },
+  );
+  test(
     'malformed UTF-8 is never returned as replacement-character正文',
     () async {
       final corrupted = _chapter(1, compressed: true);

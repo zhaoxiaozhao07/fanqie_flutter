@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import '../app_theme.dart';
 import '../main.dart';
 import '../services/cover_cache_service.dart';
+import '../services/book_image_fetcher.dart';
 
 /// 多级自愈书籍封面组件
 /// 优先级：本地离线持久化文件 > 已下载 EPUB 内部提取 > 网络加载与自动备份缓存 > 占位图
@@ -32,6 +33,7 @@ class BookCoverWidget extends StatefulWidget {
 class _BookCoverWidgetState extends State<BookCoverWidget> {
   final CoverCacheService _cacheService = CoverCacheService();
   File? _localCoverFile;
+  int _generation = 0;
 
   @override
   void initState() {
@@ -50,52 +52,36 @@ class _BookCoverWidgetState extends State<BookCoverWidget> {
   }
 
   Future<void> _checkCoverSource() async {
-    // 1. 优先检查本地离线持久化封面
-    final coverFile = await _cacheService.getCoverFile(widget.bookId);
-    if (await coverFile.exists() && (await coverFile.length()) > 100) {
-      if (mounted) {
-        setState(() {
-          _localCoverFile = coverFile;
-        });
+    final generation = ++_generation;
+    final bookId = widget.bookId;
+    final epubPath = widget.epubPath;
+    final url = _cleanUrl(widget.thumbUrl);
+    if (mounted) setState(() => _localCoverFile = null);
+    try {
+      File? file;
+      if (await _cacheService.hasLocalCover(bookId)) {
+        file = await _cacheService.getCoverFile(bookId);
       }
-      return;
-    }
-
-    // 2. 检查是否可从已下载的 EPUB 文件中提取封面
-    if (widget.epubPath != null && widget.epubPath!.isNotEmpty) {
-      final extracted = await _cacheService.extractCoverFromEpub(widget.bookId, widget.epubPath!);
-      if (extracted != null && mounted) {
-        setState(() {
-          _localCoverFile = extracted;
-        });
-        return;
+      if (file == null && epubPath != null && epubPath.isNotEmpty) {
+        file = await _cacheService.extractCoverFromEpub(bookId, epubPath);
       }
-    }
-
-    // 3. 网络图片自动触发后台本地备份
-    final netUrl = _cleanUrl(widget.thumbUrl);
-    if (netUrl != null) {
-      _cacheService.cacheNetworkCover(widget.bookId, netUrl).then((cached) {
-        if (cached != null && mounted && _localCoverFile == null) {
-          setState(() {
-            _localCoverFile = cached;
-          });
+      if (file == null && url != null) {
+        file = await _cacheService.cacheNetworkCover(bookId, url);
+      }
+      if (mounted && generation == _generation && file != null) {
+        await FileImage(file).evict();
+        if (mounted && generation == _generation) {
+          setState(() => _localCoverFile = file);
         }
-      });
-    }
-
-    if (mounted) {
-      setState(() {
-      });
+      }
+    } catch (_) {
+      // A removed/unreadable cover must not break the shelf.
     }
   }
 
   String? _cleanUrl(String? url) {
     if (url == null || url.isEmpty) return null;
-    var clean = url.trim();
-    if (clean.startsWith('http://')) {
-      clean = clean.replaceFirst('http://', 'https://');
-    }
+    final clean = BookImageFetcher.normalize(url);
     return clean.startsWith('https://') ? clean : null;
   }
 
@@ -139,16 +125,18 @@ class _BookCoverWidgetState extends State<BookCoverWidget> {
             ),
             if (widget.bookName.isNotEmpty) ...[
               const SizedBox(height: 4),
-              Text(
-                widget.bookName,
-                style: TextStyle(
-                  fontSize: 10,
-                  fontWeight: FontWeight.w500,
-                  color: AppTheme.primaryColor.withValues(alpha: 0.8),
+              Flexible(
+                child: Text(
+                  widget.bookName,
+                  style: TextStyle(
+                    fontSize: 10,
+                    fontWeight: FontWeight.w500,
+                    color: AppTheme.primaryColor.withValues(alpha: 0.8),
+                  ),
+                  maxLines: 2,
+                  textAlign: TextAlign.center,
+                  overflow: TextOverflow.ellipsis,
                 ),
-                maxLines: 2,
-                textAlign: TextAlign.center,
-                overflow: TextOverflow.ellipsis,
               ),
             ],
           ],

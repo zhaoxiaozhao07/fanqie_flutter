@@ -1,3 +1,4 @@
+import 'book_cover_widget.dart';
 import 'package:flutter/material.dart';
 import '../app_theme.dart';
 import '../models/book.dart';
@@ -159,7 +160,7 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
           Row(
             children: [
               // 封面图
-              _buildBookThumb(task.book.thumbUrl),
+              _buildBookThumb(task.book),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -267,7 +268,7 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
       ),
       child: Row(
         children: [
-          _buildBookThumb(task.book.thumbUrl),
+          _buildBookThumb(task.book),
           const SizedBox(width: 12),
           Expanded(
             child: Column(
@@ -315,33 +316,19 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
     );
   }
 
-  Widget _buildBookThumb(String? thumbUrl) {
-    if (thumbUrl != null && thumbUrl.isNotEmpty) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(4),
-        child: Image.network(
-          thumbUrl,
-          width: 36,
-          height: 48,
-          fit: BoxFit.cover,
-          errorBuilder: (context, error, stackTrace) => _buildThumbPlaceholder(),
-        ),
-      );
-    }
-    return _buildThumbPlaceholder();
-  }
-
-  Widget _buildThumbPlaceholder() {
-    return Container(
+  Widget _buildBookThumb(Book book) => ClipRRect(
+    borderRadius: BorderRadius.circular(4),
+    child: SizedBox(
       width: 36,
       height: 48,
-      decoration: BoxDecoration(
-        color: Colors.grey.shade200,
-        borderRadius: BorderRadius.circular(4),
+      child: BookCoverWidget(
+        bookId: book.bookId,
+        bookName: book.bookName,
+        thumbUrl: book.thumbUrl,
+        iconSize: 18,
       ),
-      child: const Icon(Icons.book, size: 18, color: Colors.grey),
-    );
-  }
+    ),
+  );
 
   Widget _buildEmptyState() {
     return Center(

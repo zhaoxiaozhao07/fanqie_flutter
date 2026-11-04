@@ -1,5 +1,5 @@
 import 'package:flutter/material.dart';
-import 'package:cached_network_image/cached_network_image.dart';
+import '../widgets/book_cover_widget.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../app_theme.dart';
 import '../models/book.dart';
@@ -873,36 +873,11 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                 child: SizedBox(
                   width: 120,
                   height: 160,
-                  child: book.thumbUrl != null && book.thumbUrl!.isNotEmpty
-                      ? CachedNetworkImage(
-                          imageUrl: book.thumbUrl!,
-                          fit: BoxFit.cover,
-                          placeholder: (context, url) => Container(
-                            color: Colors.white24,
-                            child: const Center(
-                              child: CircularProgressIndicator(
-                                color: Colors.white,
-                                strokeWidth: 2,
-                              ),
-                            ),
-                          ),
-                          errorWidget: (context, url, error) => Container(
-                            color: Colors.white24,
-                            child: const Icon(
-                              Icons.book,
-                              size: 48,
-                              color: Colors.white54,
-                            ),
-                          ),
-                        )
-                      : Container(
-                          color: Colors.white24,
-                          child: const Icon(
-                            Icons.book,
-                            size: 48,
-                            color: Colors.white54,
-                          ),
-                        ),
+                  child: BookCoverWidget(
+                    bookId: book.bookId,
+                    bookName: book.bookName,
+                    thumbUrl: book.thumbUrl,
+                  ),
                 ),
               ),
               const SizedBox(width: 16),

@@ -1,3 +1,4 @@
+import 'online_chapter.dart';
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
@@ -87,7 +88,13 @@ class FanqieMobileGateway {
   }
 
   /// 获取单章完整正文（突破 200 字锁章限制）
-  Future<String?> fetchChapter(String itemId, {int retryCount = 0}) async {
+  Future<String?> fetchChapter(String itemId, {int retryCount = 0}) async =>
+      (await fetchChapterDocument(itemId, retryCount: retryCount))?.text;
+
+  Future<OnlineChapter?> fetchChapterDocument(
+    String itemId, {
+    int retryCount = 0,
+  }) async {
     final cleanId = itemId.trim();
     if (cleanId.isEmpty) return null;
 
@@ -118,7 +125,10 @@ class FanqieMobileGateway {
         if (jsonStr.isEmpty) {
           if (retryCount < 1) {
             await Future.delayed(const Duration(milliseconds: 150));
-            return await fetchChapter(itemId, retryCount: retryCount + 1);
+            return await fetchChapterDocument(
+              itemId,
+              retryCount: retryCount + 1,
+            );
           }
           return null;
         }
@@ -135,7 +145,10 @@ class FanqieMobileGateway {
               (respKeyVer != 0 && respKeyVer != _keyVer)) {
             if (retryCount < 2) {
               await refreshKey();
-              return await fetchChapter(itemId, retryCount: retryCount + 1);
+              return await fetchChapterDocument(
+                itemId,
+                retryCount: retryCount + 1,
+              );
             }
             return null;
           }
@@ -147,7 +160,7 @@ class FanqieMobileGateway {
               isCompressed: data['compress_status'] == 1,
             );
             if (plainHtml != null && plainHtml.isNotEmpty) {
-              return cleanMobileHtml(plainHtml);
+              return OnlineChapter.parse(plainHtml);
             }
           }
         }
@@ -158,7 +171,7 @@ class FanqieMobileGateway {
       }
       if (retryCount < 2) {
         await Future.delayed(Duration(milliseconds: 150 * (retryCount + 1)));
-        return await fetchChapter(itemId, retryCount: retryCount + 1);
+        return await fetchChapterDocument(itemId, retryCount: retryCount + 1);
       }
     }
     return null;
@@ -269,64 +282,7 @@ class FanqieMobileGateway {
   }
 
   /// 清洗移动端正文 HTML，还原标准排版与标题
-  static String cleanMobileHtml(String html) {
-    var cleaned = html.replaceAll(
-      RegExp(r'<header[\s\S]*?</header>', caseSensitive: false),
-      '',
-    );
-    String? title;
-    final h1Match = RegExp(
-      r'<h1[^>]*>([\s\S]*?)</h1>',
-      caseSensitive: false,
-    ).firstMatch(cleaned);
-    if (h1Match != null) {
-      title = _stripHtml(h1Match.group(1) ?? '').trim();
-    }
-    final pRegex = RegExp(r'<p[^>]*>([\s\S]*?)</p>', caseSensitive: false);
-    final matches = pRegex.allMatches(cleaned);
-    final paragraphs = <String>[];
-    for (final m in matches) {
-      final pText = _stripHtml(m.group(1) ?? '').trim();
-      if (pText.isNotEmpty) {
-        paragraphs.add(pText);
-      }
-    }
-
-    // 智能去重：若正文第一段为重复的章节标题，自动剔除
-    if (paragraphs.isNotEmpty) {
-      final first = paragraphs.first;
-      if (title != null && title.isNotEmpty) {
-        final cleanFirst = first.replaceAll(RegExp(r'\s+'), '');
-        final cleanTitle = title.replaceAll(RegExp(r'\s+'), '');
-        if (cleanFirst == cleanTitle ||
-            (cleanFirst.length < 35 && cleanFirst.contains(cleanTitle))) {
-          paragraphs.removeAt(0);
-        }
-      } else if (first.length < 30 &&
-          RegExp(r'^第[0-9一二三四五六七八九十百千万]+[章卷回节集]').hasMatch(first)) {
-        paragraphs.removeAt(0);
-      }
-    }
-
-    if (paragraphs.isNotEmpty) {
-      return paragraphs.join('\n\n');
-    }
-    return _stripHtml(
-      cleaned,
-    ).split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).join('\n\n');
-  }
-
-  static String _stripHtml(String html) {
-    return html
-        .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
-        .replaceAll(RegExp(r'<[^>]*>'), '')
-        .replaceAll('&nbsp;', ' ')
-        .replaceAll('&amp;', '&')
-        .replaceAll('&lt;', '<')
-        .replaceAll('&gt;', '>')
-        .replaceAll('&quot;', '"')
-        .replaceAll('&#39;', "'");
-  }
+  static String cleanMobileHtml(String html) => OnlineChapter.parse(html).text;
 
   // ==========================================
   // 官方评论/段评/书评/回复体系

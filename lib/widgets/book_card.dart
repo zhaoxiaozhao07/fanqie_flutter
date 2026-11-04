@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:cached_network_image/cached_network_image.dart';
+import 'book_cover_widget.dart';
 import '../app_theme.dart';
-import '../main.dart';
 import '../models/book.dart';
 import '../services/bookshelf_service.dart';
 
@@ -73,37 +72,10 @@ class BookCard extends StatelessWidget {
       ),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(12),
-        child: book.thumbUrl != null && book.thumbUrl!.isNotEmpty
-            ? CachedNetworkImage(
-                imageUrl: book.thumbUrl!,
-                fit: BoxFit.cover,
-                cacheManager: BookCoverCacheManager.instance,
-                memCacheWidth: 172,
-                memCacheHeight: 236,
-                fadeInDuration: const Duration(milliseconds: 150),
-                fadeOutDuration: const Duration(milliseconds: 100),
-                placeholder: (context, url) => Container(
-                  color: AppTheme.primaryLight,
-                  child: const Center(
-                    child: CircularProgressIndicator(strokeWidth: 2),
-                  ),
-                ),
-                errorWidget: (context, url, error) => _buildPlaceholderCover(),
-              )
-            : _buildPlaceholderCover(),
-      ),
-    );
-  }
-
-  /// 构建占位封面
-  Widget _buildPlaceholderCover() {
-    return Container(
-      color: AppTheme.primaryLight,
-      child: Center(
-        child: Icon(
-          Icons.book,
-          size: 32,
-          color: AppTheme.primaryColor.withValues(alpha: 0.5),
+        child: BookCoverWidget(
+          bookId: book.bookId,
+          bookName: book.bookName,
+          thumbUrl: book.thumbUrl,
         ),
       ),
     );

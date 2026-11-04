@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
-import 'package:cached_network_image/cached_network_image.dart';
+import '../widgets/book_cover_widget.dart';
 import '../app_theme.dart';
-import '../main.dart';
 import '../models/download_history.dart';
 import '../models/reading_history.dart';
 import '../models/chapter.dart';
@@ -435,21 +434,11 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
                     child: SizedBox(
                       width: 50,
                       height: 70,
-                      child: item.thumbUrl != null && item.thumbUrl!.isNotEmpty
-                          ? CachedNetworkImage(
-                              imageUrl: item.thumbUrl!,
-                              fit: BoxFit.cover,
-                              cacheManager: BookCoverCacheManager.instance,
-                              placeholder: (context, url) => Container(color: AppTheme.primaryLight),
-                              errorWidget: (context, url, error) => Container(
-                                color: AppTheme.primaryLight,
-                                child: const Icon(Icons.book, size: 24, color: AppTheme.primaryColor),
-                              ),
-                            )
-                          : Container(
-                              color: AppTheme.primaryLight,
-                              child: const Icon(Icons.book, size: 24, color: AppTheme.primaryColor),
-                            ),
+                      child: BookCoverWidget(
+                        bookId: item.bookId,
+                        bookName: item.bookName,
+                        thumbUrl: item.thumbUrl,
+                      ),
                     ),
                   ),
                 ],
@@ -645,20 +634,11 @@ class HistoryScreenState extends State<HistoryScreen> with SingleTickerProviderS
                 child: SizedBox(
                   width: 44,
                   height: 60,
-                  child: task.book.thumbUrl != null && task.book.thumbUrl!.isNotEmpty
-                      ? CachedNetworkImage(
-                          imageUrl: task.book.thumbUrl!,
-                          fit: BoxFit.cover,
-                          placeholder: (context, url) => Container(color: AppTheme.primaryLight),
-                          errorWidget: (context, url, error) => Container(
-                            color: AppTheme.primaryLight,
-                            child: const Icon(Icons.book, size: 20, color: AppTheme.primaryColor),
-                          ),
-                        )
-                      : Container(
-                          color: AppTheme.primaryLight,
-                          child: const Icon(Icons.book, size: 20, color: AppTheme.primaryColor),
-                        ),
+                  child: BookCoverWidget(
+                    bookId: task.book.bookId,
+                    bookName: task.book.bookName,
+                    thumbUrl: task.book.thumbUrl,
+                  ),
                 ),
               ),
               const SizedBox(width: 12),

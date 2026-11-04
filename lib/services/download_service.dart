@@ -3,7 +3,6 @@ import 'dart:io';
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/book.dart';
@@ -11,6 +10,9 @@ import '../models/chapter.dart';
 import '../models/download_history.dart';
 import 'api_service.dart';
 import 'history_service.dart';
+import 'epub_chapter_content.dart';
+import 'cover_cache_service.dart';
+import 'book_image_fetcher.dart';
 
 /// 下载任务状态
 enum DownloadTaskStatus {
@@ -60,19 +62,23 @@ class DownloadTask {
 }
 
 /// 下载进度回调
-typedef ProgressCallback = void Function(int current, int total, String message);
+typedef ProgressCallback =
+    void Function(int current, int total, String message);
 
 /// 下载服务 - 支持后台异步并发下载与直连后端引擎
 class DownloadService extends ChangeNotifier {
   static final DownloadService _instance = DownloadService._internal();
-  factory DownloadService([ApiService? apiService, HistoryService? historyService]) {
+  factory DownloadService([
+    ApiService? apiService,
+    HistoryService? historyService,
+  ]) {
     if (apiService != null) _instance._apiService = apiService;
     if (historyService != null) _instance._historyService = historyService;
     return _instance;
   }
   DownloadService._internal()
-      : _apiService = ApiService(),
-        _historyService = HistoryService();
+    : _apiService = ApiService(),
+      _historyService = HistoryService();
 
   ApiService _apiService;
   HistoryService _historyService;
@@ -81,7 +87,8 @@ class DownloadService extends ChangeNotifier {
   final List<DownloadTask> _tasks = [];
   List<DownloadTask> get tasks => List.unmodifiable(_tasks);
 
-  List<DownloadTask> get activeTasks => _tasks.where((t) => t.isActive).toList();
+  List<DownloadTask> get activeTasks =>
+      _tasks.where((t) => t.isActive).toList();
   bool get hasActiveTasks => _tasks.any((t) => t.isActive);
 
   DownloadTask? getActiveTask(String bookId) {
@@ -177,7 +184,8 @@ class DownloadService extends ChangeNotifier {
 
           // 节流通知，避免界面刷新过频
           final now = DateTime.now();
-          if (now.difference(lastNotifyTime).inMilliseconds >= 80 || current == total) {
+          if (now.difference(lastNotifyTime).inMilliseconds >= 80 ||
+              current == total) {
             lastNotifyTime = now;
             notifyListeners();
           }
@@ -299,14 +307,17 @@ class DownloadService extends ChangeNotifier {
   /// 组装并保存 TXT 文件
   Future<String?> _assembleAndSaveTxt(Book book, List<Chapter> chapters) async {
     try {
-      final offlineDir = await _apiService.engine.getOfflineBookDir(book.bookId);
+      final offlineDir = await _apiService.engine.getOfflineBookDir(
+        book.bookId,
+      );
       Directory tempDir;
       try {
         tempDir = await getTemporaryDirectory();
       } catch (_) {
         tempDir = Directory.systemTemp;
       }
-      final safeFileName = '${book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '')}.txt';
+      final safeFileName =
+          '${book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '')}.txt';
       final tempFile = File('${tempDir.path}/$safeFileName');
       final sink = tempFile.openWrite();
 
@@ -321,12 +332,18 @@ class DownloadService extends ChangeNotifier {
           sink.writeln('[章节内容下载失败]');
         }
         if (i < chapters.length - 1) {
-          sink.writeln('\n\n${'=' * 40}\n${chapters[i + 1].title}\n${'=' * 40}\n\n');
+          sink.writeln(
+            '\n\n${'=' * 40}\n${chapters[i + 1].title}\n${'=' * 40}\n\n',
+          );
         }
       }
       await sink.close();
 
-      final savedPath = await _saveFileViaPlatform(tempFile.path, safeFileName, 'text/plain');
+      final savedPath = await _saveFileViaPlatform(
+        tempFile.path,
+        safeFileName,
+        'text/plain',
+      );
 
       if (await tempFile.exists()) {
         await tempFile.delete();
@@ -363,10 +380,16 @@ class DownloadService extends ChangeNotifier {
   }
 
   /// 组装并保存 EPUB 文件
-  Future<String?> _assembleAndSaveEpub(Book book, List<Chapter> chapters) async {
+  Future<String?> _assembleAndSaveEpub(
+    Book book,
+    List<Chapter> chapters,
+  ) async {
     try {
-      final offlineDir = await _apiService.engine.getOfflineBookDir(book.bookId);
-      final safeFileName = '${book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '')}.epub';
+      final offlineDir = await _apiService.engine.getOfflineBookDir(
+        book.bookId,
+      );
+      final safeFileName =
+          '${book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '')}.epub';
 
       final chapterContents = <Map<String, String>>[];
       for (int i = 0; i < chapters.length; i++) {
@@ -381,21 +404,34 @@ class DownloadService extends ChangeNotifier {
 
       // 下载封面
       List<int>? coverImageBytes;
+      var coverExtension = 'jpg';
       if (book.thumbUrl != null && book.thumbUrl!.isNotEmpty) {
         try {
-          final res = await http.get(Uri.parse(book.thumbUrl!)).timeout(const Duration(seconds: 15));
-          if (res.statusCode == 200) {
-            coverImageBytes = res.bodyBytes;
+          final file = await CoverCacheService().cacheNetworkCover(
+            book.bookId,
+            book.thumbUrl!,
+          );
+          if (file != null) {
+            final image = await BookImageFetcher.validate(
+              await file.readAsBytes(),
+            );
+            coverImageBytes = image.bytes;
+            coverExtension = image.extension;
           }
         } catch (_) {}
       }
 
       final archive = Archive();
       final uuid = DateTime.now().millisecondsSinceEpoch.toString();
-      final hasCoverImage = coverImageBytes != null && coverImageBytes.isNotEmpty;
+      final hasCoverImage =
+          coverImageBytes != null && coverImageBytes.isNotEmpty;
 
       archive.addFile(
-        ArchiveFile('mimetype', 'application/epub+zip'.length, utf8.encode('application/epub+zip')),
+        ArchiveFile(
+          'mimetype',
+          'application/epub+zip'.length,
+          utf8.encode('application/epub+zip'),
+        ),
       );
 
       final containerXml = '''<?xml version="1.0" encoding="UTF-8"?>
@@ -405,36 +441,49 @@ class DownloadService extends ChangeNotifier {
   </rootfiles>
 </container>''';
       archive.addFile(
-        ArchiveFile('META-INF/container.xml', utf8.encode(containerXml).length, utf8.encode(containerXml)),
+        ArchiveFile(
+          'META-INF/container.xml',
+          utf8.encode(containerXml).length,
+          utf8.encode(containerXml),
+        ),
       );
 
       if (hasCoverImage) {
-        archive.addFile(ArchiveFile('OEBPS/Images/cover.jpg', coverImageBytes.length, coverImageBytes));
+        archive.addFile(
+          ArchiveFile(
+            'OEBPS/Images/cover.$coverExtension',
+            coverImageBytes.length,
+            coverImageBytes,
+          ),
+        );
       }
 
       final manifestItems = StringBuffer();
       final spineItems = StringBuffer();
       final navPoints = StringBuffer();
       final tocLinks = StringBuffer();
+      final imageAssets = <String>{};
 
       if (hasCoverImage) {
         manifestItems.writeln(
-          '    <item id="cover-image" href="Images/cover.jpg" media-type="image/jpeg" properties="cover-image"/>',
+          '    <item id="cover-image" href="Images/cover.$coverExtension" media-type="image/${coverExtension == 'jpg' ? 'jpeg' : coverExtension}" properties="cover-image"/>',
         );
       }
 
       String coverContent;
       if (hasCoverImage) {
-        coverContent = '''
+        coverContent =
+            '''
 <div style="text-align: center; padding: 0; margin: 0;">
   <svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" 
        height="100%" preserveAspectRatio="xMidYMid meet" version="1.1" viewBox="0 0 600 800" width="100%">
-    <image width="600" height="800" xlink:href="Images/cover.jpg"/>
+    <image width="600" height="800" xlink:href="Images/cover.$coverExtension"/>
   </svg>
 </div>
 ''';
       } else {
-        coverContent = '''
+        coverContent =
+            '''
 <div style="text-align: center; padding-top: 30%;">
   <h1 style="font-size: 2em; margin-bottom: 0.5em;">${_escapeXml(book.bookName)}</h1>
   <p style="font-size: 1.2em; color: #666;">作者：${_escapeXml(book.author)}</p>
@@ -449,9 +498,15 @@ class DownloadService extends ChangeNotifier {
       }
       final coverHtml = _generateXhtml('封面', coverContent);
       archive.addFile(
-        ArchiveFile('OEBPS/cover.xhtml', utf8.encode(coverHtml).length, utf8.encode(coverHtml)),
+        ArchiveFile(
+          'OEBPS/cover.xhtml',
+          utf8.encode(coverHtml).length,
+          utf8.encode(coverHtml),
+        ),
       );
-      manifestItems.writeln('    <item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>');
+      manifestItems.writeln(
+        '    <item id="cover" href="cover.xhtml" media-type="application/xhtml+xml"/>',
+      );
       spineItems.writeln('    <itemref idref="cover"/>');
       navPoints.writeln(_generateNavPoint('cover', '封面', 1, 'cover.xhtml'));
 
@@ -469,11 +524,19 @@ class DownloadService extends ChangeNotifier {
 $tocLinks</div>
 ''');
       archive.addFile(
-        ArchiveFile('OEBPS/toc_page.xhtml', utf8.encode(tocPageHtml).length, utf8.encode(tocPageHtml)),
+        ArchiveFile(
+          'OEBPS/toc_page.xhtml',
+          utf8.encode(tocPageHtml).length,
+          utf8.encode(tocPageHtml),
+        ),
       );
-      manifestItems.writeln('    <item id="toc_page" href="toc_page.xhtml" media-type="application/xhtml+xml"/>');
+      manifestItems.writeln(
+        '    <item id="toc_page" href="toc_page.xhtml" media-type="application/xhtml+xml"/>',
+      );
       spineItems.writeln('    <itemref idref="toc_page"/>');
-      navPoints.writeln(_generateNavPoint('toc_page', '目录', 2, 'toc_page.xhtml'));
+      navPoints.writeln(
+        _generateNavPoint('toc_page', '目录', 2, 'toc_page.xhtml'),
+      );
 
       for (var i = 0; i < chapters.length; i++) {
         final chapter = chapterContents[i];
@@ -482,27 +545,54 @@ $tocLinks</div>
         final title = chapter['title'] ?? '第${i + 1}章';
         final content = chapter['content'] ?? '';
 
-        final paragraphs = content
-            .split('\n')
-            .where((p) => p.trim().isNotEmpty)
-            .map((p) => '<p>${_escapeXml(p.trim())}</p>')
-            .join('\n');
+        final images = await _apiService.engine.onlineImages.read(
+          book.bookId,
+          chapters[i].itemId,
+          content,
+          title: title,
+        );
+        for (final image in images) {
+          final asset = image.asset;
+          if (asset == null || image.error != null || !imageAssets.add(asset)) {
+            continue;
+          }
+          final file = File('${offlineDir.path}/$asset');
+          final bytes = await file.readAsBytes();
+          archive.addFile(ArchiveFile('OEBPS/$asset', bytes.length, bytes));
+          final extension = asset.split('.').last;
+          final mime = extension == 'jpg' ? 'jpeg' : extension;
+          manifestItems.writeln(
+            '    <item id="illustration-${imageAssets.length}" href="$asset" media-type="image/$mime"/>',
+          );
+        }
+        final paragraphs = epubChapterContent(content, title, images);
 
         final chapterHtml = _generateXhtml(title, '''
 <h1>${_escapeXml(title)}</h1>
 $paragraphs
 ''');
         archive.addFile(
-          ArchiveFile('OEBPS/$chapterFile', utf8.encode(chapterHtml).length, utf8.encode(chapterHtml)),
+          ArchiveFile(
+            'OEBPS/$chapterFile',
+            utf8.encode(chapterHtml).length,
+            utf8.encode(chapterHtml),
+          ),
         );
 
-        manifestItems.writeln('    <item id="$chapterId" href="$chapterFile" media-type="application/xhtml+xml"/>');
+        manifestItems.writeln(
+          '    <item id="$chapterId" href="$chapterFile" media-type="application/xhtml+xml"/>',
+        );
         spineItems.writeln('    <itemref idref="$chapterId"/>');
-        navPoints.writeln(_generateNavPoint(chapterId, title, i + 3, chapterFile));
+        navPoints.writeln(
+          _generateNavPoint(chapterId, title, i + 3, chapterFile),
+        );
       }
 
-      final coverMeta = hasCoverImage ? '\n    <meta name="cover" content="cover-image"/>' : '';
-      final contentOpf = '''<?xml version="1.0" encoding="UTF-8"?>
+      final coverMeta = hasCoverImage
+          ? '\n    <meta name="cover" content="cover-image"/>'
+          : '';
+      final contentOpf =
+          '''<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="2.0" unique-identifier="BookId">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
     <dc:title>${_escapeXml(book.bookName)}</dc:title>
@@ -522,10 +612,15 @@ $spineItems  </spine>
   </guide>
 </package>''';
       archive.addFile(
-        ArchiveFile('OEBPS/content.opf', utf8.encode(contentOpf).length, utf8.encode(contentOpf)),
+        ArchiveFile(
+          'OEBPS/content.opf',
+          utf8.encode(contentOpf).length,
+          utf8.encode(contentOpf),
+        ),
       );
 
-      final tocNcx = '''<?xml version="1.0" encoding="UTF-8"?>
+      final tocNcx =
+          '''<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE ncx PUBLIC "-//NISO//DTD ncx 2005-1//EN" "http://www.daisy.org/z3986/2005/ncx-2005-1.dtd">
 <ncx xmlns="http://www.daisy.org/z3986/2005/ncx/" version="2005-1">
   <head>
@@ -541,7 +636,11 @@ $spineItems  </spine>
 $navPoints  </navMap>
 </ncx>''';
       archive.addFile(
-        ArchiveFile('OEBPS/toc.ncx', utf8.encode(tocNcx).length, utf8.encode(tocNcx)),
+        ArchiveFile(
+          'OEBPS/toc.ncx',
+          utf8.encode(tocNcx).length,
+          utf8.encode(tocNcx),
+        ),
       );
 
       final zipData = ZipEncoder().encode(archive);
@@ -555,7 +654,11 @@ $navPoints  </navMap>
       final tempFile = File('${tempDir.path}/$safeFileName');
       await tempFile.writeAsBytes(zipData);
 
-      final savedPath = await _saveFileViaPlatform(tempFile.path, safeFileName, 'application/epub+zip');
+      final savedPath = await _saveFileViaPlatform(
+        tempFile.path,
+        safeFileName,
+        'application/epub+zip',
+      );
 
       if (await tempFile.exists()) {
         await tempFile.delete();
@@ -592,7 +695,11 @@ $navPoints  </navMap>
   }
 
   /// 通过平台通道将临时文件保存到 Android 的 Downloads/fanqie，非 Android 环境保存到文档目录
-  Future<String?> _saveFileViaPlatform(String tempFilePath, String safeFileName, String mimeType) async {
+  Future<String?> _saveFileViaPlatform(
+    String tempFilePath,
+    String safeFileName,
+    String mimeType,
+  ) async {
     if (Platform.isAndroid) {
       try {
         final bool success = await platform.invokeMethod('saveToDownloads', {

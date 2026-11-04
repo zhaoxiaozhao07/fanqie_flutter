@@ -58,6 +58,7 @@ class ReaderScreen extends StatefulWidget {
   final bool resumeSavedPosition;
   final ReaderSettingsRecord? initialSettings;
   final Future<Directory> Function()? bookDocuments;
+  final ApiService? apiService;
   final Future<String?> Function(Chapter chapter)? chapterContentLoader;
   final Future<ChapterCommentStats?> Function(Chapter chapter)?
   chapterCommentStatsLoader;
@@ -70,6 +71,7 @@ class ReaderScreen extends StatefulWidget {
     this.resumeSavedPosition = true,
     this.initialSettings,
     this.bookDocuments,
+    this.apiService,
     this.chapterContentLoader,
     this.chapterCommentStatsLoader,
   });
@@ -94,7 +96,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   ReaderSearchHit? _searchHighlight;
   Timer? _restTimer;
   int _restSeconds = 0;
-  final ApiService _apiService = ApiService();
+  late final ApiService _apiService = widget.apiService ?? ApiService();
   final BookshelfService _bookshelfService = BookshelfService();
   final ReadingHistoryService _readingHistoryService = ReadingHistoryService();
   final BookmarkService _bookmarkService = BookmarkService();
@@ -160,6 +162,10 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   // 章节内容内存缓存
   final Map<int, String> _chapterCache = {};
+  final Map<int, List<ReaderIllustration>> _onlineImages = {};
+  final Map<int, String> _imageTexts = {};
+  final Set<int> _imageRepairs = {};
+  final Map<int, int> _imageRefreshVersions = {};
   // 预分割章节段落缓存，避免 build 期间重复 split 造成卡顿
   final Map<int, List<String>> _chapterParagraphsCache = {};
   // 笔记划线 O(1) 索引缓存 ('${chapterIndex}_${paraIndex}' -> List<String>)
@@ -2275,6 +2281,20 @@ class _ReaderScreenState extends State<ReaderScreen>
       if (!ReaderCacheService.isReadable(content)) {
         throw const FormatException('章节为空、未完整提供或本地文件已缺失');
       }
+      final online =
+          !widget.book.bookId.startsWith('local_') &&
+          widget.chapterContentLoader == null &&
+          chapter.content == null;
+      if (online) {
+        _imageTexts[index] = content!;
+        _onlineImages[index] = await _apiService.engine.onlineImages.read(
+          widget.book.bookId,
+          chapter.itemId,
+          content,
+          title: chapter.title,
+        );
+        if (!mounted) return;
+      }
       if ((index - _currentActiveIndex).abs() > 5 &&
           _requestedChapterIndex != index &&
           !_displayedChapters.contains(index)) {
@@ -2298,6 +2318,9 @@ class _ReaderScreenState extends State<ReaderScreen>
         _fetchChapterCommentsCount(chapter.itemId);
       }
       _warmAdjacentPages();
+      // Show cached text immediately; recovering old image metadata must not
+      // block opening a downloaded book when offline.
+      if (online) unawaited(_repairImages(index));
     } catch (error) {
       if (mounted) {
         _chapterErrors[index] = switch (error) {
@@ -2308,6 +2331,53 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
       _prefetchedIndices.remove(index);
     }
+  }
+
+  Future<void> _repairImages(int index) async {
+    final text = _imageTexts[index];
+    if (text == null || !_imageRepairs.add(index)) return;
+    final chapter = widget.chapters[index];
+    String? error;
+    try {
+      await _apiService.engine.repairChapterImages(
+        widget.book.bookId,
+        chapter.itemId,
+        text,
+      );
+    } catch (e) {
+      error = e is FormatException ? e.message.toString() : '插图检查失败，请联网重试';
+    } finally {
+      _imageRepairs.remove(index);
+    }
+    if (!mounted || !_chapterCache.containsKey(index)) return;
+    var images = await _apiService.engine.onlineImages.read(
+      widget.book.bookId,
+      chapter.itemId,
+      text,
+      title: chapter.title,
+    );
+    if (images.isEmpty && error != null) {
+      images = [ReaderIllustration(id: 'online_repair', error: error)];
+    }
+    if (!mounted) return;
+    final changed =
+        jsonEncode(images.map((i) => i.toJson()).toList()) !=
+        jsonEncode(
+          (_onlineImages[index] ?? []).map((i) => i.toJson()).toList(),
+        );
+    // A repaired missing/corrupt file can have identical content-addressed
+    // metadata. Re-resolve the file even then, rather than retaining a failed
+    // FutureBuilder until the user closes the book.
+    if (!changed && error != null) return;
+    _applyReaderSetting(
+      () {
+        _onlineImages[index] = images;
+        _imageRefreshVersions[index] = (_imageRefreshVersions[index] ?? 0) + 1;
+        if (changed) _preparedPages.remove(index);
+      },
+      layoutChanged: changed,
+      persist: false,
+    );
   }
 
   void _notifyComments() {
@@ -2447,6 +2517,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     final removed = _chapterCache.keys.where(stale).toList();
     for (final index in removed) {
       _chapterCache.remove(index);
+      _onlineImages.remove(index);
+      _imageTexts.remove(index);
+      _imageRefreshVersions.remove(index);
       _chapterParagraphsCache.remove(index);
       _chapterIsOffline.remove(index);
       _preparedPages.remove(index);
@@ -3578,11 +3651,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  List<ReaderIllustration> _imagesAt(int chapter, int paragraph) => widget
-      .chapters[chapter]
-      .illustrations
-      .where((e) => e.paragraphIndex == paragraph)
-      .toList();
+  List<ReaderIllustration> _imagesFor(int chapter) =>
+      _onlineImages[chapter] ?? widget.chapters[chapter].illustrations;
+
+  List<ReaderIllustration> _imagesAt(int chapter, int paragraph) =>
+      _imagesFor(chapter).where((e) => e.paragraphIndex == paragraph).toList();
 
   ReaderParagraphGeometry _imageParagraphGeometry(
     String source,
@@ -3606,7 +3679,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     ReaderIllustration image,
     double height,
     ReaderTheme theme,
+    int chapterIndex,
   ) => ReaderIllustrationView(
+    key: ValueKey(
+      'picture-$chapterIndex-${image.id}-${_imageRefreshVersions[chapterIndex] ?? 0}',
+    ),
     bookId: widget.book.bookId,
     image: image,
     height: height,
@@ -3614,6 +3691,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     documents: widget.bookDocuments,
     onTapDown: () => _lastBubbleTapTime = DateTime.now(),
     onViewerChanged: (open) => open ? _beginReaderPanel() : _endReaderPanel(),
+    onRetry: _imageTexts.containsKey(chapterIndex)
+        ? () => _repairImages(chapterIndex)
+        : null,
   );
 
   Widget _buildSingleParagraph(
@@ -3646,6 +3726,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                     MediaQuery.sizeOf(context).height * .75,
                   ),
                   theme,
+                  chapterIndex,
                 )
               else
                 _buildParagraphWithUnderlines(
@@ -4475,7 +4556,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       content: _chapterCache[index] ?? '',
       layout: layout,
       indent: _indentTwoChars,
-      illustrations: chapter.illustrations,
+      illustrations: _imagesFor(index),
     );
     _preparedPages[index] = result;
     return result;
@@ -4799,6 +4880,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                               page.fragments[index].image!,
                               page.fragments[index].height,
                               theme,
+                              address.chapterIndex,
                             )
                           else
                             _buildParagraphWithUnderlines(
@@ -4912,7 +4994,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
 
     final paraKeyStr =
-        'page_${chapter.itemId}_${pageIdx}_$pIdx${chapter.illustrations.any((e) => e.paragraphIndex == pIdx) ? '_$startOffset' : ''}';
+        'page_${chapter.itemId}_${pageIdx}_$pIdx${_imagesFor(chapterIndex).any((e) => e.paragraphIndex == pIdx) ? '_$startOffset' : ''}';
     return DecoratedBox(
       decoration: BoxDecoration(
         color: _highlightedParagraphKey == '${chapter.itemId}_$pIdx'

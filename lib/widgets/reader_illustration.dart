@@ -13,6 +13,7 @@ class ReaderIllustrationView extends StatefulWidget {
   final Future<Directory> Function()? documents;
   final VoidCallback? onTapDown;
   final ValueChanged<bool>? onViewerChanged;
+  final Future<void> Function()? onRetry;
   const ReaderIllustrationView({
     super.key,
     required this.bookId,
@@ -22,12 +23,14 @@ class ReaderIllustrationView extends StatefulWidget {
     this.documents,
     this.onTapDown,
     this.onViewerChanged,
+    this.onRetry,
   });
   @override
   State<ReaderIllustrationView> createState() => _ReaderIllustrationViewState();
 }
 
 class _ReaderIllustrationViewState extends State<ReaderIllustrationView> {
+  bool _retrying = false;
   late Future<File?> _file = _resolve();
   Future<File?> _resolve() async {
     final asset = widget.image.asset;
@@ -35,36 +38,59 @@ class _ReaderIllustrationViewState extends State<ReaderIllustrationView> {
       return null;
     }
     final root = await (widget.documents ?? ReaderCacheService().documents)();
-    final book = Directory(
-      '${root.path}/offline_books/${ReaderCacheService.segment(widget.bookId)}',
-    );
-    final images = Directory('${book.path}/images');
-    final file = File('${book.path}/$asset');
-    if (await FileSystemEntity.isLink(book.path) ||
-        await FileSystemEntity.isLink(images.path) ||
-        await FileSystemEntity.type(file.path, followLinks: false) !=
-            FileSystemEntityType.file) {
-      return null;
+    for (final tree in ['offline_books', 'reader_cache_v2']) {
+      final book = Directory(
+        '${root.path}/$tree/${ReaderCacheService.segment(widget.bookId)}',
+      );
+      final images = Directory('${book.path}/images');
+      final file = File('${book.path}/$asset');
+      if (await FileSystemEntity.isLink(book.path) ||
+          await FileSystemEntity.isLink(images.path) ||
+          await FileSystemEntity.type(file.path, followLinks: false) !=
+              FileSystemEntityType.file) {
+        continue;
+      }
+      final size = await file.length();
+      if (size > 0 && size <= 8 * 1024 * 1024) return file;
     }
-    final size = await file.length();
-    return size > 0 && size <= 8 * 1024 * 1024 ? file : null;
+    return null;
   }
 
   @override
   void didUpdateWidget(covariant ReaderIllustrationView old) {
     super.didUpdateWidget(old);
-    if (old.bookId != widget.bookId || old.image.asset != widget.image.asset) {
+    if (old.bookId != widget.bookId ||
+        old.image.asset != widget.image.asset ||
+        old.image.error != widget.image.error) {
       _file = _resolve();
     }
   }
 
-  Widget _missing() => Center(
-    child: Padding(
-      padding: const EdgeInsets.all(8),
-      child: Text(
-        '${widget.image.error ?? '插图缺失或无法显示'}${widget.image.alt.isEmpty ? '' : '\n${widget.image.alt}'}',
-        textAlign: TextAlign.center,
-        style: TextStyle(fontSize: 12, color: widget.textColor),
+  Widget _missing() => GestureDetector(
+    onTap: widget.onRetry == null || _retrying
+        ? null
+        : () async {
+            setState(() => _retrying = true);
+            try {
+              await widget.onRetry!();
+              _file = _resolve();
+            } finally {
+              if (mounted) setState(() => _retrying = false);
+            }
+          },
+    child: Center(
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Text(
+          '${widget.image.error ?? '插图缺失或无法显示'}${widget.image.alt.isEmpty ? '' : '\n${widget.image.alt}'}'
+          '${widget.onRetry == null
+              ? ''
+              : _retrying
+              ? '\n正在重试…'
+              : '\n点击重试'}',
+          textAlign: TextAlign.center,
+          style: TextStyle(fontSize: 12, color: widget.textColor),
+        ),
       ),
     ),
   );

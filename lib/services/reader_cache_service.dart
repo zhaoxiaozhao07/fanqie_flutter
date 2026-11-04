@@ -92,6 +92,15 @@ class ReaderCacheService {
       !content.contains('APP端专享/锁章章节') &&
       !content.contains('[本章内容下载失败');
 
+  static bool _cacheFile(File file) =>
+      file.path.endsWith('.txt') ||
+      file.path.endsWith('.images.json') ||
+      (file.parent.uri.pathSegments.where((s) => s.isNotEmpty).last ==
+              'images' &&
+          RegExp(
+            r'/[a-f0-9]{64}\.(png|jpg|gif|webp|bmp)$',
+          ).hasMatch(file.path));
+
   Future<Directory> temporaryRoot() async =>
       Directory('${(await documents()).path}/reader_cache_v2');
 
@@ -164,7 +173,7 @@ class ReaderCacheService {
     var total = 0;
     if (!await root.exists()) return total;
     await for (final entity in root.list(recursive: true, followLinks: false)) {
-      if (entity is File && entity.path.endsWith('.txt')) {
+      if (entity is File && _cacheFile(entity)) {
         try {
           total += await entity.length();
         } on FileSystemException {
@@ -207,12 +216,12 @@ class ReaderCacheService {
         recursive: true,
         followLinks: false,
       )) {
-        if (entry is! File || !entry.path.endsWith('.txt')) continue;
+        if (entry is! File || !_cacheFile(entry)) continue;
         final stat = await entry.stat();
         if (stat.type != FileSystemEntityType.file) continue;
         remaining += stat.size;
         final pinned = pinnedBooks.any(
-          (book) => entry.parent.path == '${root.path}/${segment(book)}',
+          (book) => entry.path.startsWith('${root.path}/${segment(book)}/'),
         );
         if (includePinned || !pinned) candidates.add((entry, stat));
       }

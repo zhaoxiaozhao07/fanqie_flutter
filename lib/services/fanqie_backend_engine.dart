@@ -11,6 +11,8 @@ import '../models/book.dart';
 import '../models/chapter.dart';
 import 'font_decryptor.dart';
 import 'reader_cache_service.dart';
+import 'online_chapter.dart';
+import 'online_illustration_store.dart';
 
 /// 番茄小说内置后端引擎
 /// 直接请求已验证的官方接口，不依赖旧第三方代理节点：
@@ -29,13 +31,17 @@ class FanqieBackendEngine {
     http.Client? client,
     ReaderCacheService? cache,
     Future<String?> Function(String)? chapterLoader,
+    Future<OnlineChapter?> Function(String)? chapterDocumentLoader,
   }) : _client = client ?? http.Client(),
        readerCache = cache ?? ReaderCacheService(),
-       _chapterLoader = chapterLoader;
+       _chapterLoader = chapterLoader,
+       _chapterDocumentLoader = chapterDocumentLoader;
 
   final http.Client _client;
   final ReaderCacheService readerCache;
   final Future<String?> Function(String)? _chapterLoader;
+  final Future<OnlineChapter?> Function(String)? _chapterDocumentLoader;
+  late final onlineImages = OnlineIllustrationStore(readerCache, _client);
   final ValueNotifier<String?> cacheWarning = ValueNotifier(null);
 
   Future<void> _cacheForReading(
@@ -564,6 +570,47 @@ class FanqieBackendEngine {
 
   final FanqieMobileGateway _mobileGateway = FanqieMobileGateway();
 
+  Future<OnlineChapter?> _fetchDocument(String id) async {
+    if (_chapterDocumentLoader != null) return _chapterDocumentLoader(id);
+    if (_chapterLoader != null) {
+      final text = await _chapterLoader(id);
+      return text == null ? null : OnlineChapter(text);
+    }
+    return _mobileGateway.fetchChapterDocument(id);
+  }
+
+  /// Bypass *all* text caches only to recover missing image metadata. Never
+  /// replace an existing chapter's text/IDs/positions with a newer edition.
+  Future<void> repairChapterImages(
+    String bookId,
+    String chapterId,
+    String text, {
+    bool permanent = false,
+  }) async {
+    if (bookId.startsWith('local_')) return;
+    if (!await onlineImages.hasSources(bookId, chapterId, text)) {
+      final document = await _fetchDocument(chapterId);
+      if (document == null) throw const FormatException('插图信息获取失败，请联网重试');
+      if (document.text.trim() != text.trim()) {
+        throw const FormatException('线上正文已变化，未改动原书，请勿删除阅读数据');
+      }
+      await onlineImages.saveSources(bookId, chapterId, document);
+    }
+    final protect =
+        permanent ||
+        await (await getOfflineChapterFile(bookId, chapterId)).exists();
+    try {
+      await onlineImages.hydrate(bookId, chapterId, text, permanent: protect);
+    } on FormatException {
+      // Signed CDN URLs can expire while a failed image stays in the sidecar.
+      // Refresh only from the same full chapter and keep the old text intact.
+      final fresh = await _fetchDocument(chapterId);
+      if (fresh == null || fresh.text.trim() != text.trim()) rethrow;
+      await onlineImages.saveSources(bookId, chapterId, fresh, replace: true);
+      await onlineImages.hydrate(bookId, chapterId, text, permanent: protect);
+    }
+  }
+
   /// 6. 获取章节正文内容（支持书籍离线优先、阅读自动持久化与移动端突破锁章）
   Future<String?> getChapterContent(String itemId, {String? bookId}) async {
     final cleanId = itemId.trim();
@@ -589,14 +636,17 @@ class FanqieBackendEngine {
 
     // 3. 优先通过移动端通道获取完整无锁正文 (对接 reading.snssdk.com 移动端专属接口)
     try {
-      final mobileContent =
-          await (_chapterLoader?.call(cleanId) ??
-              _mobileGateway.fetchChapter(cleanId));
+      final document = await _fetchDocument(cleanId);
+      final mobileContent = document?.text;
       if (mobileContent != null &&
-          mobileContent.length > 50 &&
           ReaderCacheService.isReadable(mobileContent)) {
         // 成功获取完整正文，持久化缓存（实现无下载时的阅读自动缓存）
         await _cacheForReading(cacheBook, cleanId, mobileContent);
+        try {
+          await onlineImages.saveSources(cacheBook, cleanId, document!);
+        } on FileSystemException {
+          cacheWarning.value = '正文已加载，但插图信息保存失败，请检查存储空间';
+        }
         return mobileContent;
       }
     } catch (e) {
@@ -678,6 +728,24 @@ class FanqieBackendEngine {
           }
         }
 
+        // Even already downloaded text may be from pre-image versions.
+        // A missing image is a retryable failure, not a completed download.
+        if (isCancelled?.call() == true) return;
+        try {
+          if (await offlineFile.exists()) {
+            final text = await offlineFile.readAsString();
+            if (ReaderCacheService.isReadable(text)) {
+              await repairChapterImages(
+                bookId,
+                chapter.itemId,
+                text,
+                permanent: true,
+              );
+            }
+          }
+        } catch (_) {
+          failures++;
+        }
         completed++;
         onProgress?.call(completed, total, '正在下载: ${chapter.title}');
       }
@@ -687,7 +755,7 @@ class FanqieBackendEngine {
     final workers = List.generate(workerCount, (_) => worker());
     await Future.wait(workers);
     if (failures > 0 && isCancelled?.call() != true) {
-      throw StateError('$failures 章未能完整下载，已保留成功章节，请重试');
+      throw StateError('$failures 处正文或插图未能完整下载，已保留成功内容，请重试');
     }
   }
 

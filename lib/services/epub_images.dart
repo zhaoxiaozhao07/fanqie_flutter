@@ -56,7 +56,7 @@ class EpubImages {
         throw const FormatException('插图超过 8 MB');
       }
       var saved = bytes;
-      var info = _rasterInfo(bytes);
+      var info = rasterInfo(bytes);
       String extension;
       int width, height;
       if (info != null) {
@@ -192,7 +192,7 @@ class EpubImages {
           throw const FormatException('SVG 外部引用不受支持');
         }
         final raster = await _read(base, attribute.value);
-        final info = _rasterInfo(raster);
+        final info = rasterInfo(raster);
         if (info == null ||
             info.$2 <= 0 ||
             info.$3 <= 0 ||
@@ -234,7 +234,7 @@ class EpubImages {
     return (result, width.ceil(), height.ceil());
   }
 
-  static (String, int, int)? _rasterInfo(Uint8List bytes) {
+  static (String, int, int)? rasterInfo(Uint8List bytes) {
     if (bytes.length < 10) return null;
     final d = ByteData.sublistView(bytes);
     if (bytes.length >= 24 &&
