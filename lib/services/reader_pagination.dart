@@ -4,6 +4,8 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 
 import '../models/reading_position.dart';
+import '../models/reader_illustration.dart';
+import 'reader_content.dart';
 
 class ReaderLayout {
   final Size size;
@@ -62,6 +64,7 @@ class ReaderPageFragment {
   final int endOffset;
   final String text;
   final double height;
+  final ReaderIllustration? image;
 
   const ReaderPageFragment({
     required this.paragraphIndex,
@@ -69,6 +72,7 @@ class ReaderPageFragment {
     required this.endOffset,
     required this.text,
     required this.height,
+    this.image,
   });
 }
 
@@ -85,12 +89,14 @@ class ReaderPage {
     this.titleHeight = 0,
   });
 
-  String get text => fragments.map((fragment) => fragment.text).join('\n\n');
+  String get text =>
+      fragments.where((f) => f.image == null).map((f) => f.text).join('\n\n');
 
   ReadingPosition position(String chapterId) => ReadingPosition(
     chapterId: chapterId,
     paragraphIndex: fragments.isEmpty ? 0 : fragments.first.paragraphIndex,
     characterOffset: fragments.isEmpty ? 0 : fragments.first.startOffset,
+    imageId: fragments.isEmpty ? null : fragments.first.image?.id,
   );
 }
 
@@ -108,8 +114,18 @@ class ReaderChapterPages {
   });
 
   int pageFor(ReadingPosition position) {
+    if (position.imageId != null) {
+      for (var index = 0; index < pages.length; index++) {
+        if (pages[index].fragments.any(
+          (f) => f.image?.id == position.imageId,
+        )) {
+          return index;
+        }
+      }
+    }
     for (var index = 0; index < pages.length; index++) {
       for (final fragment in pages[index].fragments) {
+        if (fragment.image != null) continue;
         if (fragment.paragraphIndex > position.paragraphIndex ||
             (fragment.paragraphIndex == position.paragraphIndex &&
                 fragment.endOffset > position.characterOffset)) {
@@ -142,8 +158,9 @@ class ReaderPaginationCache {
     required String content,
     required ReaderLayout layout,
     required bool indent,
+    List<ReaderIllustration> illustrations = const [],
   }) {
-    final key = (chapterId, title, content, layout.key, indent);
+    final key = (chapterId, title, content, layout.key, indent, illustrations);
     final cached = lookup(key);
     if (cached != null) return cached;
     final result = _paginate(
@@ -153,6 +170,7 @@ class ReaderPaginationCache {
       content: content,
       layout: layout,
       indent: indent,
+      illustrations: illustrations,
     );
     _cache[key] = result;
     while (_cache.length > capacity) {
@@ -167,7 +185,8 @@ class ReaderPaginationCache {
     required String content,
     required ReaderLayout layout,
     required bool indent,
-  }) => (chapterId, title, content, layout.key, indent);
+    List<ReaderIllustration> illustrations = const [],
+  }) => (chapterId, title, content, layout.key, indent, illustrations);
 
   ReaderChapterPages _paginate({
     required Object key,
@@ -176,6 +195,7 @@ class ReaderPaginationCache {
     required String content,
     required ReaderLayout layout,
     required bool indent,
+    List<ReaderIllustration> illustrations = const [],
   }) {
     final width = math.max(
       1.0,
@@ -260,23 +280,42 @@ class ReaderPaginationCache {
 
     try {
       final paragraphs = content.split('\n\n');
-      for (
-        var paragraphIndex = 0;
-        paragraphIndex < paragraphs.length;
-        paragraphIndex++
-      ) {
+      for (final block in readerContentBlocks(paragraphs, illustrations)) {
+        final paragraphIndex = block.paragraphIndex;
         final original = paragraphs[paragraphIndex].trim();
-        var cursor = 0;
-        while (cursor < original.length) {
+        if (block.image != null) {
+          var spacing = fragments.isEmpty ? 0.0 : layout.paragraphSpacing;
+          var height = block.image!.displayHeight(width, available());
+          if (fragments.isNotEmpty &&
+              usedHeight + spacing + height > available()) {
+            flush();
+            spacing = 0;
+            height = block.image!.displayHeight(width, available());
+          }
+          fragments.add(
+            ReaderPageFragment(
+              paragraphIndex: paragraphIndex,
+              startOffset: block.start,
+              endOffset: block.start,
+              text: '',
+              height: height,
+              image: block.image,
+            ),
+          );
+          usedHeight += spacing + height;
+          continue;
+        }
+        var cursor = block.start;
+        while (cursor < block.end) {
           final spacing = fragments.isEmpty ? 0.0 : layout.paragraphSpacing;
           final room = available() - usedHeight - spacing;
           final prefix = indent && cursor == 0 ? '\u3000\u3000' : '';
-          final display = '$prefix${original.substring(cursor)}';
+          final display = '$prefix${original.substring(cursor, block.end)}';
           final fullHeight = measure(
             display,
             layout.bodyStyle,
             width,
-            paragraphEnd: true,
+            paragraphEnd: block.end == original.length,
           );
           var end = display.length;
           var height = fullHeight;
@@ -303,6 +342,7 @@ class ReaderPaginationCache {
             // 气泡单独溢出时，最后一个完整字素随气泡留到续页；
             // 不生成丢失原文位置的“仅气泡页”，也不切断 emoji。
             if (candidate >= display.length &&
+                block.end == original.length &&
                 !layout.inlineCommentSize.isEmpty) {
               candidate =
                   display.length -
@@ -323,7 +363,8 @@ class ReaderPaginationCache {
               display.substring(0, end),
               layout.bodyStyle,
               width,
-              paragraphEnd: end == display.length,
+              paragraphEnd:
+                  end == display.length && block.end == original.length,
             );
             // 少数字体/词边界的独立续页重排可能多出一行，退回上一行再核对。
             while (height > room + 0.01 &&
@@ -341,14 +382,12 @@ class ReaderPaginationCache {
                 display.substring(0, end),
                 layout.bodyStyle,
                 width,
-                paragraphEnd: end == display.length,
+                paragraphEnd:
+                    end == display.length && block.end == original.length,
               );
             }
           }
-          final consumed = (end - prefix.length).clamp(
-            1,
-            original.length - cursor,
-          );
+          final consumed = (end - prefix.length).clamp(1, block.end - cursor);
           fragments.add(
             ReaderPageFragment(
               paragraphIndex: paragraphIndex,
@@ -360,7 +399,7 @@ class ReaderPaginationCache {
           );
           usedHeight += spacing + height;
           cursor += consumed;
-          if (cursor < original.length) flush();
+          if (cursor < block.end) flush();
         }
       }
       flush();

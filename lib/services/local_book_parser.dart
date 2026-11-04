@@ -10,6 +10,7 @@ import 'package:path/path.dart' as path;
 import 'package:xml/xml.dart';
 
 import '../models/chapter.dart';
+import 'epub_images.dart';
 import 'reader_text.dart';
 import 'safe_zip_reader.dart';
 
@@ -77,6 +78,7 @@ class _ChapterWriter {
   final void Function() check;
   final chapters = <Chapter>[];
   final _parts = <int, int>{};
+  int _textCount = 0, _imageCount = 0;
   _ChapterWriter(this.request, this.check);
 
   Future<void> add(
@@ -85,10 +87,40 @@ class _ChapterWriter {
     String volume = '',
     int maxChars = 20000,
     int? continuation,
+    List<ExtractedIllustration> images = const [],
   }) async {
     title = _shortLabel(title);
     volume = _shortLabel(volume);
     var remaining = text.trim();
+    var consumed = text.length - text.trimLeft().length;
+    if (images.isNotEmpty &&
+        ReaderText.paragraphs(
+          remaining,
+          chapterTitle: title,
+        ).join('').trim().isEmpty) {
+      for (var i = 0; i < images.length; i++) {
+        check();
+        if (chapters.length >= 20000) throw const FormatException('章节数量超过安全限制');
+        final id = '${request.idPrefix}_i${++_imageCount}';
+        await File(
+          '${request.stagingPath}/$id.txt',
+        ).writeAsString(ReaderText.imageOnlyMarker);
+        chapters.add(
+          Chapter(
+            itemId: id,
+            title: title.isEmpty
+                ? '插图 ${i + 1}'
+                : images.length == 1
+                ? title
+                : '$title（插图 ${i + 1}）',
+            order: chapters.length + 1,
+            volumeTitle: volume.isEmpty ? '正文' : volume,
+            illustrations: [images[i].image.at(0, 0)],
+          ),
+        );
+      }
+      return;
+    }
     var part = continuation == null ? 0 : _parts[continuation] ?? 0;
     while (remaining.isNotEmpty) {
       check();
@@ -100,13 +132,19 @@ class _ChapterWriter {
         end = ReaderText.safeOffset(remaining, end);
         if (end == 0) throw const FormatException('正文包含异常超长字符序列');
       }
-      final body = remaining.substring(0, end).trim();
-      remaining = remaining.substring(end).trimLeft();
+      final chunkStart = consumed;
+      final rawChunk = remaining.substring(0, end);
+      final body = rawChunk.trim();
+      final leading = rawChunk.length - rawChunk.trimLeft().length;
+      final last = end == remaining.length;
+      final tail = remaining.substring(end);
+      remaining = tail.trimLeft();
+      consumed += end + tail.length - remaining.length;
       if (body.isEmpty) continue;
       if (body.contains('\x00')) throw const FormatException('文本含空字节，请检查编码');
       part++;
       if (continuation != null) _parts[continuation] = part;
-      final id = '${request.idPrefix}_c${chapters.length + 1}';
+      final id = '${request.idPrefix}_c${++_textCount}';
       final label = title.isEmpty
           ? '第 ${chapters.length + 1} 部分'
           : part == 1
@@ -119,6 +157,22 @@ class _ChapterWriter {
           title: label,
           order: chapters.length + 1,
           volumeTitle: volume.isEmpty ? '正文' : volume,
+          illustrations: images
+              .where(
+                (e) =>
+                    e.offset >= chunkStart &&
+                    (e.offset < chunkStart + end ||
+                        (last && e.offset <= chunkStart + end)),
+              )
+              .map((e) {
+                final p = ReaderText.positionInRaw(
+                  body,
+                  e.offset - chunkStart - leading,
+                  chapterTitle: label,
+                );
+                return e.image.at(p.paragraphIndex, p.characterOffset);
+              })
+              .toList(),
         ),
       );
       request.progress?.send({
@@ -279,13 +333,19 @@ class _NavLabel {
 
 class _HtmlText {
   final String text;
-  final Map<String, int> anchors;
-  _HtmlText(this.text, this.anchors);
+  final Map<String, (int, int)> anchors;
+  final List<ExtractedIllustration> images;
+  _HtmlText(this.text, this.anchors, this.images);
 }
 
-_HtmlText _extract(dom.Element body) {
+Future<_HtmlText> _extract(
+  dom.Element body,
+  EpubImages resources,
+  String chapterPath,
+) async {
   final output = StringBuffer();
-  final anchors = <String, int>{};
+  final anchors = <String, (int, int)>{};
+  final images = <ExtractedIllustration>[];
   const blocks = {
     'p',
     'div',
@@ -302,39 +362,70 @@ _HtmlText _extract(dom.Element body) {
     'pre',
     'figcaption',
   };
-  void walk(dom.Node node, [bool pre = false]) {
+  Future<void> walk(dom.Node node, [bool pre = false]) async {
     if (node is dom.Text) {
       output.write(pre ? node.text : node.text.replaceAll(RegExp(r'\s+'), ' '));
       return;
     }
     if (node is! dom.Element) return;
     final tag = node.localName;
-    if (const {
-          'script',
-          'style',
-          'head',
-          'nav',
-          'iframe',
-          'object',
-          'svg',
-        }.contains(tag) ||
+    if (const {'script', 'style', 'head', 'nav', 'iframe'}.contains(tag) ||
         node.attributes.containsKey('hidden')) {
       return;
     }
-    if (node.id.isNotEmpty) anchors.putIfAbsent(node.id, () => output.length);
+    if (node.id.isNotEmpty) {
+      anchors.putIfAbsent(node.id, () => (output.length, images.length));
+    }
+    if (tag == 'img' || tag == 'svg' || tag == 'object') {
+      if (tag == 'object' &&
+          !(node.attributes['type'] ?? '').startsWith('image/')) {
+        return;
+      }
+      final src =
+          node.attributes['src'] ??
+          node.attributes['data-src'] ??
+          node.attributes['data'] ??
+          (node.attributes['srcset'] ?? '')
+              .split(',')
+              .first
+              .trim()
+              .split(' ')
+              .first;
+      final alt =
+          node.attributes['alt'] ??
+          node.attributes['aria-label'] ??
+          (tag == 'svg' ? node.querySelector('title,desc')?.text : null) ??
+          '';
+      if (tag == 'svg') {
+        node.attributes['xmlns'] = 'http://www.w3.org/2000/svg';
+        node.attributes['xmlns:xlink'] = 'http://www.w3.org/1999/xlink';
+      }
+      images.add(
+        ExtractedIllustration(
+          output.length,
+          await resources.extract(
+            chapterPath,
+            src,
+            alt,
+            inlineSvg: tag == 'svg' ? node.outerHtml : null,
+          ),
+        ),
+      );
+      return;
+    }
     if (tag == 'br') {
       output.write('\n');
       return;
     }
     if (blocks.contains(tag)) output.write('\n\n');
     for (final child in node.nodes) {
-      walk(child, pre || tag == 'pre');
+      await walk(child, pre || tag == 'pre');
     }
     if (blocks.contains(tag)) output.write('\n\n');
   }
 
-  walk(body);
-  return _HtmlText(output.toString(), anchors);
+  await walk(body);
+  return _HtmlText(output.toString(), anchors, images);
 }
 
 Future<ParsedLocalBook> _parseEpub(
@@ -392,6 +483,13 @@ Future<ParsedLocalBook> _parseEpub(
       throw const FormatException('EPUB 正文已加密，无法导入；不支持 DRM 解密');
     }
   }
+  final resources = EpubImages(
+    zip: zip,
+    staging: request.stagingPath,
+    encrypted: encrypted,
+    resolve: _resource,
+    check: check,
+  );
   final labels = <String, List<_NavLabel>>{};
   void label(String base, String href, String name, String volume) {
     if (href.isEmpty || name.isEmpty) return;
@@ -516,7 +614,7 @@ Future<ParsedLocalBook> _parseEpub(
     );
     final body = document.body;
     if (body == null) continue;
-    final content = _extract(body);
+    final content = await _extract(body, resources, chapterPath);
     final navLabels = labels[chapterPath] ?? [];
     final anchored =
         navLabels
@@ -526,48 +624,73 @@ Future<ParsedLocalBook> _parseEpub(
                   content.anchors.containsKey(e.fragment),
             )
             .toList()
-          ..sort(
-            (a, b) => content.anchors[a.fragment]!.compareTo(
-              content.anchors[b.fragment]!,
-            ),
-          );
+          ..sort((a, b) {
+            final left = content.anchors[a.fragment]!;
+            final right = content.anchors[b.fragment]!;
+            final textOrder = left.$1.compareTo(right.$1);
+            return textOrder == 0 ? left.$2.compareTo(right.$2) : textOrder;
+          });
     final heading = body.querySelector('h1,h2,h3')?.text.trim();
     final defaultTitle =
         navLabels.firstOrNull?.title ??
         heading ??
         document.querySelector('title')?.text.trim() ??
         '第 ${writer.chapters.length + 1} 章';
+    Future<void> addRegion(
+      String label,
+      int start,
+      int end, {
+      String volume = '',
+      int imageStart = 0,
+      int? imageEnd,
+    }) async {
+      final raw = content.text.substring(start, end);
+      final normalized = ReaderText.paragraphs(raw).join('\n\n');
+      final images = content.images
+          .sublist(imageStart, imageEnd ?? content.images.length)
+          .map((e) {
+            final position = ReaderText.positionInRaw(raw, e.offset - start);
+            return ExtractedIllustration(
+              ReaderText.offsetForPosition(normalized, position),
+              e.image,
+            );
+          })
+          .toList();
+      await writer.add(label, normalized, volume: volume, images: images);
+    }
+
     if (anchored.isEmpty) {
-      await writer.add(
+      await addRegion(
         defaultTitle,
-        ReaderText.paragraphs(content.text).join('\n\n'),
+        0,
+        content.text.length,
         volume: navLabels.firstOrNull?.volume ?? '',
       );
     } else {
       final first = content.anchors[anchored.first.fragment]!;
-      if (content.text.substring(0, first).trim().isNotEmpty) {
-        await writer.add(
-          defaultTitle,
-          ReaderText.paragraphs(content.text.substring(0, first)).join('\n\n'),
-        );
+      if (content.text.substring(0, first.$1).trim().isNotEmpty ||
+          first.$2 > 0) {
+        await addRegion(defaultTitle, 0, first.$1, imageEnd: first.$2);
       }
       for (var i = 0; i < anchored.length; i++) {
         final start = content.anchors[anchored[i].fragment]!;
         final end = i + 1 < anchored.length
             ? content.anchors[anchored[i + 1].fragment]!
-            : content.text.length;
-        await writer.add(
+            : (content.text.length, content.images.length);
+        await addRegion(
           anchored[i].title,
-          ReaderText.paragraphs(
-            content.text.substring(start, end),
-          ).join('\n\n'),
+          start.$1,
+          end.$1,
           volume: anchored[i].volume,
+          imageStart: start.$2,
+          imageEnd: end.$2,
         );
       }
     }
   }
-  if (writer.chapters.isEmpty) {
-    throw const FormatException('EPUB 未包含可阅读文字（图片型或加密内容不受支持）');
+  if (writer.chapters.isEmpty ||
+      !await _hasReadableContent(writer, request.stagingPath)) {
+    throw const FormatException('EPUB 未包含可阅读文字或有效插图');
   }
   return ParsedLocalBook(
     _shortLabel(title.isEmpty ? request.title : title),
@@ -575,4 +698,19 @@ Future<ParsedLocalBook> _parseEpub(
     writer.chapters,
     coverFile,
   );
+}
+
+Future<bool> _hasReadableContent(_ChapterWriter writer, String staging) async {
+  for (final chapter in writer.chapters) {
+    if (chapter.illustrations.any((e) => e.asset != null && e.error == null)) {
+      return true;
+    }
+    if (ReaderText.paragraphs(
+      await File('$staging/${chapter.itemId}.txt').readAsString(),
+      chapterTitle: chapter.title,
+    ).join('').trim().isNotEmpty) {
+      return true;
+    }
+  }
+  return false;
 }

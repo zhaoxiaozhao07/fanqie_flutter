@@ -5,7 +5,11 @@ import '../models/reading_position.dart';
 /// Shared canonical paragraphs for display, search, speech and annotations.
 /// Offsets are UTF-16 offsets in trimmed source paragraphs, not indented spans.
 class ReaderText {
+  /// Stored only for a real image-only EPUB chapter; never spoken or searched.
+  static const imageOnlyMarker = '\uFFFC';
+
   static List<String> paragraphs(String raw, {String? chapterTitle}) {
+    if (raw.trim() == imageOnlyMarker) return const [''];
     final result = <String>[];
     final title = _normalize(chapterTitle ?? '');
     var first = true;
@@ -27,6 +31,54 @@ class ReaderText {
       result.add(text);
     }
     return result;
+  }
+
+  /// Convert an offset in an extracted/split chapter into the same paragraph
+  /// coordinates used by the reader, without inserting image paths into text.
+  static ReadingPosition positionInRaw(
+    String raw,
+    int offset, {
+    String? chapterTitle,
+  }) {
+    final title = _normalize(chapterTitle ?? '');
+    var rawStart = 0, index = 0, previousLength = 0;
+    var first = true;
+    for (final line in raw.split('\n')) {
+      final text = line.trim();
+      final lineStart = rawStart;
+      rawStart += line.length + 1;
+      if (text.isEmpty) continue;
+      if (first) {
+        first = false;
+        final normalized = _normalize(text);
+        if (title.isNotEmpty &&
+            (normalized == title ||
+                (RegExp(
+                      r'^第[0-9一二三四五六七八九十百千万零两]+[章卷回节集]$',
+                    ).hasMatch(normalized) &&
+                    title.startsWith(normalized)))) {
+          continue;
+        }
+      }
+      final trimStart = lineStart + line.length - line.trimLeft().length;
+      if (offset <= trimStart + text.length) {
+        return ReadingPosition(
+          chapterId: '',
+          paragraphIndex: index,
+          characterOffset: safeOffset(
+            text,
+            (offset - trimStart).clamp(0, text.length),
+          ),
+        );
+      }
+      previousLength = text.length;
+      index++;
+    }
+    return ReadingPosition(
+      chapterId: '',
+      paragraphIndex: index == 0 ? 0 : index - 1,
+      characterOffset: previousLength,
+    );
   }
 
   static String _normalize(String text) =>

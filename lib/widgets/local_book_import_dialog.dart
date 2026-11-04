@@ -298,6 +298,14 @@ class _LocalBookImportDialogState extends State<LocalBookImportDialog> {
                           Text(
                             '${preview.book.author} · ${preview.chapters.length} 章 · ${preview.encoding}',
                           ),
+                          if (preview.chapters.any(
+                            (c) => c.illustrations.isNotEmpty,
+                          ))
+                            Text(
+                              '含 ${preview.chapters.fold<int>(0, (sum, c) => sum + c.illustrations.length)} 幅插图，支持阅读时点开缩放',
+                            ),
+                          if (preview.illustrationUpgrade)
+                            const Text('确认后补齐原书插图；原正文、章节 ID、进度与批注保持不变。'),
                           if (preview.alreadyExists)
                             const Padding(
                               padding: EdgeInsets.symmetric(vertical: 8),
@@ -359,6 +367,8 @@ class _LocalBookImportDialogState extends State<LocalBookImportDialog> {
                       child: Text(
                         preview == null
                             ? '预览目录与编码'
+                            : preview.illustrationUpgrade
+                            ? '补齐原书插图'
                             : preview.alreadyExists
                             ? '保留原书并加入书架'
                             : '确认导入',

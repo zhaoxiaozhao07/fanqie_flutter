@@ -1,11 +1,15 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:collection';
+import 'dart:io' show Directory;
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import '../widgets/reader_status_bar.dart';
+import '../widgets/reader_illustration.dart';
+import '../models/reader_illustration.dart';
+import '../services/reader_content.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
@@ -53,6 +57,7 @@ class ReaderScreen extends StatefulWidget {
   final int initialChapterIndex;
   final bool resumeSavedPosition;
   final ReaderSettingsRecord? initialSettings;
+  final Future<Directory> Function()? bookDocuments;
   final Future<String?> Function(Chapter chapter)? chapterContentLoader;
   final Future<ChapterCommentStats?> Function(Chapter chapter)?
   chapterCommentStatsLoader;
@@ -64,6 +69,7 @@ class ReaderScreen extends StatefulWidget {
     this.initialChapterIndex = 0,
     this.resumeSavedPosition = true,
     this.initialSettings,
+    this.bookDocuments,
     this.chapterContentLoader,
     this.chapterCommentStatsLoader,
   });
@@ -1075,9 +1081,16 @@ class _ReaderScreenState extends State<ReaderScreen>
     final chapter = widget.chapters[index];
     final paragraphs = _getChapterParagraphs(index);
     final source = position.paragraphIndex < paragraphs.length
-        ? paragraphs[position.paragraphIndex].trim() : '';
-    final start = ReaderText.safeOffset(source, position.characterOffset.clamp(0, source.length));
-    final end = ReaderText.safeOffset(source, math.min(source.length, start + 120));
+        ? paragraphs[position.paragraphIndex].trim()
+        : '';
+    final start = ReaderText.safeOffset(
+      source,
+      position.characterOffset.clamp(0, source.length),
+    );
+    final end = ReaderText.safeOffset(
+      source,
+      math.min(source.length, start + 120),
+    );
     final preview = source.substring(start, end);
     return _positionService.save(
       widget.book.bookId,
@@ -1149,6 +1162,25 @@ class _ReaderScreenState extends State<ReaderScreen>
     final original = _getChapterParagraphs(
       nearest.chapterIndex,
     )[nearest.paraIndex].trim();
+    final pictures = _imagesAt(nearest.chapterIndex, nearest.paraIndex);
+    if (pictures.isNotEmpty) {
+      final geometry = _imageParagraphGeometry(
+        original,
+        pictures,
+        render.size.width,
+      );
+      final (offset, caret, imageId) = geometry.atY(target - y);
+      return ReadingPosition(
+        chapterId: widget.chapters[nearest.chapterIndex].itemId,
+        paragraphIndex: nearest.paraIndex,
+        characterOffset: offset,
+        imageId: imageId,
+        viewportFraction: ((y + caret - top) / boundary.size.height).clamp(
+          0,
+          1,
+        ),
+      );
+    }
     final prefix = _indentTwoChars ? '\u3000\u3000' : '';
     final painter = _paragraphPainter('$prefix$original', render.size.width);
     try {
@@ -1199,6 +1231,15 @@ class _ReaderScreenState extends State<ReaderScreen>
     final cached = _paragraphHeights[key];
     if (cached != null) return cached;
     final original = _getChapterParagraphs(chapterIndex)[paragraphIndex].trim();
+    final pictures = _imagesAt(chapterIndex, paragraphIndex);
+    if (pictures.isNotEmpty) {
+      return _imageParagraphGeometry(
+            original,
+            pictures,
+            MediaQuery.sizeOf(context).width - _horizontalPadding * 2,
+          ).height +
+          _paragraphSpacing;
+    }
     final painter = _paragraphPainter(
       '${_indentTwoChars ? '\u3000\u3000' : ''}$original',
       MediaQuery.sizeOf(context).width - _horizontalPadding * 2,
@@ -1221,7 +1262,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     final position = _readingPosition;
     return position == null
         ? Future.value()
-        : _writeReadingSnapshot(position, updateSummary: !notify).catchError((_) {
+        : _writeReadingSnapshot(position, updateSummary: !notify).catchError((
+            _,
+          ) {
             if (mounted && notify) {
               ScaffoldMessenger.of(
                 context,
@@ -1282,7 +1325,8 @@ class _ReaderScreenState extends State<ReaderScreen>
         );
         if (targetIndex == 0 &&
             position.characterOffset == 0 &&
-            position.viewportFraction == 0) {
+            position.viewportFraction == 0 &&
+            position.imageId == null) {
           _scrollController.jumpTo(0);
           break;
         }
@@ -1295,21 +1339,31 @@ class _ReaderScreenState extends State<ReaderScreen>
                 : 24);
         final original = paragraphs[targetIndex].trim();
         final prefix = _indentTwoChars ? '\u3000\u3000' : '';
-        final painter = _paragraphPainter(
-          '$prefix$original',
-          body.size.width - _horizontalPadding * 2,
-        );
-        final caret = painter
-            .getOffsetForCaret(
-              TextPosition(
-                offset:
-                    position.characterOffset.clamp(0, original.length) +
-                    prefix.length,
-              ),
-              Rect.zero,
-            )
-            .dy;
-        painter.dispose();
+        final pictures = _imagesAt(targetChapterIndex, targetIndex);
+        double caret;
+        if (pictures.isNotEmpty) {
+          caret = _imageParagraphGeometry(
+            original,
+            pictures,
+            body.size.width - _horizontalPadding * 2,
+          ).yForOffset(position.characterOffset, imageId: position.imageId);
+        } else {
+          final painter = _paragraphPainter(
+            '$prefix$original',
+            body.size.width - _horizontalPadding * 2,
+          );
+          caret = painter
+              .getOffsetForCaret(
+                TextPosition(
+                  offset:
+                      position.characterOffset.clamp(0, original.length) +
+                      prefix.length,
+                ),
+                Rect.zero,
+              )
+              .dy;
+          painter.dispose();
+        }
         final key =
             '${widget.chapters[targetChapterIndex].itemId}_$targetIndex';
         final target = _mountedParagraphs[key];
@@ -1449,11 +1503,20 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _attachActivity() {
-    _activity.attach(this, widget.book,
-      active: () => mounted && _readerRouteActive && !_isLoadingHead && _errorMessage == null &&
-          !_showControls && _readerPanels == 0 && !_navigationLoading &&
+    _activity.attach(
+      this,
+      widget.book,
+      active: () =>
+          mounted &&
+          _readerRouteActive &&
+          !_isLoadingHead &&
+          _errorMessage == null &&
+          !_showControls &&
+          _readerPanels == 0 &&
+          !_navigationLoading &&
           WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed,
-      automatic: () => _isAutoScrolling && (_autoScrollTicker?.isActive ?? false),
+      automatic: () =>
+          _isAutoScrolling && (_autoScrollTicker?.isActive ?? false),
       position: _activityPosition,
     );
   }
@@ -1472,7 +1535,11 @@ class _ReaderScreenState extends State<ReaderScreen>
       total += length;
       if (i < position.paragraphIndex) offset += length;
     }
-    return ReadingActivityPosition(position.chapterId, offset.clamp(0, total), total);
+    return ReadingActivityPosition(
+      position.chapterId,
+      offset.clamp(0, total),
+      total,
+    );
   }
 
   void _onUserPageTurn() {
@@ -3364,8 +3431,12 @@ class _ReaderScreenState extends State<ReaderScreen>
             : 0.0;
         final percentStr = (progress * 100).toStringAsFixed(1);
         final metric = _activityPosition();
-        final remaining = metric == null ? null :
-            _activity.remainingMinutes(widget.book.bookId, metric.total - metric.offset);
+        final remaining = metric == null
+            ? null
+            : _activity.remainingMinutes(
+                widget.book.bookId,
+                metric.total - metric.offset,
+              );
 
         return ReaderStatusBar(
           chapterLabel: remaining == null ? ch.title : '本章约 $remaining 分钟',
@@ -3507,6 +3578,44 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
+  List<ReaderIllustration> _imagesAt(int chapter, int paragraph) => widget
+      .chapters[chapter]
+      .illustrations
+      .where((e) => e.paragraphIndex == paragraph)
+      .toList();
+
+  ReaderParagraphGeometry _imageParagraphGeometry(
+    String source,
+    List<ReaderIllustration> pictures,
+    double width,
+  ) => ReaderParagraphGeometry(
+    source: source,
+    images: pictures,
+    style: _readerBodyStyle(),
+    scaler: MediaQuery.textScalerOf(context),
+    width: width,
+    indent: _indentTwoChars,
+    spacing: _paragraphSpacing,
+    imageHeight: MediaQuery.sizeOf(context).height * .75,
+    inlineCommentSize: _showCommentBubbles
+        ? ReaderCommentBubble.sizeFor(MediaQuery.textScalerOf(context))
+        : Size.zero,
+  );
+
+  Widget _illustrationView(
+    ReaderIllustration image,
+    double height,
+    ReaderTheme theme,
+  ) => ReaderIllustrationView(
+    bookId: widget.book.bookId,
+    image: image,
+    height: height,
+    textColor: theme.secondaryColor,
+    documents: widget.bookDocuments,
+    onTapDown: () => _lastBubbleTapTime = DateTime.now(),
+    onViewerChanged: (open) => open ? _beginReaderPanel() : _endReaderPanel(),
+  );
+
   Widget _buildSingleParagraph(
     String paragraph,
     ReaderTheme theme,
@@ -3518,6 +3627,44 @@ class _ReaderScreenState extends State<ReaderScreen>
     required int commentCount,
   }) {
     final trimmed = paragraph.trim();
+    final pictures = _imagesAt(chapterIndex, paraIndex);
+    if (pictures.isNotEmpty) {
+      final blocks = readerContentBlocks([
+        trimmed,
+      ], pictures.map((e) => e.at(0, e.characterOffset)).toList());
+      return LayoutBuilder(
+        builder: (context, constraints) => Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            for (var i = 0; i < blocks.length; i++) ...[
+              if (i > 0) SizedBox(height: _paragraphSpacing),
+              if (blocks[i].image != null)
+                _illustrationView(
+                  blocks[i].image!,
+                  blocks[i].image!.displayHeight(
+                    constraints.maxWidth,
+                    MediaQuery.sizeOf(context).height * .75,
+                  ),
+                  theme,
+                )
+              else
+                _buildParagraphWithUnderlines(
+                  '${_indentTwoChars && blocks[i].start == 0 ? '\u3000\u3000' : ''}${blocks[i].text}',
+                  theme,
+                  chapter,
+                  paraIndex,
+                  chapterIndex: chapterIndex,
+                  pageIdx: -1,
+                  sourceParagraph: trimmed,
+                  sourceParagraphs: _getChapterParagraphs(chapterIndex),
+                  startOffset: blocks[i].start,
+                  endOffset: blocks[i].end,
+                ),
+            ],
+          ],
+        ),
+      );
+    }
     if (trimmed.isEmpty) return const SizedBox.shrink();
 
     var textToShow = paragraph;
@@ -4328,6 +4475,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       content: _chapterCache[index] ?? '',
       layout: layout,
       indent: _indentTwoChars,
+      illustrations: chapter.illustrations,
     );
     _preparedPages[index] = result;
     return result;
@@ -4646,20 +4794,29 @@ class _ReaderScreenState extends State<ReaderScreen>
                           index++
                         ) ...[
                           if (index > 0) SizedBox(height: _paragraphSpacing),
-                          _buildParagraphWithUnderlines(
-                            page.fragments[index].text,
-                            theme,
-                            chapter,
-                            page.fragments[index].paragraphIndex,
-                            chapterIndex: address.chapterIndex,
-                            pageIdx: address.pageIndex,
-                            sourceParagraphs: paragraphs,
-                            sourceParagraph:
-                                paragraphs[page.fragments[index].paragraphIndex]
-                                    .trim(),
-                            startOffset: page.fragments[index].startOffset,
-                            endOffset: page.fragments[index].endOffset,
-                          ),
+                          if (page.fragments[index].image != null)
+                            _illustrationView(
+                              page.fragments[index].image!,
+                              page.fragments[index].height,
+                              theme,
+                            )
+                          else
+                            _buildParagraphWithUnderlines(
+                              page.fragments[index].text,
+                              theme,
+                              chapter,
+                              page.fragments[index].paragraphIndex,
+                              chapterIndex: address.chapterIndex,
+                              pageIdx: address.pageIndex,
+                              sourceParagraphs: paragraphs,
+                              sourceParagraph:
+                                  paragraphs[page
+                                          .fragments[index]
+                                          .paragraphIndex]
+                                      .trim(),
+                              startOffset: page.fragments[index].startOffset,
+                              endOffset: page.fragments[index].endOffset,
+                            ),
                         ],
                       ],
                     ),
@@ -4754,7 +4911,8 @@ class _ReaderScreenState extends State<ReaderScreen>
       sourceEnd: endOffset,
     );
 
-    final paraKeyStr = 'page_${chapter.itemId}_${pageIdx}_$pIdx';
+    final paraKeyStr =
+        'page_${chapter.itemId}_${pageIdx}_$pIdx${chapter.illustrations.any((e) => e.paragraphIndex == pIdx) ? '_$startOffset' : ''}';
     return DecoratedBox(
       decoration: BoxDecoration(
         color: _highlightedParagraphKey == '${chapter.itemId}_$pIdx'

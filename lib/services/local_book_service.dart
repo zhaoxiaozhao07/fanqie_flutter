@@ -52,6 +52,8 @@ class LocalImportPreview {
   final bool alreadyExists;
   final String? coverPreview;
   final String? legacyAlias;
+  final bool illustrationUpgrade;
+  final Map<String, String> expectedTextHashes;
   bool _committed = false;
   LocalImportPreview({
     required this.book,
@@ -64,6 +66,8 @@ class LocalImportPreview {
     this.alreadyExists = false,
     this.coverPreview,
     this.legacyAlias,
+    this.illustrationUpgrade = false,
+    this.expectedTextHashes = const {},
   });
 
   Future<void> dispose() async {
@@ -191,14 +195,19 @@ class LocalBookService {
       final id = 'local_${epub ? 'epub' : 'txt'}_$identity';
       final destination = Directory('${base.path}/offline_books/$id');
       final existing = await _existing(destination, sourceHash);
+      LocalImportPreview? upgrade;
       if (existing != null) {
-        await stage.delete(recursive: true);
-        return existing;
+        final metadata = await _metadata(destination);
+        if (!epub || metadata?['illustrations_version'] == 1) {
+          await stage.delete(recursive: true);
+          return existing;
+        }
+        upgrade = existing;
       }
       await BookshelfService().initialize();
       // An adopted legacy identity remains authoritative on future imports.
       for (final shelf in BookshelfService().books.where(
-        (b) => b.bookId.startsWith('local_'),
+        (b) => upgrade == null && b.bookId.startsWith('local_'),
       )) {
         final directory = Directory(
           '${base.path}/offline_books/${shelf.bookId}',
@@ -207,8 +216,12 @@ class LocalBookService {
         if ((metadata?['aliases'] as List?)?.contains(id) == true) {
           final alias = await _existing(directory, sourceHash);
           if (alias != null) {
-            await stage.delete(recursive: true);
-            return alias;
+            if (!epub || metadata?['illustrations_version'] == 1) {
+              await stage.delete(recursive: true);
+              return alias;
+            }
+            upgrade = alias;
+            break;
           }
         }
       }
@@ -226,6 +239,14 @@ class LocalBookService {
         ),
       );
       cancel.check();
+      if (upgrade != null) {
+        return await _prepareIllustrationUpgrade(
+          upgrade,
+          parsed,
+          stage,
+          cancel,
+        );
+      }
       final book = Book(
         bookId: id,
         bookName: parsed.title,
@@ -247,6 +268,7 @@ class LocalBookService {
         File('${stage.path}/metadata.json'),
         jsonEncode({
           'version': 2,
+          if (epub) 'illustrations_version': 1,
           'source_sha256': sourceHash,
           'encoding': encoding,
           'chapter_rule': options.chapterRule.name,
@@ -278,7 +300,9 @@ class LocalBookService {
         sourceHash: sourceHash,
         destination: destination,
         staging: stage,
-        sample: sample.length > 600
+        sample: sample.trim() == ReaderText.imageOnlyMarker
+            ? '【插图章节】'
+            : sample.length > 600
             ? sample.substring(0, ReaderText.safeOffset(sample, 600))
             : sample,
         coverPreview: parsed.coverFile == null
@@ -308,6 +332,9 @@ class LocalBookService {
         .catchError((_) {})
         .then((_) async {
           token?.check();
+          if (preview.illustrationUpgrade) {
+            return await _commitIllustrationUpgrade(preview, token);
+          }
           if (preview.legacyAlias != null) {
             final old = await _metadata(preview.destination);
             if (old != null && old['source_sha256'] != preview.sourceHash) {
@@ -433,6 +460,191 @@ class LocalBookService {
     return operation;
   }
 
+  Future<LocalImportPreview> _prepareIllustrationUpgrade(
+    LocalImportPreview old,
+    ParsedLocalBook parsed,
+    Directory stage,
+    LocalImportToken token,
+  ) async {
+    final oldText = <(Chapter, String)>[], newText = <(Chapter, String)>[];
+    final oldEmpty = <Chapter>[];
+    final hashes = <String, String>{};
+    for (final chapter in old.chapters) {
+      token.check();
+      if (!RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(chapter.itemId)) {
+        throw const FormatException('旧书章节标识不安全，未修改旧数据');
+      }
+      final file = File('${old.destination.path}/${chapter.itemId}.txt');
+      if (await file.length() > 8 * 1024 * 1024) {
+        throw const FormatException('旧书正文异常');
+      }
+      final bytes = await file.readAsBytes();
+      hashes[chapter.itemId] = sha256.convert(bytes).toString();
+      final text = ReaderText.paragraphs(
+        utf8.decode(bytes),
+        chapterTitle: chapter.title,
+      ).join('\n\n');
+      if (text.trim().isEmpty) {
+        oldEmpty.add(chapter);
+      } else {
+        oldText.add((chapter, text));
+      }
+    }
+    for (final chapter in parsed.chapters) {
+      token.check();
+      final raw = await File(
+        '${stage.path}/${chapter.itemId}.txt',
+      ).readAsString();
+      final text = ReaderText.paragraphs(
+        raw,
+        chapterTitle: chapter.title,
+      ).join('\n\n');
+      if (text.trim().isNotEmpty) newText.add((chapter, text));
+    }
+    if (oldText.length != newText.length ||
+        List.generate(
+          oldText.length,
+          (i) => oldText[i].$2 != newText[i].$2,
+        ).any((v) => v)) {
+      throw const FormatException('旧书正文与源文件不同，未改动旧书、进度或批注');
+    }
+    final mapping = {
+      for (var i = 0; i < newText.length; i++)
+        newText[i].$1.itemId: oldText[i].$1,
+    };
+    final chapters = <Chapter>[];
+    for (final chapter in parsed.chapters) {
+      var previous = mapping[chapter.itemId];
+      if (previous == null) {
+        final label = chapter.title.replaceFirst(RegExp(r'（插图 \d+）$'), '');
+        final candidates = oldEmpty.where(
+          (c) => c.title == label || c.title == chapter.title,
+        );
+        if (candidates.isNotEmpty) {
+          previous = candidates.first;
+          oldEmpty.remove(previous);
+        }
+      }
+      chapters.add(
+        Chapter(
+          itemId: previous?.itemId ?? chapter.itemId,
+          title: previous?.title ?? chapter.title,
+          order: chapters.length + 1,
+          volumeTitle: chapter.volumeTitle,
+          illustrations: chapter.illustrations,
+        ),
+      );
+    }
+    final book = Book.fromDetailJson({
+      ...old.book.toJson(),
+      'serial_count': chapters.length,
+    });
+    await AtomicFile.writeString(
+      File('${stage.path}/directory.json'),
+      jsonEncode(chapters.map((c) => c.toJson()).toList()),
+    );
+    return LocalImportPreview(
+      book: book,
+      chapters: chapters,
+      encoding: old.encoding,
+      sourceHash: old.sourceHash,
+      destination: old.destination,
+      staging: stage,
+      sample: old.sample,
+      coverPreview: old.coverPreview,
+      illustrationUpgrade: true,
+      expectedTextHashes: hashes,
+    );
+  }
+
+  Future<LocalImportResult> _commitIllustrationUpgrade(
+    LocalImportPreview preview,
+    LocalImportToken? token,
+  ) async {
+    final directory = preview.destination;
+    if (await FileSystemEntity.isLink(directory.path) ||
+        await FileSystemEntity.isLink('${directory.path}/images')) {
+      throw const FormatException('原书目录包含不安全链接，未执行插图升级');
+    }
+    final metadataFile = File('${directory.path}/metadata.json');
+    final directoryFile = File('${directory.path}/directory.json');
+    final originalMetadata = await metadataFile.readAsString();
+    final originalDirectory = await directoryFile.readAsString();
+    final metadata = jsonDecode(originalMetadata) as Map<String, dynamic>;
+    if (metadata['source_sha256'] != preview.sourceHash) {
+      throw const FormatException('旧书身份已变化，未执行插图升级');
+    }
+    for (final entry in preview.expectedTextHashes.entries) {
+      token?.check();
+      if (sha256
+              .convert(
+                await File('${directory.path}/${entry.key}.txt').readAsBytes(),
+              )
+              .toString() !=
+          entry.value) {
+        throw const FormatException('预览后旧书正文已变化，未修改旧数据');
+      }
+    }
+    try {
+      final images = Directory('${preview.staging!.path}/images');
+      if (await images.exists()) {
+        await Directory('${directory.path}/images').create(recursive: true);
+        await for (final file in images.list(followLinks: false)) {
+          token?.check();
+          if (file is! File) throw const FormatException('插图目录包含不安全资源');
+          final name = path.basename(file.path);
+          final target = File('${directory.path}/images/$name');
+          final pending = File('${target.path}.pending');
+          final type = await FileSystemEntity.type(
+            pending.path,
+            followLinks: false,
+          );
+          if (type != FileSystemEntityType.notFound &&
+              type != FileSystemEntityType.file) {
+            throw const FormatException('插图临时路径包含不安全链接');
+          }
+          await file.copy(pending.path);
+          await pending.rename(target.path);
+        }
+      }
+      for (final chapter in preview.chapters) {
+        token?.check();
+        final file = File('${directory.path}/${chapter.itemId}.txt');
+        if (!await file.exists()) {
+          // Only new image-only chapters are added. Existing text is untouched.
+          await AtomicFile.writeString(file, ReaderText.imageOnlyMarker);
+        }
+      }
+      token?.check();
+      await AtomicFile.writeString(
+        directoryFile,
+        jsonEncode(preview.chapters.map((c) => c.toJson()).toList()),
+      );
+      await AtomicFile.writeString(
+        metadataFile,
+        jsonEncode({
+          ...metadata,
+          'illustrations_version': 1,
+          'book': preview.book.toJson(),
+        }),
+      );
+      await BookshelfService().addToBookshelf(
+        preview.book,
+        totalChapters: preview.chapters.length,
+      );
+      return LocalImportResult(
+        book: preview.book,
+        chapters: preview.chapters,
+        chapterCount: preview.chapters.length,
+        alreadyExists: true,
+      );
+    } catch (_) {
+      await AtomicFile.writeString(directoryFile, originalDirectory);
+      await AtomicFile.writeString(metadataFile, originalMetadata);
+      rethrow;
+    }
+  }
+
   Future<Map<String, dynamic>?> _metadata(Directory directory) async {
     try {
       return jsonDecode(
@@ -482,7 +694,9 @@ class LocalBookService {
         sourceHash: sourceHash,
         destination: directory,
         alreadyExists: true,
-        sample: sample.length > 600
+        sample: sample.trim() == ReaderText.imageOnlyMarker
+            ? '【插图章节】'
+            : sample.length > 600
             ? sample.substring(0, ReaderText.safeOffset(sample, 600))
             : sample,
         coverPreview: book.thumbUrl,
@@ -501,6 +715,7 @@ class LocalBookService {
     String encoding,
     LocalImportToken token,
   ) async {
+    if (chapters.any((c) => c.illustrations.isNotEmpty)) return null;
     for (final shelf in BookshelfService().books.where(
       (b) =>
           RegExp(r'^local_(txt|epub)_\d+$').hasMatch(b.bookId) &&
@@ -554,7 +769,9 @@ class LocalBookService {
           sourceHash: sourceHash,
           destination: directory,
           staging: stage,
-          sample: sample.length > 600
+          sample: sample.trim() == ReaderText.imageOnlyMarker
+              ? '【插图章节】'
+              : sample.length > 600
               ? sample.substring(0, ReaderText.safeOffset(sample, 600))
               : sample,
           alreadyExists: true,

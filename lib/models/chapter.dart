@@ -1,3 +1,5 @@
+import 'reader_illustration.dart';
+
 /// 章节数据模型
 class Chapter {
   final String itemId;
@@ -5,6 +7,7 @@ class Chapter {
   final int order;
   final String? content;
   final String volumeTitle;
+  final List<ReaderIllustration> illustrations;
 
   Chapter({
     required this.itemId,
@@ -12,11 +15,13 @@ class Chapter {
     this.order = 0,
     this.content,
     this.volumeTitle = '',
+    this.illustrations = const [],
   });
 
   /// 从目录 JSON 创建 Chapter 对象
   factory Chapter.fromDirectoryJson(Map<String, dynamic> json, int index) {
-    final vol = json['volume_name']?.toString() ??
+    final vol =
+        json['volume_name']?.toString() ??
         json['volume_title']?.toString() ??
         json['volume']?.toString() ??
         '';
@@ -25,12 +30,14 @@ class Chapter {
       title: json['title']?.toString() ?? '第${index + 1}章',
       order: index + 1,
       volumeTitle: vol,
+      illustrations: ReaderIllustration.parseList(json['illustrations']),
     );
   }
 
   /// 从完整目录 JSON 创建 Chapter 对象
   factory Chapter.fromBookJson(Map<String, dynamic> json) {
-    final vol = json['volume_name']?.toString() ??
+    final vol =
+        json['volume_name']?.toString() ??
         json['volume_title']?.toString() ??
         json['volume']?.toString() ??
         '';
@@ -39,6 +46,7 @@ class Chapter {
       title: json['title']?.toString() ?? '',
       order: int.tryParse(json['realChapterOrder']?.toString() ?? '0') ?? 0,
       volumeTitle: vol,
+      illustrations: ReaderIllustration.parseList(json['illustrations']),
     );
   }
 
@@ -50,6 +58,8 @@ class Chapter {
       'order': order,
       'content': content,
       'volume_title': volumeTitle,
+      if (illustrations.isNotEmpty)
+        'illustrations': illustrations.map((image) => image.toJson()).toList(),
     };
   }
 
@@ -61,6 +71,7 @@ class Chapter {
       order: order,
       content: newContent,
       volumeTitle: volumeTitle,
+      illustrations: illustrations,
     );
   }
 }

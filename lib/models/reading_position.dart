@@ -4,12 +4,14 @@ class ReadingPosition {
   final int paragraphIndex;
   final int characterOffset;
   final double viewportFraction;
+  final String? imageId;
 
   const ReadingPosition({
     required this.chapterId,
     this.paragraphIndex = 0,
     this.characterOffset = 0,
     this.viewportFraction = 0,
+    this.imageId,
   });
 
   Map<String, dynamic> toJson() => {
@@ -17,6 +19,7 @@ class ReadingPosition {
     'paragraph_index': paragraphIndex,
     'character_offset': characterOffset,
     'viewport_fraction': viewportFraction,
+    if (imageId != null) 'image_id': imageId,
   };
 
   factory ReadingPosition.fromJson(Map<String, dynamic> json) =>
@@ -30,5 +33,6 @@ class ReadingPosition {
             .clamp(0, 1 << 30),
         viewportFraction: ((json['viewport_fraction'] as num?)?.toDouble() ?? 0)
             .clamp(0.0, 1.0),
+        imageId: json['image_id']?.toString(),
       );
 }
