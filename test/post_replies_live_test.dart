@@ -7,6 +7,22 @@ import 'package:flutter_test/flutter_test.dart';
 
 class _RealHttp extends HttpOverrides {}
 
+// This endpoint reports code=100 with a 3–5s ban window for rapid paging.
+// Respect that window in explicitly enabled live verification; production
+// keeps its error/retry semantics and all protocol fields remain unchanged.
+Future<CommentReplyPageData?> _paced(
+  Future<CommentReplyPageData?> Function() request,
+) async {
+  // One bounded retry also covers an occasional ban/network failure. Do not
+  // drop pages or loosen any completeness/cursor/content assertions.
+  for (var attempt = 0; attempt < 2; attempt++) {
+    await Future<void>.delayed(const Duration(seconds: 6));
+    final page = await request();
+    if (page != null) return page;
+  }
+  return null;
+}
+
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
   test(
@@ -21,7 +37,7 @@ void main() {
       try {
         const book = '7322304923511557182';
         const post = '7445567655278428707';
-        var page = await api.getPostReplies(post, bookId: book);
+        var page = await _paced(() => api.getPostReplies(post, bookId: book));
         expect(page, isNotNull);
         expect(page!.total, greaterThanOrEqualTo(24));
         expect(page.hasMore, true);
@@ -38,10 +54,9 @@ void main() {
           if (!page.hasMore) break;
           expect(pages, lessThan(20));
           expect(cursors.add(page.cursor), true);
-          page = await api.getPostReplies(
-            post,
-            bookId: book,
-            cursor: page.cursor,
+          final nextCursor = page.cursor;
+          page = await _paced(
+            () => api.getPostReplies(post, bookId: book, cursor: nextCursor),
           );
           expect(page, isNotNull);
         }
@@ -49,11 +64,13 @@ void main() {
 
         const heavyPost = '7358868244197392959';
         const parentComment = '7358848420923458366';
-        CommentReplyPageData? nested = await api.getPostCommentReplies(
-          heavyPost,
-          parentComment,
-          bookId: book,
-          count: 3,
+        CommentReplyPageData? nested = await _paced(
+          () => api.getPostCommentReplies(
+            heavyPost,
+            parentComment,
+            bookId: book,
+            count: 3,
+          ),
         );
         expect(nested, isNotNull);
         expect(nested!.total, greaterThanOrEqualTo(2));
@@ -72,21 +89,23 @@ void main() {
           if (!nested.hasMore) break;
           expect(nestedPages, lessThan(20));
           expect(nestedCursors.add(nested.cursor), true);
-          nested = await api.getPostCommentReplies(
-            heavyPost,
-            parentComment,
-            bookId: book,
-            count: 3,
-            cursor: nested.cursor,
+          final nextCursor = nested.cursor;
+          nested = await _paced(
+            () => api.getPostCommentReplies(
+              heavyPost,
+              parentComment,
+              bookId: book,
+              count: 3,
+              cursor: nextCursor,
+            ),
           );
           expect(nested, isNotNull);
         }
         expect(nestedIds, hasLength(nestedTotal));
 
         // The five posts in chapter 1521 currently have no child replies.
-        final empty = await api.getPostReplies(
-          '7561614993045832254',
-          bookId: book,
+        final empty = await _paced(
+          () => api.getPostReplies('7561614993045832254', bookId: book),
         );
         expect(empty?.replies, isEmpty);
         expect(empty?.total, 0);

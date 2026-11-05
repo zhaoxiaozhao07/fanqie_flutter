@@ -4,13 +4,22 @@ import 'app_theme.dart';
 import 'screens/main_screen.dart';
 import 'services/reader_route_observer.dart';
 import 'services/reader_backup_service.dart';
+import 'services/app_lifecycle_service.dart';
+import 'services/reader_platform.dart';
+import 'widgets/desktop_shortcuts.dart';
+
+Future<void> initializeReaderApplication() async {
+  AppLifecycleService.initialize();
+  await ReaderPlatform.initialize();
+  await ReaderBackupService().recover();
+}
 
 Future<void> main() async {
   // 确保 Flutter 绑定已初始化
   WidgetsFlutterBinding.ensureInitialized();
   try {
-    await ReaderBackupService().recover();
-  } catch (_) {
+    await initializeReaderApplication();
+  } catch (error) {
     runApp(
       MaterialApp(
         home: Scaffold(
@@ -21,7 +30,11 @@ Future<void> main() async {
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    const Text('上次恢复尚未完成，原数据与恢复日志已保留。请检查存储空间后重试。'),
+                    Text(
+                      error is StateError && ReaderPlatform.isMacOS
+                          ? 'macOS 客户端初始化失败，请重新构建或重试。原阅读数据未被清除。'
+                          : '上次恢复尚未完成，原数据与恢复日志已保留。请检查存储空间后重试。',
+                    ),
                     const SizedBox(height: 16),
                     FilledButton(onPressed: main, child: const Text('重试恢复')),
                   ],
@@ -70,6 +83,8 @@ class FanqieApp extends StatelessWidget {
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       navigatorObservers: [readerRouteObserver],
+      builder: (context, child) =>
+          DesktopShortcuts(child: child ?? const SizedBox.shrink()),
       home: const MainScreen(),
     );
   }

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:isolate';
 
 import 'package:flutter/services.dart';
+import 'reader_platform.dart';
 
 import 'local_book_parser.dart' show LocalImportCancelled;
 
@@ -41,7 +42,7 @@ Future<NormalizedLocalText> normalizeLocalText(
   LocalImportToken token,
 ) async {
   token.check();
-  if (Platform.isAndroid) {
+  if (Platform.isAndroid || ReaderPlatform.isMacOS) {
     final result =
         await const MethodChannel(
           'com.fanqie.fanqie_flutter/download',
@@ -51,6 +52,11 @@ Future<NormalizedLocalText> normalizeLocalText(
           'id': token.id,
         });
     if (result == null) throw const FormatException('文本解码失败');
+    if (token.cancelled) {
+      final normalized = File(result['path'] as String);
+      if (await normalized.exists()) await normalized.delete();
+    }
+    token.check();
     return NormalizedLocalText(
       File(result['path'] as String),
       result['encoding'] as String,

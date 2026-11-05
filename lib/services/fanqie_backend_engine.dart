@@ -15,6 +15,7 @@ import 'online_chapter.dart';
 import 'online_illustration_store.dart';
 import 'book_directory_cache.dart';
 import 'book_directory_parser.dart';
+import 'reader_platform.dart';
 
 /// 番茄小说内置后端引擎
 /// 直接请求已验证的官方接口，不依赖旧第三方代理节点：
@@ -79,8 +80,11 @@ class FanqieBackendEngine {
   Future<Directory> _getChapterCacheDir() async {
     Directory baseDir;
     try {
-      baseDir = await getTemporaryDirectory();
+      baseDir = ReaderPlatform.isMacOS
+          ? await readerCache.documents()
+          : await getTemporaryDirectory();
     } catch (_) {
+      if (ReaderPlatform.isMacOS) rethrow;
       baseDir = Directory.systemTemp;
     }
     final dir = Directory('${baseDir.path}/fanqie_cache/chapters');

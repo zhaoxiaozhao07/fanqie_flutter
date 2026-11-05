@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'package:archive/archive.dart';
@@ -13,6 +14,9 @@ import 'history_service.dart';
 import 'epub_chapter_content.dart';
 import 'cover_cache_service.dart';
 import 'book_image_fetcher.dart';
+import 'app_storage.dart';
+import 'file_export_service.dart';
+import 'reader_platform.dart';
 
 /// 下载任务状态
 enum DownloadTaskStatus {
@@ -85,6 +89,7 @@ class DownloadService extends ChangeNotifier {
   static const platform = MethodChannel('com.fanqie.fanqie_flutter/download');
 
   final List<DownloadTask> _tasks = [];
+  final Set<Future<void>> _executions = {};
   List<DownloadTask> get tasks => List.unmodifiable(_tasks);
 
   List<DownloadTask> get activeTasks =>
@@ -129,7 +134,9 @@ class DownloadService extends ChangeNotifier {
     notifyListeners();
 
     // 异步执行下载流程，不阻塞当前调用
-    _executeTask(task);
+    final execution = _executeTask(task);
+    _executions.add(execution);
+    unawaited(execution.whenComplete(() => _executions.remove(execution)));
 
     return task;
   }
@@ -141,9 +148,24 @@ class DownloadService extends ChangeNotifier {
         task.isCancelled = true;
         task.status = DownloadTaskStatus.cancelled;
         task.message = '已取消下载';
+        if (ReaderPlatform.isMacOS) {
+          unawaited(
+            ReaderPlatform.invoke('cancelExport', {
+              'id': task.id,
+            }).catchError((_) => null),
+          );
+        }
       }
     }
     notifyListeners();
+  }
+
+  /// 移除已完成或失败的任务
+  Future<void> cancelAllAndWait() async {
+    for (final task in activeTasks.toList()) {
+      cancelDownload(task.book.bookId);
+    }
+    await Future.wait(_executions.toList());
   }
 
   /// 移除已完成或失败的任务
@@ -206,12 +228,27 @@ class DownloadService extends ChangeNotifier {
 
       String? filePath;
       if (task.format == 'TXT') {
-        filePath = await _assembleAndSaveTxt(task.book, task.chapters);
+        filePath = await _assembleAndSaveTxt(
+          task.book,
+          task.chapters,
+          requestId: task.id,
+          isCancelled: () => task.isCancelled,
+        );
       } else {
-        filePath = await _assembleAndSaveEpub(task.book, task.chapters);
+        filePath = await _assembleAndSaveEpub(
+          task.book,
+          task.chapters,
+          requestId: task.id,
+          isCancelled: () => task.isCancelled,
+        );
       }
 
-      if (filePath != null) {
+      // A saved native result is authoritative: cancellation after the atomic
+      // commit cannot turn an existing exported file into a cancelled task.
+      if (task.isCancelled && !(ReaderPlatform.isMacOS && filePath != null)) {
+        task.status = DownloadTaskStatus.cancelled;
+        task.message = '导出已取消，已下载正文仍保留';
+      } else if (filePath != null) {
         task.status = DownloadTaskStatus.completed;
         task.filePath = filePath;
         task.message = '下载完成';
@@ -221,6 +258,12 @@ class DownloadService extends ChangeNotifier {
         task.message = '保存文件失败';
       }
     } catch (e) {
+      if (e is FileExportCancelled) {
+        task.isCancelled = true;
+        task.status = DownloadTaskStatus.cancelled;
+        task.message = '导出已取消，已下载正文仍保留';
+        return;
+      }
       if (kDebugMode) {
         debugPrint('DownloadTask error: $e');
       }
@@ -305,7 +348,13 @@ class DownloadService extends ChangeNotifier {
   }
 
   /// 组装并保存 TXT 文件
-  Future<String?> _assembleAndSaveTxt(Book book, List<Chapter> chapters) async {
+  Future<String?> _assembleAndSaveTxt(
+    Book book,
+    List<Chapter> chapters, {
+    String? requestId,
+    bool Function()? isCancelled,
+  }) async {
+    Directory? staging;
     try {
       final offlineDir = await _apiService.engine.getOfflineBookDir(
         book.bookId,
@@ -318,7 +367,8 @@ class DownloadService extends ChangeNotifier {
       }
       final safeFileName =
           '${book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '')}.txt';
-      final tempFile = File('${tempDir.path}/$safeFileName');
+      staging = await tempDir.createTemp('reader-download-');
+      final tempFile = File('${staging.path}/$safeFileName');
       final sink = tempFile.openWrite();
 
       sink.writeln('《${book.bookName}》\n作者: ${book.author}\n\n');
@@ -329,7 +379,8 @@ class DownloadService extends ChangeNotifier {
         if (await cacheFile.exists() && await cacheFile.length() > 0) {
           await sink.addStream(cacheFile.openRead());
         } else {
-          sink.writeln('[章节内容下载失败]');
+          await sink.close();
+          throw const FileSystemException('已下载章节不完整，未生成占位正文');
         }
         if (i < chapters.length - 1) {
           sink.writeln(
@@ -338,11 +389,14 @@ class DownloadService extends ChangeNotifier {
         }
       }
       await sink.close();
+      if (isCancelled?.call() == true) throw const FileExportCancelled();
 
       final savedPath = await _saveFileViaPlatform(
         tempFile.path,
         safeFileName,
         'text/plain',
+        requestId: requestId,
+        isCancelled: isCancelled,
       );
 
       if (await tempFile.exists()) {
@@ -350,6 +404,9 @@ class DownloadService extends ChangeNotifier {
       }
 
       if (savedPath != null) {
+        if (!ReaderPlatform.isMacOS && isCancelled?.call() == true) {
+          throw const FileExportCancelled();
+        }
         int fileSize = 0;
         final file = File(savedPath);
         if (await file.exists()) {
@@ -374,7 +431,12 @@ class DownloadService extends ChangeNotifier {
         return savedPath;
       }
     } catch (e) {
+      if (e is FileExportCancelled) rethrow;
       if (kDebugMode) debugPrint('_assembleAndSaveTxt error: $e');
+    } finally {
+      if (staging != null && await staging.exists()) {
+        await staging.delete(recursive: true);
+      }
     }
     return null;
   }
@@ -382,8 +444,11 @@ class DownloadService extends ChangeNotifier {
   /// 组装并保存 EPUB 文件
   Future<String?> _assembleAndSaveEpub(
     Book book,
-    List<Chapter> chapters,
-  ) async {
+    List<Chapter> chapters, {
+    String? requestId,
+    bool Function()? isCancelled,
+  }) async {
+    Directory? staging;
     try {
       final offlineDir = await _apiService.engine.getOfflineBookDir(
         book.bookId,
@@ -651,13 +716,17 @@ $navPoints  </navMap>
       } catch (_) {
         tempDir = Directory.systemTemp;
       }
-      final tempFile = File('${tempDir.path}/$safeFileName');
+      staging = await tempDir.createTemp('reader-download-');
+      final tempFile = File('${staging.path}/$safeFileName');
       await tempFile.writeAsBytes(zipData);
+      if (isCancelled?.call() == true) throw const FileExportCancelled();
 
       final savedPath = await _saveFileViaPlatform(
         tempFile.path,
         safeFileName,
         'application/epub+zip',
+        requestId: requestId,
+        isCancelled: isCancelled,
       );
 
       if (await tempFile.exists()) {
@@ -665,6 +734,9 @@ $navPoints  </navMap>
       }
 
       if (savedPath != null) {
+        if (!ReaderPlatform.isMacOS && isCancelled?.call() == true) {
+          throw const FileExportCancelled();
+        }
         final file = File(savedPath);
         int fileSize = 0;
         if (await file.exists()) {
@@ -689,7 +761,12 @@ $navPoints  </navMap>
         return savedPath;
       }
     } catch (e) {
+      if (e is FileExportCancelled) rethrow;
       if (kDebugMode) debugPrint('_assembleAndSaveEpub error: $e');
+    } finally {
+      if (staging != null && await staging.exists()) {
+        await staging.delete(recursive: true);
+      }
     }
     return null;
   }
@@ -698,9 +775,26 @@ $navPoints  </navMap>
   Future<String?> _saveFileViaPlatform(
     String tempFilePath,
     String safeFileName,
-    String mimeType,
-  ) async {
-    if (Platform.isAndroid) {
+    String mimeType, {
+    String? requestId,
+    bool Function()? isCancelled,
+  }) async {
+    if (ReaderPlatform.isMacOS) {
+      final result = await FileExportService().save(
+        File(tempFilePath),
+        name: safeFileName,
+        mimeType: mimeType,
+        requestId: requestId,
+        isCancelled: isCancelled,
+      );
+      if (result.status == FileExportStatus.cancelled) {
+        throw const FileExportCancelled();
+      }
+      if (result.status == FileExportStatus.failed) {
+        throw FileSystemException(result.error ?? '导出保存失败');
+      }
+      return result.path;
+    } else if (Platform.isAndroid) {
       try {
         final bool success = await platform.invokeMethod('saveToDownloads', {
           'filePath': tempFilePath,
@@ -715,7 +809,7 @@ $navPoints  </navMap>
       }
     } else {
       try {
-        final docDir = await getApplicationDocumentsDirectory();
+        final docDir = await AppStorage.documents();
         final saveDir = Directory('${docDir.path}/fanqie_downloads');
         if (!await saveDir.exists()) {
           await saveDir.create(recursive: true);

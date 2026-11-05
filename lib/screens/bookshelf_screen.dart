@@ -2,6 +2,7 @@ import '../widgets/book_page_route.dart';
 import 'dart:io';
 import 'dart:convert';
 import 'dart:async';
+import 'dart:math' as math;
 import '../services/reader_route_observer.dart';
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -22,6 +23,7 @@ import '../widgets/download_action_button.dart';
 import 'book_detail_screen.dart';
 import 'reader_screen.dart';
 import '../services/reader_settings_repository.dart';
+import '../services/reader_platform.dart';
 
 enum BookshelfSortType {
   recentRead, // 最近阅读
@@ -1061,7 +1063,11 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
   Widget _buildFavoritesGrid() {
     final screenWidth = MediaQuery.of(context).size.width;
     final isWide = screenWidth > 900;
-    final width = ((isWide ? 900.0 : screenWidth) - 60) / 3;
+    final columns = ReaderPlatform.isMacOS
+        ? ((math.min(screenWidth, 900) - 32) / 170).floor().clamp(2, 5)
+        : 3;
+    final width =
+        ((isWide ? 900.0 : screenWidth) - 32 - 14 * (columns - 1)) / columns;
     final scaler = MediaQuery.textScalerOf(context);
     final titleHeight = 36 * scaler.scale(13) / 13;
     final authorHeight = 16 * scaler.scale(11) / 11;
@@ -1077,7 +1083,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
           },
           padding: const EdgeInsets.all(16),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
+            crossAxisCount: columns,
             mainAxisExtent: width * 1.42 + titleHeight + authorHeight + 12,
             crossAxisSpacing: 14,
             mainAxisSpacing: 16,
@@ -1532,7 +1538,11 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
   Widget _buildDownloadsGrid() {
     final screenWidth = MediaQuery.of(context).size.width;
     final isWide = screenWidth > 900;
-    final width = ((isWide ? 900.0 : screenWidth) - 60) / 3;
+    final columns = ReaderPlatform.isMacOS
+        ? ((math.min(screenWidth, 900) - 32) / 170).floor().clamp(2, 5)
+        : 3;
+    final width =
+        ((isWide ? 900.0 : screenWidth) - 32 - 14 * (columns - 1)) / columns;
     final scaler = MediaQuery.textScalerOf(context);
     final titleHeight = 36 * scaler.scale(13) / 13;
     final authorHeight = 16 * scaler.scale(11) / 11;
@@ -1550,7 +1560,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
           },
           padding: const EdgeInsets.all(16),
           gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-            crossAxisCount: 3,
+            crossAxisCount: columns,
             mainAxisExtent: width * 1.42 + titleHeight + authorHeight + 12,
             crossAxisSpacing: 14,
             mainAxisSpacing: 16,

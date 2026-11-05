@@ -2,10 +2,11 @@ import 'dart:io';
 import 'package:archive/archive.dart';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
 import 'atomic_file.dart';
+import 'app_storage.dart';
 import 'book_image_fetcher.dart';
 import 'reader_cache_service.dart';
+import 'reader_platform.dart';
 
 /// 书籍封面持久化缓存与离线提取服务
 class CoverCacheService {
@@ -28,8 +29,9 @@ class CoverCacheService {
     final cleanId = ReaderCacheService.segment(bookId.trim());
     Directory baseDir;
     try {
-      baseDir = await (documents ?? getApplicationDocumentsDirectory)();
+      baseDir = await (documents ?? AppStorage.documents)();
     } catch (_) {
+      if (ReaderPlatform.isMacOS) rethrow;
       baseDir = Directory.systemTemp;
     }
     final dir = Directory('${baseDir.path}/offline_books/$cleanId');

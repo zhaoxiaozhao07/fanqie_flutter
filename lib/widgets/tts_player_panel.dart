@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import '../app_theme.dart';
 import '../services/tts_service.dart';
+import '../services/reader_platform.dart';
 
 /// 听书控制底栏面板
 class TtsPlayerPanel extends StatelessWidget {
@@ -22,6 +23,7 @@ class TtsPlayerPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    if (!ReaderPlatform.capabilities.tts) return const SizedBox.shrink();
     final ttsService = TtsService();
 
     return AnimatedBuilder(

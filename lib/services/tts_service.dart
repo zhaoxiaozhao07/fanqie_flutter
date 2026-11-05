@@ -15,6 +15,7 @@ import 'api_service.dart';
 import 'bookshelf_service.dart';
 import 'reader_position_service.dart';
 import 'reader_system_service.dart';
+import 'reader_platform.dart';
 import 'reader_text.dart';
 import 'reading_history_service.dart';
 
@@ -51,7 +52,8 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   static const _channel = MethodChannel('com.fanqie.fanqie_flutter/download');
 
   TtsService._internal()
-    : _invoke = _nativeInvoke,
+    : _testInvoker = false,
+      _invoke = _nativeInvoke,
       _http = http.Client(),
       _now = DateTime.now {
     WidgetsBinding.instance.addObserver(this);
@@ -65,7 +67,8 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     http.Client? client,
     DateTime Function()? now,
     bool bindPlatformEvents = false,
-  }) : _invoke = invoke,
+  }) : _testInvoker = true,
+       _invoke = invoke,
        _http = client ?? http.Client(),
        _now = now ?? DateTime.now {
     if (bindPlatformEvents) {
@@ -78,8 +81,16 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   static Future<Object?> _nativeInvoke(
     String method,
     Map<String, Object?>? args,
-  ) => _channel.invokeMethod<Object?>(method, args);
+  ) async {
+    if (ReaderPlatform.isMacOS && !ReaderPlatform.capabilities.tts) return null;
+    return _channel.invokeMethod<Object?>(method, args);
+  }
 
+  final bool _testInvoker;
+  bool get isAvailable =>
+      _testInvoker ||
+      !ReaderPlatform.isMacOS ||
+      ReaderPlatform.capabilities.tts;
   final TtsInvoker _invoke;
   final http.Client _http;
   final DateTime Function() _now;
@@ -248,6 +259,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
       _state != TtsPlayState.paused;
 
   Future<void> loadSettings() async {
+    if (!isAvailable) return;
     final prefs = await SharedPreferences.getInstance();
     _engineType = prefs.getString('tts_engine_type') == 'openAi'
         ? TtsEngineType.openAi
@@ -281,6 +293,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     String? openAiVoice,
     double? speechRate,
   }) async {
+    if (!isAvailable) throw UnsupportedError('macOS 听书将在后续版本提供');
     await _ready;
     final previousVoice = (
       _engineType,
@@ -394,6 +407,11 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     int chapterIndex, {
     ReadingPosition? position,
   }) async {
+    if (!isAvailable) {
+      _notice = 'macOS 听书将在后续版本提供';
+      _notify();
+      return;
+    }
     final intent = ++_startIntent;
     await _ready;
     if (intent != _startIntent) return;

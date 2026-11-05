@@ -1,0 +1,24 @@
+// Application-level settings for the Runner target.
+//
+// This may be replaced with something auto-generated from metadata (e.g., pubspec.yaml) in the
+// future. If not, the values below would default to using the project name when this becomes a
+// 'flutter create' template.
+
+// The application's name. By default this is also the title of the Flutter window.
+PRODUCT_NAME = FanqieReader
+
+// The application's bundle identifier
+PRODUCT_BUNDLE_IDENTIFIER = com.fanqie.reader.macos
+
+// The copyright displayed in application information
+PRODUCT_COPYRIGHT = Copyright © 2026 com.fanqie. All rights reserved.
+
+// The desktop release deliberately supports Apple Silicon only.
+ARCHS = arm64
+EXCLUDED_ARCHS = x86_64
+MACOSX_DEPLOYMENT_TARGET = 12.0
+// Ad-hoc internal builds have no shared signing Team ID for library validation.
+// package_macos.sh enables Hardened Runtime only after signing every component
+// with the same Developer ID; formal builds never disable library validation.
+ENABLE_HARDENED_RUNTIME = NO
+OTHER_LDFLAGS = $(inherited) -liconv

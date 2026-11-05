@@ -4,6 +4,8 @@
 
 [最新版本](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/latest) · [发布验证](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/release.yml)
 
+macOS 核心阅读客户端已完成主要适配代码与本地自动化验证，当前仅提供 Apple Silicon 内部测试构建，部分手工验收仍待完成。正式签名、公证与 GitHub Actions 构建按当前决定延期。见 [开发计划](docs/MACOS_CLIENT_DEVELOPMENT_PLAN.md) 与 [实施和验证记录](docs/MACOS_CLIENT_VERIFICATION.md)。
+
 ## v3.3.4 帖子回复展开（覆盖更新，构建 340）
 
 - 已接入帖子回复和楼中楼的独立读取接口，支持展开/收起、游标分页、配图和回复对象显示；失败保留内容并支持重试，刷新或收起后不再附加迟到的旧回复。
@@ -167,6 +169,31 @@ DEVICE_ID=emulator-5554 bash scripts/test_android_platform.sh
 
 测试结果见 [v3.3.0 实施与验证记录](docs/V3_3_0_VERIFICATION.md)；已有阅读功能的记录见 [v3.2.0](docs/V3_2_0_IMPLEMENTATION_STATUS.md)。
 
+### macOS 内部构建与验证
+
+仅 Apple Silicon（`arm64`），最低构建目标 macOS 12.0；最低系统实机、正式签名、公证与公开分发尚未完成。macOS 听书属于后续 S7，当前隐藏入口，不支持跨端同步或备份互通。
+
+```bash
+flutter pub get
+flutter run -d macos
+scripts/test_macos_platform.sh          # Debug 实际通道 + Swift 原生测试
+scripts/test_macos_release_smoke.sh     # 隔离数据的 Release AOT/沙盒启动测试，结束后恢复正式入口
+scripts/package_macos.sh               # Release 内部 DMG + SHA-256，绝不冒充正式包
+
+# 显式真实在线闭环（不进入默认离线测试）
+flutter test integration_test/macos_business_platform_test.dart -d macos \
+  --dart-define=FANQIE_LIVE_API=true --reporter expanded
+
+flutter test integration_test/macos_reader_soak_test.dart -d macos \
+  --dart-define=SOAK_SECONDS=1800 --reporter expanded
+```
+
+不要同时运行多个 macOS **构建**：它们共享 Xcode/Flutter 输出目录。正式打包必须使用恢复后的 `lib/main.dart` 入口。增量构建切换测试入口后，`scripts/sign_macos_internal.sh <app路径> release` 可刷新内部临时签名；发布脚本采用单独的 Developer ID 签名流程。
+
+macOS 阅读文件、缓存和恢复日志使用 Application Support；导出通过系统“另存为”流式保存，取消不写入下载成功记录、不删除已下载正文。平台测试使用隔离目录/偏好设置，不用于日常阅读数据。
+
+当前不配置或运行 macOS GitHub Actions，先在本机测试；正式签名、公证及公开分发后续再做。现有 Android 工作流保持不变，本次检查点提交通过 `[skip ci]` 避免触发云端构建。阶段状态和后续配置见 [macOS 验证记录](docs/MACOS_CLIENT_VERIFICATION.md)。
+
 ## 发布
 
 版本号来自 `pubspec.yaml`，发布标签必须与其一致。发布 workflow 恢复为单个快速构建任务：
@@ -185,7 +212,7 @@ DEVICE_ID=emulator-5554 bash scripts/test_android_platform.sh
 - 系统语音需要设备安装可用的中文语音引擎；原生暂停恢复以当前切片为单位。
 - 阅读时长和剩余时间是依据交互与进度的估计，不代表注意力或精确阅读速度。
 - 模拟器和自动化验证不等同于所有厂商系统、真实中文音色听感或低端真机性能测量。
-- 本轮不包含账号云同步、AI 剧情总结、其他内容形态或完整 iOS/桌面端适配。
+- 不包含账号云同步、AI 剧情总结、其他内容形态、iOS 或 Intel macOS。Apple Silicon macOS 仍处于内部验收阶段。
 
 ## 免责声明
 

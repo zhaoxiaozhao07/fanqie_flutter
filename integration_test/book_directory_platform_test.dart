@@ -4,6 +4,11 @@ import 'package:fanqie_flutter/models/book.dart';
 import 'package:fanqie_flutter/screens/book_detail_screen.dart';
 import 'package:fanqie_flutter/screens/reader_screen.dart';
 import 'package:fanqie_flutter/services/api_service.dart';
+import 'package:fanqie_flutter/services/app_storage.dart';
+import 'package:fanqie_flutter/services/app_lifecycle_service.dart';
+import 'package:fanqie_flutter/services/reader_platform.dart';
+import 'package:fanqie_flutter/services/reader_position_service.dart';
+import 'package:fanqie_flutter/services/reader_settings_repository.dart';
 import 'package:fanqie_flutter/services/bookshelf_service.dart';
 import 'package:fanqie_flutter/services/fanqie_backend_engine.dart';
 import 'package:fanqie_flutter/services/reader_cache_service.dart';
@@ -40,9 +45,16 @@ class _WithoutDetailHtml extends http.BaseClient {
 
 void main() {
   IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  bookDirectoryPlatformTests();
+}
+
+void bookDirectoryPlatformTests({
+  String platform = 'Android',
+  bool skip = false,
+}) {
   for (final source in ['home_new', 'old_book']) {
     testWidgets(
-      'Android real $source: card -> directory -> read/download -> delete/re-add',
+      '$platform real $source: card -> directory -> read/download -> delete/re-add',
       (tester) async {
         SharedPreferences.setMockInitialValues({
           'reader_settings_v2':
@@ -50,6 +62,12 @@ void main() {
         });
         await BookshelfService().reload();
         final root = await Directory.systemTemp.createTemp('catalog-platform-');
+        final previousDocuments = AppStorage.documentsOverride;
+        if (ReaderPlatform.isMacOS) {
+          AppStorage.documentsOverride = () async => root;
+          await ReaderPlatform.initialize();
+          AppLifecycleService.initialize();
+        }
         final cache = ReaderCacheService(documents: () async => root);
         final client = _WithoutDetailHtml();
         final api = ApiService(
@@ -202,11 +220,17 @@ void main() {
           }
           expect(tester.takeException(), isNull);
         } finally {
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+          await ReaderPositionService.flush();
+          await ReaderSettingsRepository.flush();
           api.dispose();
           await root.delete(recursive: true);
+          AppStorage.documentsOverride = previousDocuments;
         }
       },
       timeout: const Timeout(Duration(minutes: 4)),
+      skip: skip,
     );
   }
 }

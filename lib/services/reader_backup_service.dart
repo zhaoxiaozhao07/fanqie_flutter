@@ -4,13 +4,13 @@ import 'dart:io';
 import 'package:archive/archive_io.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
-import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/bookmark.dart';
 import '../models/reader_settings.dart';
 import '../models/reading_snapshot.dart';
 import 'atomic_file.dart';
+import 'app_storage.dart';
 import 'bookmark_service.dart';
 import 'bookshelf_service.dart';
 import 'reader_position_service.dart';
@@ -40,7 +40,9 @@ class ReaderBackupService {
   ReaderBackupService({
     Future<Directory> Function()? documents,
     this.notifyServices = true,
-  }) : documents = documents ?? getApplicationDocumentsDirectory;
+  }) : documents = documents ?? AppStorage.documents;
+  static int _activeTransactions = 0;
+  static bool get hasActiveTransaction => _activeTransactions > 0;
   static const _journal = 'reader_restore_journal.json';
   static final _id = RegExp(r'^[a-zA-Z0-9_-]{1,180}$');
   static const _exact = {
@@ -371,6 +373,15 @@ class ReaderBackupService {
     File file, {
     ReaderRestoreMode mode = ReaderRestoreMode.merge,
   }) async {
+    _activeTransactions++;
+    try {
+      await _restore(file, mode: mode);
+    } finally {
+      _activeTransactions--;
+    }
+  }
+
+  Future<void> _restore(File file, {required ReaderRestoreMode mode}) async {
     final (zip, incoming, _) = await _read(file);
     final base = await documents();
     await recover();
@@ -440,6 +451,15 @@ class ReaderBackupService {
 
   /// Roll back an interrupted transaction before exposing the main application UI.
   Future<void> recover() async {
+    _activeTransactions++;
+    try {
+      await _recover();
+    } finally {
+      _activeTransactions--;
+    }
+  }
+
+  Future<void> _recover() async {
     final base = await documents();
     final file = File('${base.path}/$_journal');
     if (!await file.exists()) return;

@@ -40,7 +40,13 @@ class _ReaderBackupDialogState extends State<ReaderBackupDialog> {
   Future<void> _create() => _run(() async {
     final file = await _service.create(includeBooks: _includeBooks);
     final location = await ReaderExportService().saveToDownloads(file);
-    if (mounted) setState(() => _message = '备份已保存到 $location');
+    if (mounted) {
+      setState(
+        () => _message = location == null
+            ? '已取消另存为；生成的备份仍保留在应用内'
+            : '备份已保存到 $location',
+      );
+    }
   }, '正在生成备份，不会修改原数据…');
 
   Future<void> _pick() => _run(() async {

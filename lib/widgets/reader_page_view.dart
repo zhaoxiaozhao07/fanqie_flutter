@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/gestures.dart';
+import '../services/reader_platform.dart';
 
 import 'reader_page_transition.dart';
 import 'simulation_page_turn.dart';
@@ -313,8 +315,26 @@ class ReaderPageViewState extends State<ReaderPageView> {
         turnToPreviousPage();
       },
       child: Listener(
+        onPointerSignal: (event) {
+          if (!ReaderPlatform.isMacOS ||
+              event is! PointerScrollEvent ||
+              widget.selection.value != null ||
+              event.scrollDelta.dy.abs() < event.scrollDelta.dx.abs() ||
+              event.scrollDelta.dy == 0) {
+            return;
+          }
+          // Let a descendant scrollable consume the event first. Vertical
+          // mouse wheels otherwise have no effect on horizontal PageView.
+          GestureBinding.instance.pointerSignalResolver.register(event, (_) {
+            widget.onUserPageTurn?.call();
+            _turn(forward: event.scrollDelta.dy > 0);
+          });
+        },
         onPointerDown: (event) {
-          _pointerStart = event.localPosition;
+          _pointerStart =
+              ReaderPlatform.isMacOS && event.kind == PointerDeviceKind.mouse
+              ? null
+              : event.localPosition;
           _reportedPointer = false;
         },
         onPointerMove: (event) {
@@ -344,6 +364,13 @@ class ReaderPageViewState extends State<ReaderPageView> {
                 pageContentChanges: widget.pageContentChanges,
                 backgroundColor: widget.backgroundColor,
                 isDark: widget.isDark,
+                supportedDevices: ReaderPlatform.isMacOS
+                    ? const {
+                        PointerDeviceKind.touch,
+                        PointerDeviceKind.stylus,
+                        PointerDeviceKind.trackpad,
+                      }
+                    : null,
                 isSelectionActive: () => widget.selection.value != null,
                 onDismissSelection: widget.onDismissSelection,
                 lastBubbleTapTimeGetter: widget.lastBubbleTap,

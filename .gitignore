@@ -91,3 +91,8 @@ local.properties
 .packages
 .metadata
 fanqie-backend/
+
+# macOS signing material (never commit certificates/private keys)
+*.p12
+*.pfx
+*.mobileprovision

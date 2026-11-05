@@ -31,6 +31,7 @@ class SimulationPageTurn extends StatefulWidget {
   final double previousTapFraction;
   final double nextTapFraction;
   final bool reverseTapSides;
+  final Set<PointerDeviceKind>? supportedDevices;
 
   const SimulationPageTurn({
     super.key,
@@ -57,6 +58,7 @@ class SimulationPageTurn extends StatefulWidget {
     this.previousTapFraction = 0.28,
     this.nextTapFraction = 0.72,
     this.reverseTapSides = false,
+    this.supportedDevices,
   });
 
   @override
@@ -567,6 +569,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
         return Listener(
           onPointerCancel: (_) => _pointerCancelled = true,
           child: GestureDetector(
+            supportedDevices: widget.supportedDevices,
             behavior: HitTestBehavior.translucent,
             dragStartBehavior: DragStartBehavior.down,
             onHorizontalDragDown: _onDragDown,

@@ -1,8 +1,8 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'app_storage.dart';
 
 enum ReaderCacheMode { saver, standard, commute }
 
@@ -71,15 +71,7 @@ class ReaderCacheService {
   }
 
   ReaderCacheService({Future<Directory> Function()? documents})
-    : documents = documents ?? _documents;
-
-  static Future<Directory> _documents() async {
-    try {
-      return await getApplicationDocumentsDirectory();
-    } catch (_) {
-      return Directory.systemTemp;
-    }
-  }
+    : documents = documents ?? AppStorage.documents;
 
   static String segment(String value) =>
       RegExp(r'^[a-zA-Z0-9_-]+$').hasMatch(value)

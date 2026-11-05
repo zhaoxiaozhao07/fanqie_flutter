@@ -1,12 +1,11 @@
 import 'dart:convert';
 import 'dart:io';
-import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
 import '../models/book.dart';
 import 'bookmark_service.dart';
+import 'file_export_service.dart';
 
 class ReaderExportService {
-  static const _channel = MethodChannel('com.fanqie.fanqie_flutter/download');
   static String _escape(String value) => value
       .replaceAll('&', '&amp;')
       .replaceAll('<', '&lt;')
@@ -51,22 +50,24 @@ class ReaderExportService {
     return file;
   }
 
-  Future<String> saveToDownloads(File file, {String? name}) async {
+  Future<String?> saveToDownloads(File file, {String? name}) async {
     final fileName = (name ?? file.uri.pathSegments.last).replaceAll(
       RegExp(r'[/\\\x00]'),
       '_',
     );
-    if (!Platform.isAndroid) return file.path;
-    final success = await _channel.invokeMethod<bool>('saveToDownloads', {
-      'filePath': file.path,
-      'fileName': fileName,
-      'mimeType': fileName.endsWith('.zip')
+    final result = await FileExportService().save(
+      file,
+      name: fileName,
+      mimeType: fileName.endsWith('.zip')
           ? 'application/zip'
           : fileName.endsWith('.json')
           ? 'application/json'
           : 'text/markdown',
-    });
-    if (success != true) throw const FileSystemException('导出保存失败');
-    return '下载/fanqie/$fileName';
+    );
+    if (result.status == FileExportStatus.cancelled) return null;
+    if (result.status == FileExportStatus.failed) {
+      throw FileSystemException(result.error ?? '导出保存失败');
+    }
+    return result.path;
   }
 }

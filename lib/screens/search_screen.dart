@@ -13,7 +13,8 @@ import 'book_detail_screen.dart';
 /// Official library discovery. Categories and their IDs come from the server.
 class SearchScreen extends StatefulWidget {
   final ApiService? apiService;
-  const SearchScreen({super.key, this.apiService});
+  final FocusNode? searchFocusNode;
+  const SearchScreen({super.key, this.apiService, this.searchFocusNode});
 
   @override
   State<SearchScreen> createState() => _SearchScreenState();
@@ -582,6 +583,7 @@ class _SearchScreenState extends State<SearchScreen> {
             valueListenable: _search,
             builder: (context, value, _) => TextField(
               controller: _search,
+              focusNode: widget.searchFocusNode,
               textInputAction: TextInputAction.search,
               textAlignVertical: TextAlignVertical.center,
               style: const TextStyle(fontSize: 14, color: AppTheme.textPrimary),

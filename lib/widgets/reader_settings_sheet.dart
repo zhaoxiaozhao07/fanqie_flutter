@@ -6,11 +6,13 @@ import '../models/reader_settings.dart';
 import '../models/reader_theme.dart';
 import '../services/reader_font_service.dart';
 import '../services/reader_settings_repository.dart';
+import '../services/reader_platform.dart';
 
 class ReaderSettingsSheet extends StatefulWidget {
   final String bookId;
   final ReaderSettings settings;
   final bool bookOverride;
+  final bool allowBookOverride;
   final Future<void> Function(ReaderSettings settings, bool bookOverride)
   onChanged;
 
@@ -19,6 +21,7 @@ class ReaderSettingsSheet extends StatefulWidget {
     required this.bookId,
     required this.settings,
     required this.bookOverride,
+    this.allowBookOverride = true,
     required this.onChanged,
   });
 
@@ -345,13 +348,14 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                             ),
                           ),
                         ),
-                        SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          title: const Text('仅此书使用这些设置'),
-                          subtitle: const Text('关闭后恢复全局设置，不改变其他书'),
-                          value: _bookOverride,
-                          onChanged: _busy ? null : _scope,
-                        ),
+                        if (widget.allowBookOverride)
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('仅此书使用这些设置'),
+                            subtitle: const Text('关闭后恢复全局设置，不改变其他书'),
+                            value: _bookOverride,
+                            onChanged: _busy ? null : _scope,
+                          ),
                         SwitchListTile(
                           contentPadding: EdgeInsets.zero,
                           title: const Text('纯净阅读'),
@@ -520,17 +524,19 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                             ],
                           ),
                         ),
-                        SwitchListTile(
-                          contentPadding: EdgeInsets.zero,
-                          title: const Text('亮度跟随系统'),
-                          value: _settings.systemBrightness,
-                          onChanged: _busy
-                              ? null
-                              : (value) => _change(
-                                  _settings.copyWith(systemBrightness: value),
-                                ),
-                        ),
-                        if (!_settings.systemBrightness)
+                        if (ReaderPlatform.capabilities.windowBrightness)
+                          SwitchListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('亮度跟随系统'),
+                            value: _settings.systemBrightness,
+                            onChanged: _busy
+                                ? null
+                                : (value) => _change(
+                                    _settings.copyWith(systemBrightness: value),
+                                  ),
+                          ),
+                        if (ReaderPlatform.capabilities.windowBrightness &&
+                            !_settings.systemBrightness)
                           Slider(
                             label: '${(_settings.brightness * 100).round()}%',
                             min: .05,
@@ -553,7 +559,8 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                                     _settings.copyWith(brightness: value),
                                   ),
                           ),
-                        const Text('仅调整阅读窗口，退出阅读后恢复。'),
+                        if (ReaderPlatform.capabilities.windowBrightness)
+                          const Text('仅调整阅读窗口，退出阅读后恢复。'),
                         const SizedBox(height: 16),
                         _section(
                           '翻页模式',
@@ -683,16 +690,17 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                                       _settings.copyWith(keepScreenOn: value),
                                     ),
                             ),
-                            SwitchListTile(
-                              contentPadding: EdgeInsets.zero,
-                              title: const Text('翻页触感反馈'),
-                              value: _settings.haptics,
-                              onChanged: _busy
-                                  ? null
-                                  : (value) => _change(
-                                      _settings.copyWith(haptics: value),
-                                    ),
-                            ),
+                            if (ReaderPlatform.capabilities.haptics)
+                              SwitchListTile(
+                                contentPadding: EdgeInsets.zero,
+                                title: const Text('翻页触感反馈'),
+                                value: _settings.haptics,
+                                onChanged: _busy
+                                    ? null
+                                    : (value) => _change(
+                                        _settings.copyWith(haptics: value),
+                                      ),
+                              ),
                             SwitchListTile(
                               contentPadding: EdgeInsets.zero,
                               title: const Text('休息提醒'),
@@ -732,17 +740,18 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                                       _settings.copyWith(commentBubbles: value),
                                     ),
                             ),
-                            SwitchListTile(
-                              contentPadding: EdgeInsets.zero,
-                              title: const Text('音量键翻页'),
-                              subtitle: const Text('听书时保留音量键调节音量'),
-                              value: _settings.volumeKeys,
-                              onChanged: _busy
-                                  ? null
-                                  : (value) => _change(
-                                      _settings.copyWith(volumeKeys: value),
-                                    ),
-                            ),
+                            if (ReaderPlatform.capabilities.volumeKeys)
+                              SwitchListTile(
+                                contentPadding: EdgeInsets.zero,
+                                title: const Text('音量键翻页'),
+                                subtitle: const Text('听书时保留音量键调节音量'),
+                                value: _settings.volumeKeys,
+                                onChanged: _busy
+                                    ? null
+                                    : (value) => _change(
+                                        _settings.copyWith(volumeKeys: value),
+                                      ),
+                              ),
                           ],
                         ),
                         TextButton.icon(

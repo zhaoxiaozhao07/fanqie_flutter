@@ -43,6 +43,8 @@ import '../services/reader_pagination.dart';
 import '../services/reader_position_service.dart';
 import '../services/reader_font_service.dart';
 import '../services/reader_cache_service.dart';
+import '../services/reader_platform.dart';
+import '../services/desktop_commands.dart';
 import '../services/reader_text.dart';
 import '../services/tts_service.dart';
 import '../widgets/tts_player_panel.dart';
@@ -89,6 +91,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   PageRoute<dynamic>? _observedRoute;
   bool _readerRouteActive = true;
   bool _dependenciesReady = false;
+  Size? _desktopViewport;
+  double? _desktopRestoredScrollOffset;
+  final _desktopFocus = FocusNode(debugLabel: 'desktop-reader');
   final ReadingActivityService _activity = ReadingActivityService();
   final ReaderNavigationHistory _jumpHistory = ReaderNavigationHistory();
   bool _navigationLoading = false;
@@ -294,6 +299,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void didPush() {
     _readerRouteActive = true;
+    _updateDesktopCommands();
     _attachActivity();
     ReaderSystemService.setKeepScreenOn(
       _readerPreferences.keepScreenOn,
@@ -312,6 +318,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _activity.detach(this);
     _restTimer?.cancel();
     _readerRouteActive = false;
+    _updateDesktopCommands();
     ReaderSystemService.setKeepScreenOn(false, owner: this);
     _pauseAutoScroll();
     ReaderSystemService.setVolumeKeyScrollEnabled(false, owner: this);
@@ -333,6 +340,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   void didPop() {
     _activity.detach(this);
     _readerRouteActive = false;
+    _updateDesktopCommands();
     ReaderSystemService.setKeepScreenOn(false, owner: this);
     _pauseAutoScroll();
     ReaderSystemService.setVolumeKeyScrollEnabled(false, owner: this);
@@ -370,6 +378,10 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void initState() {
     super.initState();
+    if (ReaderPlatform.isMacOS) {
+      DesktopCommands.register(this, _desktopCommand);
+      ReaderSystemService.registerSaveParticipant(this, _flushForExit);
+    }
     final initial = widget.initialSettings;
     if (initial != null) {
       _bookSettingsOverride = initial.bookOverride;
@@ -449,6 +461,9 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void dispose() {
+    DesktopCommands.register(this, null);
+    ReaderSystemService.registerSaveParticipant(this, null);
+    _desktopFocus.dispose();
     _activity.detach(this);
     _restTimer?.cancel();
     _navigationGeneration++;
@@ -1024,6 +1039,82 @@ class _ReaderScreenState extends State<ReaderScreen>
     return _preferencesWrites;
   }
 
+  Future<void> _flushForExit() async {
+    _positionTimer?.cancel();
+    _readingPosition = _captureReadingPosition() ?? _readingPosition;
+    final position = _readingPosition;
+    if (position != null) {
+      await _writeReadingSnapshot(position, updateSummary: true);
+    }
+    await _flushPreferences();
+    if (_preferencesDirty) throw StateError('阅读设置尚未保存');
+  }
+
+  void _updateDesktopCommands() {
+    if (!ReaderPlatform.isMacOS) return;
+    unawaited(
+      ReaderPlatform.invoke('setReaderCommandsEnabled', {
+        'enabled': _readerRouteActive && _readerPanels == 0,
+      }).catchError((_) => null),
+    );
+  }
+
+  bool _desktopCommand(String command) {
+    if (!mounted) return false;
+    if (_readerPanels > 0) return true;
+    if (!(ModalRoute.of(context)?.isCurrent ?? false)) return false;
+    switch (command) {
+      case 'find':
+        unawaited(_showReaderSearch());
+        return true;
+      case 'bookmark':
+        unawaited(_toggleBookmark());
+        return true;
+      case 'settings':
+        unawaited(_showSettingsModal());
+        return true;
+      default:
+        return false;
+    }
+  }
+
+  KeyEventResult _desktopKey(FocusNode node, KeyEvent event) {
+    if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+      return KeyEventResult.ignored;
+    }
+    final keyboard = HardwareKeyboard.instance;
+    final focus = FocusManager.instance.primaryFocus?.context;
+    if (_readerPanels > 0 ||
+        _activeSelectableParaNotifier.value != null ||
+        !(ModalRoute.of(context)?.isCurrent ?? false) ||
+        focus?.findAncestorWidgetOfExactType<EditableText>() != null ||
+        keyboard.isMetaPressed ||
+        keyboard.isControlPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isShiftPressed) {
+      return KeyEventResult.ignored;
+    }
+    final key = event.logicalKey;
+    final forward =
+        key == LogicalKeyboardKey.pageDown ||
+        (_isPageMode && key == LogicalKeyboardKey.arrowRight);
+    final backward =
+        key == LogicalKeyboardKey.pageUp ||
+        (_isPageMode && key == LogicalKeyboardKey.arrowLeft);
+    if (!forward && !backward) return KeyEventResult.ignored;
+    if (_navigationLoading) _cancelNavigation();
+    _pauseAutoScroll();
+    if (_isPageMode) {
+      _onUserPageTurn();
+      forward
+          ? _pageViewKey.currentState?.turnToNextPage()
+          : _pageViewKey.currentState?.turnToPreviousPage();
+    } else if (!_volumeAnimating) {
+      unawaited(_animateVolumeScroll(forward ? 'down' : 'up'));
+    }
+    return KeyEventResult.handled;
+  }
+
   void _onVolumeScroll(String direction) {
     if (!mounted ||
         !_canUseVolumeKeys ||
@@ -1059,7 +1150,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _volumeAnimating = true;
     _manualScrollUntil = DateTime.now().add(const Duration(seconds: 3));
     try {
-      final height = MediaQuery.sizeOf(context).height * 0.75;
+      final height = _scrollController.position.viewportDimension * 0.75;
       final position = _scrollController.position;
       await _scrollController.animateTo(
         (_scrollController.offset + (direction == 'down' ? height : -height))
@@ -1159,6 +1250,15 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     final boundary = _verticalPaintKey.currentContext?.findRenderObject();
     if (boundary is! RenderBox || !boundary.hasSize) return _readingPosition;
+    // A resized viewport can move the saved line away from the fixed 24px
+    // sampling line. Keep the original character anchor while the reader is
+    // idle, just as paged mode does; actual scrolling resumes normal sampling.
+    if (ReaderPlatform.isMacOS &&
+        _desktopRestoredScrollOffset != null &&
+        _scrollController.hasClients &&
+        (_scrollController.offset - _desktopRestoredScrollOffset!).abs() < .5) {
+      return _readingPosition;
+    }
     final top = boundary.localToGlobal(Offset.zero).dy;
     final target = top + 24;
     _MountedParagraphInfo? nearest;
@@ -1257,13 +1357,15 @@ class _ReaderScreenState extends State<ReaderScreen>
       return _imageParagraphGeometry(
             original,
             pictures,
-            MediaQuery.sizeOf(context).width - _horizontalPadding * 2,
+            (_desktopViewport?.width ?? MediaQuery.sizeOf(context).width) -
+                _horizontalPadding * 2,
           ).height +
           _paragraphSpacing;
     }
     final painter = _paragraphPainter(
       '${_indentTwoChars ? '\u3000\u3000' : ''}$original',
-      MediaQuery.sizeOf(context).width - _horizontalPadding * 2,
+      (_desktopViewport?.width ?? MediaQuery.sizeOf(context).width) -
+          _horizontalPadding * 2,
     );
     final height = painter.height + _paragraphSpacing;
     painter.dispose();
@@ -1450,6 +1552,9 @@ class _ReaderScreenState extends State<ReaderScreen>
         _lastDetectPixels = _scrollController.hasClients
             ? _scrollController.offset
             : 0;
+        if (ReaderPlatform.isMacOS && _scrollController.hasClients) {
+          _desktopRestoredScrollOffset = _scrollController.offset;
+        }
         _dropRestorationImage();
       }
     }
@@ -1527,6 +1632,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       _resumeAutoAfterLifecycle = false;
     } else {
       _restTimer?.cancel();
+      ReaderSystemService.setKeepScreenOn(false, owner: this);
       _savePositionNow(notify: false);
       _flushPreferences();
       _resumeAutoAfterLifecycle = _autoScrollTicker?.isActive ?? false;
@@ -1578,7 +1684,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     _activity.interact(this);
     _manualScrollUntil = DateTime.now().add(const Duration(seconds: 3));
     _pauseAutoScroll();
-    if (_readerPreferences.haptics) HapticFeedback.selectionClick();
+    if (_readerPreferences.haptics && ReaderPlatform.capabilities.haptics) {
+      HapticFeedback.selectionClick();
+    }
     if (_ttsService.isActive &&
         _ttsService.currentBookId == widget.book.bookId) {
       unawaited(_ttsService.stop());
@@ -2597,16 +2705,31 @@ class _ReaderScreenState extends State<ReaderScreen>
   void _beginReaderPanel() {
     _pageViewKey.currentState?.clearQueuedTurns();
     if (_readerPanels++ == 0) _panelsClosed = Completer<void>();
+    _updateDesktopCommands();
+    if (ReaderPlatform.isMacOS) {
+      _pauseAutoScroll();
+      ReaderSystemService.setKeepScreenOn(false, owner: this);
+    }
     ReaderSystemService.setVolumeKeyScrollEnabled(false, owner: this);
   }
 
   void _endReaderPanel() {
     if (_readerPanels > 0) _readerPanels--;
+    _updateDesktopCommands();
     if (_readerPanels == 0) {
       if (_panelsClosed != null && !_panelsClosed!.isCompleted) {
         _panelsClosed!.complete();
       }
       if (mounted) {
+        if (ReaderPlatform.isMacOS &&
+            _readerRouteActive &&
+            WidgetsBinding.instance.lifecycleState ==
+                AppLifecycleState.resumed) {
+          ReaderSystemService.setKeepScreenOn(
+            _readerPreferences.keepScreenOn,
+            owner: this,
+          );
+        }
         ReaderSystemService.setVolumeKeyScrollEnabled(
           _canUseVolumeKeys,
           owner: this,
@@ -3093,6 +3216,50 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   Widget build(BuildContext context) {
+    if (!ReaderPlatform.isMacOS) return _buildReaderScaffold(context);
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final size = Size(
+          math.min(840, constraints.maxWidth),
+          constraints.maxHeight,
+        );
+        final previous = _desktopViewport;
+        if (previous != null && previous != size && !_isLoadingHead) {
+          // Capture against the old render tree, before laying out the new width.
+          _readingPosition = _captureReadingPosition() ?? _readingPosition;
+          _paragraphHeights.clear();
+          _positionNeedsReflow = true;
+          if (!_isPageMode) {
+            _restoringPosition = _readingPosition != null;
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted && !_isPageMode) {
+                unawaited(_restoreVerticalPosition());
+              }
+            });
+          }
+        }
+        _desktopViewport = size;
+        return ColoredBox(
+          color: _themes[_themeIndex].backgroundColor,
+          child: Center(
+            child: SizedBox(
+              key: const ValueKey('desktop-reader-viewport'),
+              width: size.width,
+              height: size.height,
+              child: Focus(
+                focusNode: _desktopFocus,
+                autofocus: true,
+                onKeyEvent: _desktopKey,
+                child: _buildReaderScaffold(context),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildReaderScaffold(BuildContext context) {
     final theme = _themes[_themeIndex];
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
@@ -3910,15 +4077,28 @@ class _ReaderScreenState extends State<ReaderScreen>
       valueListenable: _activeSelectableParaNotifier,
       builder: (context, activeParaKey, _) {
         final isSelectedPara = activeParaKey == paraKeyStr;
-        if (isSelectedPara) {
+        if (isSelectedPara || ReaderPlatform.isMacOS) {
           final selectable = SelectableText.rich(
-            key: _activeSelectableTextKey,
+            key: ReaderPlatform.isMacOS
+                ? ValueKey('desktop-paragraph-$paraKeyStr')
+                : _activeSelectableTextKey,
             TextSpan(children: inlineSpans),
             style: baseStyle,
             onTap: () {
+              if (ReaderPlatform.isMacOS) return;
               _activeSelectableParaNotifier.value = null;
               onTap?.call();
             },
+            onSelectionChanged: ReaderPlatform.isMacOS
+                ? (selection, cause) {
+                    if (!selection.isCollapsed) {
+                      _activeSelectableParaNotifier.value = paraKeyStr;
+                    } else if (_activeSelectableParaNotifier.value ==
+                        paraKeyStr) {
+                      _activeSelectableParaNotifier.value = null;
+                    }
+                  }
+                : null,
             contextMenuBuilder: (context, editableTextState) {
               final textVal = editableTextState.textEditingValue;
               final selected = textVal.selection.textInside(textVal.text);
@@ -4355,19 +4535,20 @@ class _ReaderScreenState extends State<ReaderScreen>
                 ),
               ),
               // 听书快捷入口
-              IconButton(
-                icon: Icon(
-                  _ttsService.isActive
-                      ? Icons.headphones
-                      : Icons.headphones_outlined,
-                  size: 22,
-                  color: _ttsService.isActive
-                      ? Theme.of(context).primaryColor
-                      : theme.textColor,
+              if (ReaderPlatform.capabilities.tts)
+                IconButton(
+                  icon: Icon(
+                    _ttsService.isActive
+                        ? Icons.headphones
+                        : Icons.headphones_outlined,
+                    size: 22,
+                    color: _ttsService.isActive
+                        ? Theme.of(context).primaryColor
+                        : theme.textColor,
+                  ),
+                  tooltip: '听书',
+                  onPressed: _startTtsReading,
                 ),
-                tooltip: '听书',
-                onPressed: _startTtsReading,
-              ),
               // 右上角折叠更多选项 (PopupMenuButton)
               PopupMenuButton<String>(
                 icon: Icon(

@@ -6,11 +6,11 @@ import 'dart:isolate';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as path;
-import 'package:path_provider/path_provider.dart';
 
 import '../models/book.dart';
 import '../models/chapter.dart';
 import 'atomic_file.dart';
+import 'app_storage.dart';
 import 'bookshelf_service.dart';
 import 'local_book_parser.dart';
 import 'local_text_encoding.dart';
@@ -89,7 +89,7 @@ class LocalBookService {
   static final LocalBookService _instance = LocalBookService._();
   factory LocalBookService() => _instance;
   LocalBookService._()
-    : documents = _documents,
+    : documents = AppStorage.documents,
       normalizer = normalizeLocalText;
   @visibleForTesting
   LocalBookService.forTesting({
@@ -99,14 +99,7 @@ class LocalBookService {
   final Future<Directory> Function() documents;
   final LocalNormalizer normalizer;
   static final Map<String, Future<void>> _commits = {};
-
-  static Future<Directory> _documents() async {
-    try {
-      return await getApplicationDocumentsDirectory();
-    } catch (_) {
-      return Directory.systemTemp;
-    }
-  }
+  static bool get hasActiveCommit => _commits.isNotEmpty;
 
   Future<LocalImportResult> importLocalFile(
     File file, {

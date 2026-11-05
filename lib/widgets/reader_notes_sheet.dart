@@ -97,9 +97,11 @@ class _ReaderNotesSheetState extends State<ReaderNotesSheet> {
       final file = await exporter.exportNotes(widget.book, markdown: markdown);
       final location = await exporter.saveToDownloads(file);
       if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(SnackBar(content: Text('已导出到 $location')));
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(location == null ? '已取消导出，原笔记未改变' : '已导出到 $location'),
+          ),
+        );
       }
     } catch (_) {
       if (mounted) {

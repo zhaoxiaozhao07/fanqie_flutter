@@ -3,7 +3,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:path_provider/path_provider.dart';
 import '../models/book.dart';
 import '../models/discovery.dart';
 import '../models/chapter.dart';
@@ -11,6 +10,8 @@ import '../models/comment.dart';
 import 'fanqie_backend_engine.dart';
 import 'fanqie_mobile_gateway.dart';
 import 'atomic_file.dart';
+import 'app_storage.dart';
+import 'reader_platform.dart';
 
 /// API 服务 - 接入内置番茄小说后端引擎
 /// 覆盖原有全部接口并直接内置运行：
@@ -124,10 +125,9 @@ class ApiService {
   Future<Directory> _getCommentCacheDir({String? bookId}) async {
     Directory baseDir;
     try {
-      baseDir =
-          await (commentDocuments?.call() ??
-              getApplicationDocumentsDirectory());
+      baseDir = await (commentDocuments?.call() ?? AppStorage.documents());
     } catch (_) {
+      if (ReaderPlatform.isMacOS) rethrow;
       baseDir = Directory.systemTemp;
     }
     String path;
