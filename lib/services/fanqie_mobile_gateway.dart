@@ -617,8 +617,21 @@ class FanqieMobileGateway {
                 int.tryParse(d['comment_cnt']?.toString() ?? '') ??
                 int.tryParse(d['show_comment_cnt']?.toString() ?? '') ??
                 commentList.length;
-            final hasMore = d['has_more'] == true;
-            final nextOffset = d['next_offset']?.toString() ?? '';
+            final rawNextOffset = int.tryParse(
+              d['next_offset']?.toString() ?? '',
+            );
+            // Preserve server offsets even if local parsing filters entries.
+            final nextOffset = rawNextOffset != null && rawNextOffset > offset
+                ? rawNextOffset
+                : offset + commentList.length;
+            final moreFlag = d['has_more'];
+            final hasMore = moreFlag == null
+                ? nextOffset > offset &&
+                      (total > nextOffset || rawNextOffset != null)
+                : moreFlag == true ||
+                      moreFlag == 1 ||
+                      moreFlag == '1' ||
+                      moreFlag == 'true';
 
             final comments = <CommentItem>[];
             for (final c in commentList) {
@@ -668,7 +681,7 @@ class FanqieMobileGateway {
 
             return CommentPageData(
               comments: comments,
-              cursor: nextOffset,
+              cursor: nextOffset.toString(),
               hasMore: hasMore,
               total: total,
             );

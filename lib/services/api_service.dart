@@ -25,17 +25,21 @@ import 'atomic_file.dart';
 /// - downloadChapters: 高性能全章节并发下载
 class ApiService {
   final FanqieBackendEngine _engine;
-  final FanqieMobileGateway _mobileGateway = FanqieMobileGateway();
+  final FanqieMobileGateway _mobileGateway;
   final http.Client _client;
   final Future<ChapterCommentStats?> Function(String)? chapterStatsLoader;
+  final Future<Directory> Function()? commentDocuments;
   final Map<String, DateTime> _commentRefreshes = {};
   bool _disposed = false;
 
   ApiService({
     http.Client? client,
     FanqieBackendEngine? engine,
+    FanqieMobileGateway? mobileGateway,
     this.chapterStatsLoader,
+    this.commentDocuments,
   }) : _client = client ?? http.Client(),
+       _mobileGateway = mobileGateway ?? FanqieMobileGateway(),
        _engine = engine ?? FanqieBackendEngine(client: client);
 
   void _refreshComments(String key, Future<Object?> Function() fetch) {
@@ -120,7 +124,9 @@ class ApiService {
   Future<Directory> _getCommentCacheDir({String? bookId}) async {
     Directory baseDir;
     try {
-      baseDir = await getApplicationDocumentsDirectory();
+      baseDir =
+          await (commentDocuments?.call() ??
+              getApplicationDocumentsDirectory());
     } catch (_) {
       baseDir = Directory.systemTemp;
     }
@@ -233,18 +239,21 @@ class ApiService {
   }) async {
     final cleanItemId = itemId.trim();
     final cleanBookId = bookId.trim();
+    final pageSize = count.clamp(1, 50);
     if (preferCache && offset == 0) {
       final cached = await _loadChapterCommentsFromDisk(
         cleanBookId,
         cleanItemId,
+        count: pageSize,
+        allowLegacyPreview: false,
       );
       if (cached != null) {
         _refreshComments(
-          'chapter:$cleanBookId:$cleanItemId',
+          'chapter:$cleanBookId:$cleanItemId:$pageSize',
           () => getChapterComments(
             cleanBookId,
             cleanItemId,
-            count: count,
+            count: pageSize,
             preferCache: false,
           ),
         );
@@ -258,11 +267,16 @@ class ApiService {
         cleanBookId,
         cleanItemId,
         offset: offset,
-        count: count,
+        count: pageSize,
       );
       if (page != null) {
         if (offset == 0) {
-          _saveChapterCommentsToDisk(cleanBookId, cleanItemId, page);
+          await _saveChapterCommentsToDisk(
+            cleanBookId,
+            cleanItemId,
+            page,
+            count: pageSize,
+          );
         }
         return page;
       }
@@ -274,34 +288,69 @@ class ApiService {
 
     // 2. 离线回退
     if (offset == 0) {
-      return _loadChapterCommentsFromDisk(cleanBookId, cleanItemId);
+      return _loadChapterCommentsFromDisk(
+        cleanBookId,
+        cleanItemId,
+        count: pageSize,
+      );
     }
     return null;
   }
 
-  void _saveChapterCommentsToDisk(
+  Future<void> _saveChapterCommentsToDisk(
     String bookId,
     String itemId,
-    CommentPageData page,
-  ) async {
+    CommentPageData page, {
+    required int count,
+  }) async {
     try {
       final jsonStr = jsonEncode(page.toJson());
       final dir = await _getCommentCacheDir(bookId: bookId);
-      final file = File('${dir.path}/chapter_${itemId}_comments.json');
+      // Count-only previews must never overwrite a normal discussion page,
+      // including when the two requests finish in the opposite order.
+      final file = File('${dir.path}/chapter_${itemId}_comments_$count.json');
       await AtomicFile.writeString(file, jsonStr);
     } catch (_) {}
   }
 
   Future<CommentPageData?> _loadChapterCommentsFromDisk(
     String bookId,
-    String itemId,
-  ) async {
+    String itemId, {
+    required int count,
+    bool allowLegacyPreview = true,
+  }) async {
     try {
       final dir = await _getCommentCacheDir(bookId: bookId);
-      final file = File('${dir.path}/chapter_${itemId}_comments.json');
-      if (await file.exists()) {
-        final content = await file.readAsString();
-        return CommentPageData.fromJson(jsonDecode(content));
+      Future<CommentPageData?> read(String name) async {
+        try {
+          final file = File('${dir.path}/$name');
+          if (await file.exists()) {
+            return CommentPageData.fromJson(
+              jsonDecode(await file.readAsString()),
+            );
+          }
+        } catch (_) {}
+        return null;
+      }
+
+      final exact = await read('chapter_${itemId}_comments_$count.json');
+      if (exact != null) return exact;
+      if (count == 1) {
+        final fullPage = await read('chapter_${itemId}_comments_20.json');
+        if (fullPage != null) return fullPage;
+      }
+      final legacy = await read('chapter_${itemId}_comments.json');
+      if (legacy != null) {
+        // Old releases stored count=1 and count=20 in the same file. An
+        // undersized legacy preview is useful offline, not a full-page hit.
+        if (allowLegacyPreview ||
+            legacy.comments.length >= count ||
+            (!legacy.hasMore && legacy.comments.length >= legacy.total)) {
+          return legacy;
+        }
+      }
+      if (allowLegacyPreview && count != 1) {
+        return await read('chapter_${itemId}_comments_1.json');
       }
     } catch (_) {}
     return null;

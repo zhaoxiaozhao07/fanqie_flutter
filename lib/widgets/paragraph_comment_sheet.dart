@@ -16,6 +16,7 @@ class ParagraphCommentSheet extends StatefulWidget {
   final Color secondaryColor;
   final Color highlightColor;
   final VoidCallback? onLocateParagraph;
+  final ApiService? apiService;
 
   const ParagraphCommentSheet({
     super.key,
@@ -31,6 +32,7 @@ class ParagraphCommentSheet extends StatefulWidget {
     required this.secondaryColor,
     required this.highlightColor,
     this.onLocateParagraph,
+    this.apiService,
   });
 
   static Future<void> show({
@@ -47,6 +49,7 @@ class ParagraphCommentSheet extends StatefulWidget {
     required Color secondaryColor,
     required Color highlightColor,
     VoidCallback? onLocateParagraph,
+    ApiService? apiService,
   }) {
     return showModalBottomSheet(
       context: context,
@@ -76,6 +79,7 @@ class ParagraphCommentSheet extends StatefulWidget {
           secondaryColor: secondaryColor,
           highlightColor: highlightColor,
           onLocateParagraph: onLocateParagraph,
+          apiService: apiService,
         ),
       ),
     );
@@ -86,7 +90,7 @@ class ParagraphCommentSheet extends StatefulWidget {
 }
 
 class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
-  final ApiService _apiService = ApiService();
+  late final ApiService _apiService = widget.apiService ?? ApiService();
   final ScrollController _scrollController = ScrollController();
 
   int _currentSort = 1; // 1=最热, 3=最新
@@ -97,6 +101,9 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
   String _cursor = '';
   bool _hasMore = false;
   int _totalCount = 0;
+  int _commentsGeneration = 0;
+  String? _loadMoreError;
+  int _emptyChapterPages = 0;
 
   // 展开回复的评论 ID 映射表及其回复列表与加载状态
   final Map<String, List<CommentReplyItem>> _repliesMap = {};
@@ -115,24 +122,41 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
   void dispose() {
     _scrollController.removeListener(_onScroll);
     _scrollController.dispose();
-    _apiService.dispose();
+    if (widget.apiService == null) _apiService.dispose();
     super.dispose();
   }
 
   void _onScroll() {
-    if (_scrollController.position.pixels >=
-            _scrollController.position.maxScrollExtent - 200 &&
+    if (_scrollController.hasClients &&
+        _scrollController.position.extentAfter <= 200 &&
         !_isLoading &&
         !_isLoadingMore &&
+        _loadMoreError == null &&
         _hasMore) {
       _loadMoreComments();
     }
   }
 
+  void _fillChapterCommentViewport() {
+    if (!widget.isChapterComment) return;
+    // A cached preview or a short upstream page may not be tall enough to
+    // scroll. Layout itself does not deliver the scroll event used above.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _onScroll();
+    });
+  }
+
   Future<void> _loadComments() async {
+    final generation = ++_commentsGeneration;
     setState(() {
       _isLoading = true;
       _errorMessage = null;
+      _loadMoreError = null;
+      _isLoadingMore = false;
+      _hasMore = false;
+      _cursor = '';
+      _emptyChapterPages = 0;
     });
 
     try {
@@ -147,6 +171,9 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
           widget.bookId,
           widget.chapterId,
           offset: 0,
+          // Fresh data must reach this open sheet, rather than only being
+          // written to disk by a cache-first background refresh.
+          preferCache: false,
         );
       } else {
         result = await _apiService.getParagraphComments(
@@ -157,11 +184,16 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
         );
       }
 
-      if (mounted) {
+      if (mounted && generation == _commentsGeneration) {
         setState(() {
           _isLoading = false;
           if (result != null) {
-            _comments = result.comments;
+            final seen = <String>{};
+            _comments = widget.isChapterComment
+                ? result.comments
+                      .where((comment) => seen.add(comment.id))
+                      .toList()
+                : List.of(result.comments);
             _cursor = result.cursor;
             _hasMore = result.hasMore;
             _totalCount = result.total;
@@ -169,9 +201,10 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             _errorMessage = widget.isChapterComment ? '本章暂无评论' : '暂无评论内容或网络不可用';
           }
         });
+        if (result != null) _fillChapterCommentViewport();
       }
     } catch (e) {
-      if (mounted) {
+      if (mounted && generation == _commentsGeneration) {
         setState(() {
           _isLoading = false;
           _errorMessage = '加载失败: $e';
@@ -181,10 +214,14 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
   }
 
   Future<void> _loadMoreComments() async {
-    if (_isLoadingMore || !_hasMore) return;
+    if (_isLoading || _isLoadingMore || !_hasMore) return;
+    final generation = _commentsGeneration;
+    final requestedCursor = _cursor;
+    final requestedOffset = int.tryParse(requestedCursor) ?? _comments.length;
 
     setState(() {
       _isLoadingMore = true;
+      _loadMoreError = null;
     });
 
     try {
@@ -193,13 +230,14 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
         result = await _apiService.getBookReviews(
           widget.bookId,
           sort: _currentSort,
-          cursor: _cursor,
+          cursor: requestedCursor,
         );
       } else if (widget.isChapterComment) {
         result = await _apiService.getChapterComments(
           widget.bookId,
           widget.chapterId,
-          offset: int.tryParse(_cursor) ?? _comments.length,
+          offset: requestedOffset,
+          preferCache: false,
         );
       } else {
         result = await _apiService.getParagraphComments(
@@ -207,27 +245,54 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
           widget.chapterId,
           widget.paraIndex,
           sort: _currentSort,
-          cursor: _cursor,
+          cursor: requestedCursor,
         );
       }
 
       final page = result;
-      if (mounted && page != null) {
+      if (!mounted || generation != _commentsGeneration) return;
+      if (page != null) {
         setState(() {
           _isLoadingMore = false;
-          _comments.addAll(page.comments);
+          if (widget.isChapterComment) {
+            final previousLength = _comments.length;
+            final seen = _comments.map((comment) => comment.id).toSet();
+            _comments.addAll(
+              page.comments.where((comment) => seen.add(comment.id)),
+            );
+            _emptyChapterPages = _comments.length == previousLength
+                ? _emptyChapterPages + 1
+                : 0;
+          } else {
+            _comments.addAll(page.comments);
+          }
           _cursor = page.cursor;
           _hasMore = page.hasMore;
+          if (page.total > 0) _totalCount = page.total;
+          if (widget.isChapterComment &&
+              _hasMore &&
+              (int.tryParse(page.cursor) ?? requestedOffset) <=
+                  requestedOffset) {
+            _cursor = requestedCursor;
+            _loadMoreError = '后续评论分页未推进，请重试';
+          } else if (widget.isChapterComment &&
+              _hasMore &&
+              _emptyChapterPages >= 3) {
+            _loadMoreError = '连续分页未返回新评论，请重试';
+          }
         });
-      } else if (mounted) {
+        if (_loadMoreError == null) _fillChapterCommentViewport();
+      } else {
         setState(() {
           _isLoadingMore = false;
+          _loadMoreError = '后续评论加载失败，请重试';
         });
       }
     } catch (_) {
-      if (mounted) {
+      if (mounted && generation == _commentsGeneration) {
         setState(() {
           _isLoadingMore = false;
+          _loadMoreError = '后续评论加载失败，请重试';
         });
       }
     }
@@ -421,30 +486,36 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
               padding: const EdgeInsets.symmetric(horizontal: 16),
               child: Row(
                 children: [
-                  Text(
-                    widget.isBookReview
-                        ? '书籍评价'
-                        : (widget.isChapterComment
-                              ? '本章评论'
-                              : (widget.paraIndex == null
-                                    ? '本章段评'
-                                    : '第 ${widget.paraIndex! + 1} 段评论')),
-                    style: TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                      color: widget.textColor,
+                  Expanded(
+                    child: Wrap(
+                      spacing: 8,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(
+                          widget.isBookReview
+                              ? '书籍评价'
+                              : (widget.isChapterComment
+                                    ? '本章评论'
+                                    : (widget.paraIndex == null
+                                          ? '本章段评'
+                                          : '第 ${widget.paraIndex! + 1} 段评论')),
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                            color: widget.textColor,
+                          ),
+                        ),
+                        if (_totalCount > 0)
+                          Text(
+                            '($_totalCount)',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: widget.secondaryColor,
+                            ),
+                          ),
+                      ],
                     ),
                   ),
-                  const SizedBox(width: 8),
-                  if (_totalCount > 0)
-                    Text(
-                      '($_totalCount)',
-                      style: TextStyle(
-                        fontSize: 14,
-                        color: widget.secondaryColor,
-                      ),
-                    ),
-                  const Spacer(),
                   if (widget.onLocateParagraph != null)
                     TextButton.icon(
                       onPressed: () {
@@ -457,6 +528,17 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
                         foregroundColor: Theme.of(context).primaryColor,
                         visualDensity: VisualDensity.compact,
                       ),
+                    ),
+                  if (widget.isChapterComment)
+                    IconButton(
+                      tooltip: '刷新本章评论',
+                      onPressed: _isLoading ? null : _loadComments,
+                      icon: Icon(
+                        Icons.refresh,
+                        size: 20,
+                        color: widget.secondaryColor,
+                      ),
+                      visualDensity: VisualDensity.compact,
                     ),
                   IconButton(
                     icon: Icon(
@@ -515,9 +597,23 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
               child: Row(
                 children: [
-                  _buildSortChip(1, '🔥 热门'),
-                  const SizedBox(width: 8),
-                  _buildSortChip(3, '🕒 最新'),
+                  if (widget.isChapterComment)
+                    Flexible(
+                      child: Text(
+                        '已加载 ${_comments.length} / $_totalCount 条',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: widget.secondaryColor,
+                        ),
+                      ),
+                    )
+                  else ...[
+                    _buildSortChip(1, '🔥 热门'),
+                    const SizedBox(width: 8),
+                    _buildSortChip(3, '🕒 最新'),
+                  ],
                   const Spacer(),
                   Text(
                     '数据来自官方社区',
@@ -584,7 +680,7 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             ),
             const SizedBox(height: 12),
             Text(
-              '正在加载段评...',
+              widget.isChapterComment ? '正在加载本章评论...' : '正在加载段评...',
               style: TextStyle(fontSize: 13, color: widget.secondaryColor),
             ),
           ],
@@ -626,7 +722,7 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
       );
     }
 
-    if (_comments.isEmpty) {
+    if (_comments.isEmpty && !_hasMore) {
       return Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -638,7 +734,7 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             ),
             const SizedBox(height: 10),
             Text(
-              '该段落暂无段评',
+              widget.isChapterComment ? '本章暂无评论' : '该段落暂无段评',
               style: TextStyle(fontSize: 14, color: widget.secondaryColor),
             ),
           ],
@@ -653,6 +749,14 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
       separatorBuilder: (context, index) => const SizedBox(height: 12),
       itemBuilder: (ctx, index) {
         if (index >= _comments.length) {
+          if (_loadMoreError != null) {
+            return TextButton.icon(
+              key: const ValueKey('retry-more-comments'),
+              onPressed: _loadMoreComments,
+              icon: const Icon(Icons.refresh, size: 16),
+              label: Text(_loadMoreError!, textAlign: TextAlign.center),
+            );
+          }
           return Padding(
             padding: const EdgeInsets.symmetric(vertical: 16),
             child: Center(
