@@ -1,4 +1,5 @@
 import 'package:fanqie_flutter/models/reading_position.dart';
+import 'package:fanqie_flutter/models/reader_illustration.dart';
 import 'package:fanqie_flutter/services/reader_pagination.dart';
 import 'package:fanqie_flutter/services/reader_position_service.dart';
 import 'package:fanqie_flutter/widgets/reader_comment_bubble.dart';
@@ -6,22 +7,27 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
-ReaderLayout layout(double scale, {double width = 400, bool comments = true}) =>
-    ReaderLayout(
-      size: Size(width, 760),
-      bodyStyle: const TextStyle(fontSize: 18, height: 1.8, letterSpacing: 0.5),
-      titleStyle: const TextStyle(
-        fontSize: 22,
-        height: 1.4,
-        fontWeight: FontWeight.bold,
-      ),
-      textScaler: TextScaler.linear(scale),
-      horizontalPadding: 20,
-      paragraphSpacing: 14,
-      inlineCommentSize: comments
-          ? ReaderCommentBubble.sizeFor(TextScaler.linear(scale))
-          : Size.zero,
-    );
+ReaderLayout layout(
+  double scale, {
+  double width = 400,
+  bool comments = true,
+  double chapterEndHeight = 0,
+}) => ReaderLayout(
+  size: Size(width, 760),
+  bodyStyle: const TextStyle(fontSize: 18, height: 1.8, letterSpacing: 0.5),
+  titleStyle: const TextStyle(
+    fontSize: 22,
+    height: 1.4,
+    fontWeight: FontWeight.bold,
+  ),
+  textScaler: TextScaler.linear(scale),
+  horizontalPadding: 20,
+  paragraphSpacing: 14,
+  inlineCommentSize: comments
+      ? ReaderCommentBubble.sizeFor(TextScaler.linear(scale))
+      : Size.zero,
+  chapterEndHeight: chapterEndHeight,
+);
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
@@ -49,6 +55,52 @@ void main() {
   });
 
   for (final scale in [1.0, 1.4, 2.0]) {
+    test('scaled $scale chapter ending fits without losing source text', () {
+      for (final content in [
+        '青山依旧，故事继续。👨‍👩‍👧‍👦' * 250,
+        '${'春风拂过书页。' * 200}\n\n终章。👨‍👩‍👧‍👦',
+        '${'春风拂过书页。' * 200}\n\n${'最后一段。' * 30}\n\n',
+      ]) {
+        final pages = ReaderPaginationCache().paginate(
+          chapterId: 'chapter-end',
+          title: '第一章',
+          content: content,
+          layout: layout(scale, width: 320, chapterEndHeight: 130),
+          indent: true,
+        );
+        expect(pages.pages.length, greaterThan(2));
+        expect(pages.pages.last.chapterEndHeight, 130);
+        expect(
+          pages.pages
+              .take(pages.pages.length - 1)
+              .every((page) => page.chapterEndHeight == 0),
+          isTrue,
+        );
+        for (final page in pages.pages) {
+          final height =
+              page.fragments.fold<double>(
+                0,
+                (sum, fragment) => sum + fragment.height,
+              ) +
+              (page.fragments.length - 1) * 14;
+          expect(page.oversized, false);
+          expect(height, lessThanOrEqualTo(page.availableHeight + .01));
+        }
+        for (var p = 0; p < pages.sourceParagraphs.length; p++) {
+          final text = pages.pages
+              .expand((page) => page.fragments)
+              .where((fragment) => fragment.paragraphIndex == p)
+              .map(
+                (fragment) => fragment.startOffset == 0
+                    ? fragment.text.substring(2)
+                    : fragment.text,
+              )
+              .join();
+          expect(text, pages.sourceParagraphs[p]);
+        }
+      }
+    });
+
     test('scaled $scale pages fit and retain every source character', () {
       final paragraphs = [
         '夜幕降临，繁星点缀在浩瀚的天际。' * 150,
@@ -106,6 +158,38 @@ void main() {
       }
     });
   }
+
+  test('a final illustration reserves space above the chapter ending', () {
+    const content = '图前文字。';
+    const image = ReaderIllustration(
+      id: 'last-image',
+      asset: 'images/test.png',
+      width: 100,
+      height: 2000,
+      paragraphIndex: 0,
+      characterOffset: content.length,
+    );
+    final pages = ReaderPaginationCache().paginate(
+      chapterId: 'image-end',
+      title: '插图章节',
+      content: content,
+      layout: layout(2, chapterEndHeight: 130),
+      indent: false,
+      illustrations: const [image],
+    );
+    final last = pages.pages.last;
+    expect(last.chapterEndHeight, 130);
+    expect(last.fragments.last.image?.id, image.id);
+    expect(last.fragments.last.height, lessThanOrEqualTo(last.availableHeight));
+    expect(
+      pages.pages
+          .expand((page) => page.fragments)
+          .where((fragment) => fragment.image == null)
+          .map((fragment) => fragment.text)
+          .join(),
+      content,
+    );
+  });
 
   test('reflow finds the page containing the same source anchor', () {
     final cache = ReaderPaginationCache();

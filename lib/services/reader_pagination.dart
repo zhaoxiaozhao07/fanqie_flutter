@@ -16,6 +16,7 @@ class ReaderLayout {
   final double paragraphSpacing;
   final Size inlineCommentSize;
   final bool showPageNumber;
+  final double chapterEndHeight;
 
   const ReaderLayout({
     required this.size,
@@ -26,6 +27,7 @@ class ReaderLayout {
     required this.paragraphSpacing,
     this.inlineCommentSize = Size.zero,
     this.showPageNumber = true,
+    this.chapterEndHeight = 0,
   });
 
   Object get key => (
@@ -37,6 +39,7 @@ class ReaderLayout {
     paragraphSpacing,
     inlineCommentSize,
     showPageNumber,
+    chapterEndHeight,
   );
 
   // Paint-only changes (night theme, highlights) must reuse measured pages.
@@ -81,12 +84,14 @@ class ReaderPage {
   final double availableHeight;
   final bool oversized;
   final double titleHeight;
+  final double chapterEndHeight;
 
   const ReaderPage({
     required this.fragments,
     required this.availableHeight,
     this.oversized = false,
     this.titleHeight = 0,
+    this.chapterEndHeight = 0,
   });
 
   String get text =>
@@ -263,14 +268,16 @@ class ReaderPaginationCache {
     var usedHeight = 0.0;
     var oversized = false;
     double available() => pages.isEmpty ? firstHeight : normalHeight;
-    void flush() {
+    void flush({bool chapterEnd = false}) {
       if (fragments.isEmpty) return;
+      final endHeight = chapterEnd ? layout.chapterEndHeight : 0.0;
       pages.add(
         ReaderPage(
           fragments: List.unmodifiable(fragments),
-          availableHeight: available(),
+          availableHeight: math.max(1, available() - endHeight).toDouble(),
           oversized: oversized,
           titleHeight: pages.isEmpty ? titleHeight : 0,
+          chapterEndHeight: endHeight,
         ),
       );
       fragments.clear();
@@ -280,17 +287,27 @@ class ReaderPaginationCache {
 
     try {
       final paragraphs = content.split('\n\n');
-      for (final block in readerContentBlocks(paragraphs, illustrations)) {
+      final blocks = readerContentBlocks(paragraphs, illustrations)
+          .where((block) => block.image != null || block.start < block.end)
+          .toList();
+      for (final block in blocks) {
+        final endHeight = identical(block, blocks.last)
+            ? layout.chapterEndHeight
+            : 0.0;
         final paragraphIndex = block.paragraphIndex;
         final original = paragraphs[paragraphIndex].trim();
         if (block.image != null) {
           var spacing = fragments.isEmpty ? 0.0 : layout.paragraphSpacing;
-          var height = block.image!.displayHeight(width, available());
+          double imageHeight() => block.image!.displayHeight(
+            width,
+            math.max(1, available() - endHeight).toDouble(),
+          );
+          var height = imageHeight();
           if (fragments.isNotEmpty &&
-              usedHeight + spacing + height > available()) {
+              usedHeight + spacing + height + endHeight > available()) {
             flush();
             spacing = 0;
-            height = block.image!.displayHeight(width, available());
+            height = imageHeight();
           }
           fragments.add(
             ReaderPageFragment(
@@ -308,7 +325,7 @@ class ReaderPaginationCache {
         var cursor = block.start;
         while (cursor < block.end) {
           final spacing = fragments.isEmpty ? 0.0 : layout.paragraphSpacing;
-          final room = available() - usedHeight - spacing;
+          var room = available() - usedHeight - spacing;
           final prefix = indent && cursor == 0 ? '\u3000\u3000' : '';
           final display = '$prefix${original.substring(cursor, block.end)}';
           final fullHeight = measure(
@@ -317,6 +334,11 @@ class ReaderPaginationCache {
             width,
             paragraphEnd: block.end == original.length,
           );
+          // Only the true ending needs room for the chapter footer. Earlier
+          // pages stay fully filled; late comment counts never change layout.
+          if (endHeight > 0 && fullHeight <= room + 0.01) {
+            room -= endHeight;
+          }
           var end = display.length;
           var height = fullHeight;
           if (height > room + 0.01) {
@@ -402,13 +424,16 @@ class ReaderPaginationCache {
           if (cursor < block.end) flush();
         }
       }
-      flush();
+      flush(chapterEnd: true);
       if (pages.isEmpty) {
         pages.add(
           ReaderPage(
             fragments: const [],
-            availableHeight: firstHeight,
+            availableHeight: math
+                .max(1, firstHeight - layout.chapterEndHeight)
+                .toDouble(),
             titleHeight: titleHeight,
+            chapterEndHeight: layout.chapterEndHeight,
           ),
         );
       }

@@ -952,6 +952,20 @@ class _ReaderScreenState extends State<ReaderScreen>
         _canUseVolumeKeys,
         owner: this,
       );
+      if ((before.pureMode && !value.pureMode) ||
+          (!before.commentBubbles && value.commentBubbles)) {
+        for (final index in {
+          _currentActiveIndex,
+          _currentActiveIndex - 1,
+          _currentActiveIndex + 1,
+          ..._displayedChapters,
+        }) {
+          if (!_chapterCache.containsKey(index)) continue;
+          final itemId = widget.chapters[index].itemId;
+          _fetchCommentStats(itemId);
+          _fetchChapterCommentsCount(itemId);
+        }
+      }
     }
 
     if (changedLayout || changedPaint) {
@@ -2451,6 +2465,9 @@ class _ReaderScreenState extends State<ReaderScreen>
           widget.book.bookId,
           itemId,
           count: 1,
+          // 此请求不阻塞正文。避免旧的“0 条”缓存返回后，后台刷新
+          // 只写磁盘、却让当前阅读页一直隐藏入口；服务仍支持离线回退。
+          preferCache: false,
         );
         if (data != null && mounted) {
           _chapterCommentsCount[itemId] = data.total;
@@ -4136,8 +4153,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     });
   }
 
-  /// 显示本章段评概览
+  /// 显示独立章评（不是全章聚合段评）
   void _openChapterComments(Chapter chapter) {
+    _lastBubbleTapTime = DateTime.now();
     final theme = _themes[_themeIndex];
     _beginReaderPanel();
     ParagraphCommentSheet.show(
@@ -4154,6 +4172,46 @@ class _ReaderScreenState extends State<ReaderScreen>
     ).whenComplete(_endReaderPanel);
   }
 
+  /// 翻页末页预留最大高度，评论数量迟到时只更新入口，不重排正文。
+  double _chapterEndHeight() {
+    final painter = TextPainter(
+      textDirection: TextDirection.ltr,
+      textScaler: MediaQuery.textScalerOf(context),
+    );
+    double measure(String text, TextStyle style) {
+      painter.text = TextSpan(text: text, style: style);
+      painter.layout();
+      return painter.height;
+    }
+
+    try {
+      return 28 +
+          math.max(
+            16, // 分割线默认占高
+            measure(
+              '本章完',
+              const TextStyle(fontSize: 12, height: 1.2, letterSpacing: 2),
+            ),
+          ) +
+          16 +
+          math.max(
+            16,
+            measure(
+              '本章评论',
+              const TextStyle(
+                fontSize: 13,
+                height: 1.2,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ) +
+          20 +
+          1.6; // 卡片上下边框
+    } finally {
+      painter.dispose();
+    }
+  }
+
   /// 构建章节末尾的“本章完”分割与真实本章评论入口
   Widget _buildChapterEndComments(Chapter chapter, ReaderTheme theme) {
     if (_readerPreferences.pureMode) return const SizedBox.shrink();
@@ -4161,12 +4219,14 @@ class _ReaderScreenState extends State<ReaderScreen>
     final isDark = theme.backgroundColor.computeLuminance() < 0.2;
 
     return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
         // 本章完装饰分割线
         Row(
           children: [
             Expanded(
               child: Divider(
+                height: 16,
                 color: theme.secondaryColor.withValues(alpha: 0.25),
                 thickness: 0.8,
               ),
@@ -4177,6 +4237,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 '本章完',
                 style: TextStyle(
                   fontSize: 12,
+                  height: 1.2,
                   color: theme.secondaryColor,
                   letterSpacing: 2.0,
                 ),
@@ -4184,6 +4245,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             ),
             Expanded(
               child: Divider(
+                height: 16,
                 color: theme.secondaryColor.withValues(alpha: 0.25),
                 thickness: 0.8,
               ),
@@ -4196,6 +4258,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           const SizedBox(height: 16),
           Center(
             child: InkWell(
+              onTapDown: (_) => _lastBubbleTapTime = DateTime.now(),
               onTap: () => _openChapterComments(chapter),
               borderRadius: BorderRadius.circular(20),
               child: Container(
@@ -4222,12 +4285,17 @@ class _ReaderScreenState extends State<ReaderScreen>
                       color: isDark ? Colors.white70 : theme.secondaryColor,
                     ),
                     const SizedBox(width: 8),
-                    Text(
-                      '本章评论 ($total条讨论)',
-                      style: TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w600,
-                        color: isDark ? Colors.white : theme.textColor,
+                    Flexible(
+                      child: Text(
+                        '本章评论 ($total条讨论)',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          height: 1.2,
+                          fontWeight: FontWeight.w600,
+                          color: isDark ? Colors.white : theme.textColor,
+                        ),
                       ),
                     ),
                     const SizedBox(width: 4),
@@ -4581,6 +4649,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     inlineCommentSize: _showCommentBubbles
         ? ReaderCommentBubble.sizeFor(MediaQuery.textScalerOf(context))
         : Size.zero,
+    chapterEndHeight:
+        _readerPreferences.pureMode || widget.book.bookId.startsWith('local_')
+        ? 0
+        : _chapterEndHeight(),
   );
 
   ReaderChapterPages _preparePages(int index, ReaderLayout layout) {
@@ -4934,6 +5006,10 @@ class _ReaderScreenState extends State<ReaderScreen>
                               startOffset: page.fragments[index].startOffset,
                               endOffset: page.fragments[index].endOffset,
                             ),
+                        ],
+                        if (page.chapterEndHeight > 0) ...[
+                          const SizedBox(height: 28),
+                          _buildChapterEndComments(chapter, theme),
                         ],
                       ],
                     ),
