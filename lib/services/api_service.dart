@@ -522,6 +522,32 @@ class ApiService {
     return null;
   }
 
+  Future<CommentReplyPageData?> getPostReplies(
+    String postId, {
+    String bookId = '',
+    String cursor = '',
+    int count = 20,
+  }) => _mobileGateway.fetchPostReplies(
+    postId,
+    bookId: bookId,
+    cursor: cursor,
+    count: count,
+  );
+
+  Future<CommentReplyPageData?> getPostCommentReplies(
+    String postId,
+    String commentId, {
+    String bookId = '',
+    String cursor = '',
+    int count = 20,
+  }) => _mobileGateway.fetchPostCommentReplies(
+    postId,
+    commentId,
+    bookId: bookId,
+    cursor: cursor,
+    count: count,
+  );
+
   /// 获取指定评论的楼中楼二级回复列表
   Future<CommentReplyPageData?> getCommentReplies(
     String commentId, {

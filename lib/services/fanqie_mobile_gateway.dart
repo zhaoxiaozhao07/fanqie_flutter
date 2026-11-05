@@ -492,10 +492,18 @@ class FanqieMobileGateway {
     final rawAvatar = baseInfo['user_avatar']?.toString() ?? '';
     final avatar = cleanCommentImageUrl(rawAvatar, targetWidth: 144);
 
+    final target = raw['reply_to_user_info'] is Map
+        ? raw['reply_to_user_info'] as Map
+        : const {};
+    final targetBase = target['base_info'] is Map
+        ? target['base_info'] as Map
+        : target;
+    final targetName = targetBase['user_name']?.toString() ?? '';
     return CommentReplyItem(
       replyId: rid,
       parentCommentId: parentCommentId,
       parentReplyId: raw['reply_to_reply_id']?.toString(),
+      replyToUserName: targetName.isNotEmpty ? targetName : null,
       userName: baseInfo['user_name']?.toString() ?? '书友',
       userId: baseInfo['user_id']?.toString() ?? '',
       avatar: avatar,
@@ -1021,6 +1029,114 @@ class FanqieMobileGateway {
       }
     }
     return null;
+  }
+
+  /// Replies shown beneath a forum post are comments on that post, not chapter
+  /// reply/list entries. Source/type/group/channel must match the post protocol.
+  Future<CommentReplyPageData?> fetchPostReplies(
+    String postId, {
+    String bookId = '',
+    String cursor = '',
+    int count = 20,
+  }) async {
+    final id = postId.trim();
+    if (id.isEmpty) return null;
+    final data = await _discussionRequest(
+      '/novel/commentapi/comment/list/$id/v1/',
+      body: {
+        'group_id': id,
+        'comment_source': 5,
+        'comment_type': 11,
+        'group_type': 3,
+        'server_channel': 35,
+        'sort': 1,
+        'count': count.clamp(1, 50),
+        'cursor': cursor,
+        'business_param': {
+          if (bookId.isNotEmpty) 'book_id': bookId,
+          'need_count': true,
+          'fold_type': 1,
+        },
+      },
+    );
+    if (data?['data_list'] is! List || data?['common_list_info'] is! Map) {
+      return null;
+    }
+    final info = data!['common_list_info'] as Map;
+    final replies = <CommentReplyItem>[];
+    final seen = <String>{};
+    for (final raw in data['data_list'] as List) {
+      final comment = parseCommentItem(raw, bookId: bookId);
+      if (comment == null) return null;
+      if (!seen.add(comment.id)) continue;
+      replies.add(
+        CommentReplyItem(
+          replyId: comment.id,
+          parentCommentId: id,
+          userName: comment.userName,
+          userId: comment.userId,
+          avatar: comment.avatar,
+          isAuthor: comment.isAuthor,
+          titles: comment.titles,
+          text: comment.text,
+          images: comment.images,
+          createTime: comment.createTime,
+          diggCount: comment.diggCount,
+          replyCount: comment.replyCount,
+        ),
+      );
+    }
+    return CommentReplyPageData(
+      replies: replies,
+      cursor: info['cursor']?.toString() ?? '',
+      hasMore: _moreFlag(info['has_more']),
+      total: int.tryParse(info['total']?.toString() ?? '') ?? replies.length,
+    );
+  }
+
+  Future<CommentReplyPageData?> fetchPostCommentReplies(
+    String postId,
+    String commentId, {
+    String bookId = '',
+    String cursor = '',
+    int count = 20,
+  }) async {
+    final parent = postId.trim();
+    final id = commentId.trim();
+    if (parent.isEmpty || id.isEmpty) return null;
+    final data = await _discussionRequest(
+      '/novel/commentapi/reply/list/$id/v1/',
+      body: {
+        'group_id': parent,
+        'comment_id': id,
+        // This read request keeps the original post-comment context (5).
+        // NovelPostReply (505) is a different context, not a replacement here.
+        'comment_source': 5,
+        'comment_type': 11,
+        'group_type': 3,
+        'count': count.clamp(1, 50),
+        'cursor': cursor,
+        'business_param': {
+          'need_count': true,
+          if (bookId.isNotEmpty) 'book_id': bookId,
+        },
+      },
+    );
+    final info = data?['comment_list_info'] ?? data?['common_list_info'];
+    if (data?['reply_list'] is! List || info is! Map) return null;
+    final seen = <String>{};
+    final replies = <CommentReplyItem>[];
+    for (final raw in data!['reply_list'] as List) {
+      final parsed = parseReplyItem(raw, id);
+      if (parsed == null) return null;
+      if (seen.add(parsed.replyId)) replies.add(parsed);
+    }
+    return CommentReplyPageData(
+      replies: replies,
+      cursor: info['cursor']?.toString() ?? '',
+      hasMore: _moreFlag(info['has_more']),
+      total: int.tryParse(info['total']?.toString() ?? '') ?? replies.length,
+    );
   }
 
   /// 3. 获取楼中楼二级回复列表 (reply/list)

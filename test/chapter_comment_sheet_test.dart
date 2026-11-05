@@ -98,39 +98,38 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  testWidgets(
-    'posts keep distinct identity and do not use chapter reply endpoint',
-    (tester) async {
-      final api = ChapterCommentApi(
-        (_) async => CommentPageData(
-          total: 2,
-          warning: '完整章节讨论暂不可用，当前显示离线缓存',
-          comments: [
-            chapterComment('same'),
-            const CommentItem(
-              id: 'same',
-              discussionPostId: 'same',
-              bookId: 'book',
-              chapterId: 'chapter',
-              userName: '书友',
-              text: '书圈正文',
-              replyCount: 2,
-            ),
-          ],
-        ),
-      );
-      await openChapterComments(tester, api);
-      expect(visibleListCount(tester), 2);
-      expect(find.text('书圈正文'), findsOneWidget);
-      expect(find.text('帖子含 2 条回复（暂不支持展开）'), findsOneWidget);
-      expect(find.text('查看 2 条回复'), findsNothing);
-      expect(
-        find.byKey(const ValueKey('chapter-discussion-warning')),
-        findsOneWidget,
-      );
-      expect(tester.takeException(), isNull);
-    },
-  );
+  testWidgets('posts keep distinct identity and offer the reply entry', (
+    tester,
+  ) async {
+    final api = ChapterCommentApi(
+      (_) async => CommentPageData(
+        total: 2,
+        warning: '完整章节讨论暂不可用，当前显示离线缓存',
+        comments: [
+          chapterComment('same'),
+          const CommentItem(
+            id: 'same',
+            discussionPostId: 'same',
+            bookId: 'book',
+            chapterId: 'chapter',
+            userName: '书友',
+            text: '书圈正文',
+            replyCount: 2,
+          ),
+        ],
+      ),
+    );
+    await openChapterComments(tester, api);
+    expect(visibleListCount(tester), 2);
+    expect(find.text('书圈正文'), findsOneWidget);
+    expect(find.text('帖子含 2 条回复（暂不支持展开）'), findsNothing);
+    expect(find.text('查看 2 条回复'), findsOneWidget);
+    expect(
+      find.byKey(const ValueKey('chapter-discussion-warning')),
+      findsOneWidget,
+    );
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets(
     'chapter list requests a fresh full page, not the count preview',

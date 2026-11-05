@@ -119,6 +119,7 @@ class CommentReplyItem {
   final String replyId;
   final String parentCommentId;
   final String? parentReplyId;
+  final String? replyToUserName;
   final String userName;
   final String userId;
   final String avatar;
@@ -129,10 +130,14 @@ class CommentReplyItem {
   final int createTime;
   final int diggCount;
 
+  /// Post-level comments may themselves have a reply thread.
+  final int replyCount;
+
   const CommentReplyItem({
     required this.replyId,
     required this.parentCommentId,
     this.parentReplyId,
+    this.replyToUserName,
     required this.userName,
     this.userId = '',
     this.avatar = '',
@@ -142,6 +147,7 @@ class CommentReplyItem {
     this.images = const [],
     this.createTime = 0,
     this.diggCount = 0,
+    this.replyCount = 0,
   });
 
   Map<String, dynamic> toJson() {
@@ -149,6 +155,7 @@ class CommentReplyItem {
       'replyId': replyId,
       'parentCommentId': parentCommentId,
       if (parentReplyId != null) 'parentReplyId': parentReplyId,
+      if (replyToUserName != null) 'replyToUserName': replyToUserName,
       'userName': userName,
       'userId': userId,
       'avatar': avatar,
@@ -158,6 +165,7 @@ class CommentReplyItem {
       'images': images,
       'createTime': createTime,
       'diggCount': diggCount,
+      'replyCount': replyCount,
     };
   }
 
@@ -166,6 +174,7 @@ class CommentReplyItem {
       replyId: json['replyId']?.toString() ?? '',
       parentCommentId: json['parentCommentId']?.toString() ?? '',
       parentReplyId: json['parentReplyId']?.toString(),
+      replyToUserName: json['replyToUserName']?.toString(),
       userName: json['userName']?.toString() ?? '书友',
       userId: json['userId']?.toString() ?? '',
       avatar: json['avatar']?.toString() ?? '',
@@ -187,6 +196,7 @@ class CommentReplyItem {
       diggCount: json['diggCount'] is int
           ? json['diggCount'] as int
           : int.tryParse(json['diggCount']?.toString() ?? '0') ?? 0,
+      replyCount: int.tryParse(json['replyCount']?.toString() ?? '') ?? 0,
     );
   }
 }

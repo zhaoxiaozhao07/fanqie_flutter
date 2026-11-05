@@ -111,6 +111,8 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
   final Map<String, bool> _repliesLoadingMap = {};
   final Map<String, String> _repliesCursorMap = {};
   final Map<String, bool> _repliesHasMoreMap = {};
+  final Map<String, String> _repliesErrorMap = {};
+  final Map<String, int> _repliesTokens = {};
 
   @override
   void initState() {
@@ -159,6 +161,12 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
       _cursor = '';
       _emptyChapterPages = 0;
       _sourceWarning = null;
+      _repliesMap.clear();
+      _repliesLoadingMap.clear();
+      _repliesCursorMap.clear();
+      _repliesHasMoreMap.clear();
+      _repliesErrorMap.clear();
+      _repliesTokens.clear();
     });
 
     try {
@@ -307,78 +315,127 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
     }
   }
 
-  Future<void> _toggleReplies(String commentId) async {
-    if (_repliesMap.containsKey(commentId)) {
-      // 已展开则收起
+  Future<void> _toggleReplies(
+    String key,
+    Future<CommentReplyPageData?> Function(String) load,
+  ) async {
+    if (_repliesMap.containsKey(key)) {
       setState(() {
-        _repliesMap.remove(commentId);
+        _repliesMap.remove(key);
+        _repliesTokens[key] = (_repliesTokens[key] ?? 0) + 1;
+        _repliesLoadingMap.remove(key);
       });
       return;
     }
-
-    // 开始拉取回复
     setState(() {
-      _repliesLoadingMap[commentId] = true;
+      // Open immediately so loading is visible and another tap can collapse.
+      _repliesMap[key] = [];
+      _repliesCursorMap[key] = '';
+      _repliesHasMoreMap[key] = false;
     });
-
-    try {
-      final result = await _apiService.getCommentReplies(commentId);
-      if (mounted) {
-        setState(() {
-          _repliesLoadingMap[commentId] = false;
-          if (result != null) {
-            _repliesMap[commentId] = result.replies;
-            _repliesCursorMap[commentId] = result.cursor;
-            _repliesHasMoreMap[commentId] = result.hasMore;
-          } else {
-            _repliesMap[commentId] = [];
-          }
-        });
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() {
-          _repliesLoadingMap[commentId] = false;
-          _repliesMap[commentId] = [];
-        });
-      }
-    }
+    await _loadReplies(key, load);
   }
 
-  Future<void> _loadMoreReplies(String commentId) async {
-    final cursor = _repliesCursorMap[commentId] ?? '';
-    if (cursor.isEmpty) return;
-
-    setState(() {
-      _repliesLoadingMap[commentId] = true;
-    });
-
-    try {
-      final result = await _apiService.getCommentReplies(
-        commentId,
-        cursor: cursor,
-      );
-      if (mounted && result != null) {
-        setState(() {
-          _repliesLoadingMap[commentId] = false;
-          final currentList = _repliesMap[commentId] ?? [];
-          currentList.addAll(result.replies);
-          _repliesMap[commentId] = currentList;
-          _repliesCursorMap[commentId] = result.cursor;
-          _repliesHasMoreMap[commentId] = result.hasMore;
-        });
-      } else if (mounted) {
-        setState(() {
-          _repliesLoadingMap[commentId] = false;
-        });
-      }
-    } catch (_) {
-      if (mounted) {
-        setState(() {
-          _repliesLoadingMap[commentId] = false;
-        });
-      }
+  Future<void> _loadReplies(
+    String key,
+    Future<CommentReplyPageData?> Function(String) load,
+  ) async {
+    if (_repliesLoadingMap[key] == true || !_repliesMap.containsKey(key)) {
+      return;
     }
+    final cursor = _repliesCursorMap[key] ?? '';
+    final generation = _commentsGeneration;
+    final token = (_repliesTokens[key] ?? 0) + 1;
+    _repliesTokens[key] = token;
+    setState(() {
+      _repliesLoadingMap[key] = true;
+      _repliesErrorMap.remove(key);
+    });
+    CommentReplyPageData? result;
+    try {
+      result = await load(cursor);
+    } catch (_) {}
+    if (!mounted ||
+        generation != _commentsGeneration ||
+        _repliesTokens[key] != token ||
+        !_repliesMap.containsKey(key)) {
+      return;
+    }
+    setState(() {
+      _repliesLoadingMap[key] = false;
+      final page = result;
+      if (page == null) {
+        _repliesErrorMap[key] = '回复加载失败，请重试';
+        return;
+      }
+      final replies = _repliesMap[key]!;
+      final seen = replies.map((r) => r.replyId).toSet();
+      replies.addAll(page.replies.where((r) => seen.add(r.replyId)));
+      _repliesHasMoreMap[key] = page.hasMore;
+      if (page.hasMore && (page.cursor.isEmpty || page.cursor == cursor)) {
+        // Keep the previous cursor, so retry never restarts or skips a page.
+        _repliesErrorMap[key] = '回复分页未推进，请重试';
+      } else {
+        _repliesCursorMap[key] = page.cursor;
+      }
+    });
+  }
+
+  Widget _buildRepliesPanel(
+    String key,
+    Future<CommentReplyPageData?> Function(String) load, {
+    String? postId,
+  }) {
+    final replies = _repliesMap[key] ?? const <CommentReplyItem>[];
+    final loading = _repliesLoadingMap[key] == true;
+    final error = _repliesErrorMap[key];
+    return Container(
+      key: ValueKey('replies-$key'),
+      margin: const EdgeInsets.only(top: 8),
+      padding: const EdgeInsets.all(10),
+      decoration: BoxDecoration(
+        color: widget.backgroundColor.withValues(alpha: 0.6),
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          for (final reply in replies) ...[
+            _buildReplyRow(reply, postId: postId),
+            const SizedBox(height: 8),
+          ],
+          if (loading)
+            const Center(
+              child: Padding(
+                padding: EdgeInsets.all(8),
+                child: SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              ),
+            )
+          else if (error != null)
+            TextButton.icon(
+              key: ValueKey('retry-replies-$key'),
+              onPressed: () => _loadReplies(key, load),
+              icon: const Icon(Icons.refresh, size: 16),
+              label: Text(error, textAlign: TextAlign.center),
+            )
+          else if (_repliesHasMoreMap[key] == true)
+            TextButton(
+              key: ValueKey('more-replies-$key'),
+              onPressed: () => _loadReplies(key, load),
+              child: const Text('加载更多回复'),
+            )
+          else if (replies.isEmpty)
+            Text(
+              '暂无可见回复',
+              style: TextStyle(fontSize: 12, color: widget.secondaryColor),
+            ),
+        ],
+      ),
+    );
   }
 
   void _showImagePreview(BuildContext context, String imageUrl) {
@@ -801,10 +858,16 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
 
   Widget _buildCommentCard(CommentItem comment, Color cardColor, bool isDark) {
     final hasReplies = comment.replyCount > 0;
-    final isExpanded = _repliesMap.containsKey(comment.id);
-    final isRepliesLoading = _repliesLoadingMap[comment.id] == true;
-    final replies = _repliesMap[comment.id] ?? const [];
-    final hasMoreReplies = _repliesHasMoreMap[comment.id] == true;
+    final replyKey = comment.identityKey;
+    final isExpanded = _repliesMap.containsKey(replyKey);
+    Future<CommentReplyPageData?> loadReplies(String cursor) =>
+        comment.isDiscussionPost
+        ? _apiService.getPostReplies(
+            comment.discussionPostId!,
+            bookId: comment.bookId,
+            cursor: cursor,
+          )
+        : _apiService.getCommentReplies(comment.id, cursor: cursor);
 
     return Container(
       padding: const EdgeInsets.all(12),
@@ -954,21 +1017,20 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             ),
 
           // 楼中楼回复入口
-          if (hasReplies && comment.isForumDiscussion)
+          if (hasReplies && comment.isDiscussionTopic)
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: Text(
-                comment.isDiscussionTopic
-                    ? '话题含 ${comment.replyCount} 条讨论（暂不支持展开）'
-                    : '帖子含 ${comment.replyCount} 条回复（暂不支持展开）',
+                '话题含 ${comment.replyCount} 条讨论（暂不支持展开）',
                 style: TextStyle(fontSize: 12, color: widget.secondaryColor),
               ),
             ),
-          if (hasReplies && !comment.isForumDiscussion)
+          if (hasReplies && !comment.isDiscussionTopic)
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: InkWell(
-                onTap: () => _toggleReplies(comment.id),
+                key: ValueKey('toggle-replies-$replyKey'),
+                onTap: () => _toggleReplies(replyKey, loadReplies),
                 borderRadius: BorderRadius.circular(4),
                 child: Padding(
                   padding: const EdgeInsets.symmetric(
@@ -1001,58 +1063,25 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
 
           // 楼中楼回复列表（内联展开）
           if (isExpanded)
-            Container(
-              margin: const EdgeInsets.only(top: 8),
-              padding: const EdgeInsets.all(10),
-              decoration: BoxDecoration(
-                color: widget.backgroundColor.withValues(alpha: 0.6),
-                borderRadius: BorderRadius.circular(8),
-              ),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  if (isRepliesLoading && replies.isEmpty)
-                    Center(
-                      child: Padding(
-                        padding: const EdgeInsets.all(8),
-                        child: SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(
-                            strokeWidth: 2,
-                            color: Theme.of(context).primaryColor,
-                          ),
-                        ),
-                      ),
-                    )
-                  else ...[
-                    for (final reply in replies) ...[
-                      _buildReplyRow(reply),
-                      const SizedBox(height: 8),
-                    ],
-                    if (hasMoreReplies)
-                      Center(
-                        child: TextButton(
-                          onPressed: () => _loadMoreReplies(comment.id),
-                          child: Text(
-                            isRepliesLoading ? '正在加载...' : '加载更多回复',
-                            style: TextStyle(
-                              fontSize: 12,
-                              color: Theme.of(context).primaryColor,
-                            ),
-                          ),
-                        ),
-                      ),
-                  ],
-                ],
-              ),
+            _buildRepliesPanel(
+              replyKey,
+              loadReplies,
+              postId: comment.discussionPostId,
             ),
         ],
       ),
     );
   }
 
-  Widget _buildReplyRow(CommentReplyItem reply) {
+  Widget _buildReplyRow(CommentReplyItem reply, {String? postId}) {
+    final key = 'post-comment:$postId:${reply.replyId}';
+    Future<CommentReplyPageData?> loadNested(String cursor) =>
+        _apiService.getPostCommentReplies(
+          postId!,
+          reply.replyId,
+          bookId: widget.bookId,
+          cursor: cursor,
+        );
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1072,41 +1101,58 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
                   : null,
             ),
             const SizedBox(width: 6),
-            Flexible(
-              child: Text(
-                reply.userName,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 12,
-                  fontWeight: FontWeight.w600,
-                  color: widget.textColor.withValues(alpha: 0.9),
-                ),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Wrap(
+                    spacing: 6,
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    children: [
+                      Text(
+                        reply.userName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.w600,
+                          color: widget.textColor.withValues(alpha: 0.9),
+                        ),
+                      ),
+                      if (reply.isAuthor)
+                        _buildBadge('作者', Colors.redAccent, fontSize: 9),
+                      if (reply.diggCount > 0)
+                        Text(
+                          '${reply.diggCount}赞',
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: widget.secondaryColor,
+                          ),
+                        ),
+                    ],
+                  ),
+                  Text(
+                    _formatTime(reply.createTime),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 10,
+                      color: widget.secondaryColor,
+                    ),
+                  ),
+                ],
               ),
             ),
-            if (reply.isAuthor) ...[
-              const SizedBox(width: 4),
-              _buildBadge('作者', Colors.redAccent, fontSize: 9),
-            ],
-            const SizedBox(width: 6),
-            Text(
-              _formatTime(reply.createTime),
-              style: TextStyle(
-                fontSize: 10,
-                color: widget.secondaryColor.withValues(alpha: 0.7),
-              ),
-            ),
-            const Spacer(),
-            if (reply.diggCount > 0)
-              Text(
-                '${reply.diggCount}赞',
-                style: TextStyle(
-                  fontSize: 10,
-                  color: widget.secondaryColor.withValues(alpha: 0.8),
-                ),
-              ),
           ],
         ),
+        if (reply.replyToUserName != null)
+          Padding(
+            padding: const EdgeInsets.only(left: 26, top: 2),
+            child: Text(
+              '回复 @${reply.replyToUserName}',
+              style: TextStyle(fontSize: 11, color: widget.secondaryColor),
+            ),
+          ),
         Padding(
           padding: const EdgeInsets.only(left: 26, top: 2),
           child: Text(
@@ -1118,6 +1164,44 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             ),
           ),
         ),
+        if (reply.images.isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.only(left: 26, top: 4),
+            child: Wrap(
+              spacing: 6,
+              runSpacing: 6,
+              children: reply.images
+                  .map(
+                    (image) => GestureDetector(
+                      onTap: () => _showImagePreview(context, image),
+                      child: Image.network(
+                        image,
+                        width: 72,
+                        height: 72,
+                        fit: BoxFit.cover,
+                        errorBuilder: (_, _, _) => const SizedBox(
+                          width: 72,
+                          height: 72,
+                          child: Icon(Icons.broken_image_outlined),
+                        ),
+                      ),
+                    ),
+                  )
+                  .toList(),
+            ),
+          ),
+        if (postId != null && reply.replyCount > 0)
+          TextButton(
+            key: ValueKey('toggle-replies-$key'),
+            onPressed: () => _toggleReplies(key, loadNested),
+            child: Text(
+              _repliesMap.containsKey(key)
+                  ? '收起楼中楼'
+                  : '查看 ${reply.replyCount} 条楼中楼回复',
+            ),
+          ),
+        if (postId != null && _repliesMap.containsKey(key))
+          _buildRepliesPanel(key, loadNested),
       ],
     );
   }
