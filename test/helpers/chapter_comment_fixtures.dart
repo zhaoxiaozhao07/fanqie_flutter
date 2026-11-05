@@ -26,7 +26,13 @@ CommentPageData chapterCommentPage(
 class ChapterCommentRequest {
   final int offset, count;
   final bool preferCache;
-  const ChapterCommentRequest(this.offset, this.count, this.preferCache);
+  final String cursor;
+  const ChapterCommentRequest(
+    this.offset,
+    this.count,
+    this.preferCache, [
+    this.cursor = '',
+  ]);
 }
 
 class ChapterCommentGateway extends Fake implements FanqieMobileGateway {
@@ -40,8 +46,9 @@ class ChapterCommentGateway extends Fake implements FanqieMobileGateway {
     String itemId, {
     int offset = 0,
     int count = 20,
+    String cursor = '',
   }) {
-    requests.add(ChapterCommentRequest(offset, count, false));
+    requests.add(ChapterCommentRequest(offset, count, false, cursor));
     return load(offset, count);
   }
 }
@@ -58,9 +65,10 @@ class ChapterCommentApi extends ApiService {
     String itemId, {
     int offset = 0,
     int count = 20,
+    String cursor = '',
     bool preferCache = true,
   }) {
-    final request = ChapterCommentRequest(offset, count, preferCache);
+    final request = ChapterCommentRequest(offset, count, preferCache, cursor);
     requests.add(request);
     return load(request);
   }

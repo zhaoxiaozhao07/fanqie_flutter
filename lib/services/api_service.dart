@@ -235,12 +235,14 @@ class ApiService {
     String itemId, {
     int offset = 0,
     int count = 20,
+    String cursor = '',
     bool preferCache = true,
   }) async {
     final cleanItemId = itemId.trim();
     final cleanBookId = bookId.trim();
     final pageSize = count.clamp(1, 50);
-    if (preferCache && offset == 0) {
+    final isFirstPage = offset == 0 && cursor.isEmpty;
+    if (preferCache && isFirstPage) {
       final cached = await _loadChapterCommentsFromDisk(
         cleanBookId,
         cleanItemId,
@@ -268,15 +270,35 @@ class ApiService {
         cleanItemId,
         offset: offset,
         count: pageSize,
+        cursor: cursor,
       );
       if (page != null) {
-        if (offset == 0) {
-          await _saveChapterCommentsToDisk(
-            cleanBookId,
-            cleanItemId,
-            page,
-            count: pageSize,
-          );
+        if (isFirstPage) {
+          if (page.isLegacySource) {
+            // A partial legacy response must not replace a previously complete
+            // feed cache or downgrade its total from six discussions to one.
+            final cached = await _loadChapterCommentsFromDisk(
+              cleanBookId,
+              cleanItemId,
+              count: pageSize,
+            );
+            if (cached != null && !cached.isLegacySource) {
+              return _chapterPageWithWarning(cached, '完整章节讨论暂不可用，当前显示离线缓存');
+            }
+            await _saveChapterCommentsToDisk(
+              cleanBookId,
+              cleanItemId,
+              page,
+              count: pageSize,
+            );
+          } else {
+            await _saveChapterCommentsToDisk(
+              cleanBookId,
+              cleanItemId,
+              page,
+              count: pageSize,
+            );
+          }
         }
         return page;
       }
@@ -287,15 +309,36 @@ class ApiService {
     }
 
     // 2. 离线回退
-    if (offset == 0) {
-      return _loadChapterCommentsFromDisk(
+    if (isFirstPage) {
+      final cached = await _loadChapterCommentsFromDisk(
         cleanBookId,
         cleanItemId,
         count: pageSize,
       );
+      return cached == null
+          ? null
+          : _chapterPageWithWarning(
+              cached,
+              cached.isLegacySource
+                  ? '当前显示旧版离线章评，联网刷新后可获取完整讨论'
+                  : '网络不可用，当前显示离线缓存',
+            );
     }
     return null;
   }
+
+  CommentPageData _chapterPageWithWarning(
+    CommentPageData page,
+    String warning, {
+    bool? isLegacySource,
+  }) => CommentPageData(
+    comments: page.comments,
+    cursor: page.cursor,
+    hasMore: page.hasMore,
+    total: page.total,
+    warning: warning,
+    isLegacySource: isLegacySource ?? page.isLegacySource,
+  );
 
   Future<void> _saveChapterCommentsToDisk(
     String bookId,
@@ -308,7 +351,10 @@ class ApiService {
       final dir = await _getCommentCacheDir(bookId: bookId);
       // Count-only previews must never overwrite a normal discussion page,
       // including when the two requests finish in the opposite order.
-      final file = File('${dir.path}/chapter_${itemId}_comments_$count.json');
+      final name = page.isLegacySource
+          ? 'chapter_${itemId}_comments_$count.json'
+          : 'chapter_${itemId}_discussion_v2_$count.json';
+      final file = File('${dir.path}/$name');
       await AtomicFile.writeString(file, jsonStr);
     } catch (_) {}
   }
@@ -333,24 +379,33 @@ class ApiService {
         return null;
       }
 
-      final exact = await read('chapter_${itemId}_comments_$count.json');
+      final exact = await read('chapter_${itemId}_discussion_v2_$count.json');
       if (exact != null) return exact;
       if (count == 1) {
-        final fullPage = await read('chapter_${itemId}_comments_20.json');
+        final fullPage = await read('chapter_${itemId}_discussion_v2_20.json');
         if (fullPage != null) return fullPage;
       }
-      final legacy = await read('chapter_${itemId}_comments.json');
-      if (legacy != null) {
-        // Old releases stored count=1 and count=20 in the same file. An
-        // undersized legacy preview is useful offline, not a full-page hit.
-        if (allowLegacyPreview ||
-            legacy.comments.length >= count ||
-            (!legacy.hasMore && legacy.comments.length >= legacy.total)) {
-          return legacy;
+      // Every pre-v3.3.4 cache is chapter-only, even if it says total=1 and
+      // hasMore=false. It is useful offline, never a complete online cache hit.
+      if (allowLegacyPreview) {
+        final preview = count != 1
+            ? await read('chapter_${itemId}_discussion_v2_1.json')
+            : null;
+        if (preview != null) return preview;
+        final old =
+            await read('chapter_${itemId}_comments_$count.json') ??
+            (count == 1
+                ? await read('chapter_${itemId}_comments_20.json')
+                : null) ??
+            await read('chapter_${itemId}_comments.json') ??
+            await read('chapter_${itemId}_comments_1.json');
+        if (old != null) {
+          return _chapterPageWithWarning(
+            old,
+            '当前显示旧版离线章评，联网刷新后可获取完整讨论',
+            isLegacySource: true,
+          );
         }
-      }
-      if (allowLegacyPreview && count != 1) {
-        return await read('chapter_${itemId}_comments_1.json');
       }
     } catch (_) {}
     return null;

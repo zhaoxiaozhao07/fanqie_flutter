@@ -103,6 +103,7 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
   int _totalCount = 0;
   int _commentsGeneration = 0;
   String? _loadMoreError;
+  String? _sourceWarning;
   int _emptyChapterPages = 0;
 
   // 展开回复的评论 ID 映射表及其回复列表与加载状态
@@ -157,6 +158,7 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
       _hasMore = false;
       _cursor = '';
       _emptyChapterPages = 0;
+      _sourceWarning = null;
     });
 
     try {
@@ -191,12 +193,13 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             final seen = <String>{};
             _comments = widget.isChapterComment
                 ? result.comments
-                      .where((comment) => seen.add(comment.id))
+                      .where((comment) => seen.add(comment.identityKey))
                       .toList()
                 : List.of(result.comments);
             _cursor = result.cursor;
             _hasMore = result.hasMore;
             _totalCount = result.total;
+            _sourceWarning = result.warning;
           } else {
             _errorMessage = widget.isChapterComment ? '本章暂无评论' : '暂无评论内容或网络不可用';
           }
@@ -217,7 +220,7 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
     if (_isLoading || _isLoadingMore || !_hasMore) return;
     final generation = _commentsGeneration;
     final requestedCursor = _cursor;
-    final requestedOffset = int.tryParse(requestedCursor) ?? _comments.length;
+    final requestedOffset = int.tryParse(requestedCursor) ?? 0;
 
     setState(() {
       _isLoadingMore = true;
@@ -237,6 +240,7 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
           widget.bookId,
           widget.chapterId,
           offset: requestedOffset,
+          cursor: requestedCursor,
           preferCache: false,
         );
       } else {
@@ -256,9 +260,11 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
           _isLoadingMore = false;
           if (widget.isChapterComment) {
             final previousLength = _comments.length;
-            final seen = _comments.map((comment) => comment.id).toSet();
+            final seen = _comments
+                .map((comment) => comment.identityKey)
+                .toSet();
             _comments.addAll(
-              page.comments.where((comment) => seen.add(comment.id)),
+              page.comments.where((comment) => seen.add(comment.identityKey)),
             );
             _emptyChapterPages = _comments.length == previousLength
                 ? _emptyChapterPages + 1
@@ -269,10 +275,13 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
           _cursor = page.cursor;
           _hasMore = page.hasMore;
           if (page.total > 0) _totalCount = page.total;
+          if (page.warning != null) _sourceWarning = page.warning;
           if (widget.isChapterComment &&
               _hasMore &&
-              (int.tryParse(page.cursor) ?? requestedOffset) <=
-                  requestedOffset) {
+              (page.cursor.isEmpty ||
+                  page.cursor == requestedCursor ||
+                  (int.tryParse(page.cursor) != null &&
+                      int.parse(page.cursor) <= requestedOffset))) {
             _cursor = requestedCursor;
             _loadMoreError = '后续评论分页未推进，请重试';
           } else if (widget.isChapterComment &&
@@ -626,6 +635,18 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
               ),
             ),
             const Divider(height: 1, thickness: 0.5),
+            if (_sourceWarning != null)
+              Padding(
+                padding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 6,
+                ),
+                child: Text(
+                  _sourceWarning!,
+                  key: const ValueKey('chapter-discussion-warning'),
+                  style: TextStyle(fontSize: 12, color: widget.secondaryColor),
+                ),
+              ),
 
             // 评论列表主体
             Expanded(child: _buildListContent(cardColor, isDark)),
@@ -882,6 +903,14 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
           ),
 
           // 评论正文
+          if (comment.isForumDiscussion)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                comment.isDiscussionTopic ? '书圈话题' : '书圈讨论帖',
+                style: TextStyle(fontSize: 11, color: widget.secondaryColor),
+              ),
+            ),
           Padding(
             padding: const EdgeInsets.only(top: 8, bottom: 4),
             child: Text(
@@ -925,7 +954,17 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             ),
 
           // 楼中楼回复入口
-          if (hasReplies)
+          if (hasReplies && comment.isForumDiscussion)
+            Padding(
+              padding: const EdgeInsets.only(top: 4),
+              child: Text(
+                comment.isDiscussionTopic
+                    ? '话题含 ${comment.replyCount} 条讨论（暂不支持展开）'
+                    : '帖子含 ${comment.replyCount} 条回复（暂不支持展开）',
+                style: TextStyle(fontSize: 12, color: widget.secondaryColor),
+              ),
+            ),
+          if (hasReplies && !comment.isForumDiscussion)
             Padding(
               padding: const EdgeInsets.only(top: 4),
               child: InkWell(

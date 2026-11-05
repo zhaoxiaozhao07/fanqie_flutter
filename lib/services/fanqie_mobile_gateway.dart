@@ -9,6 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:pointycastle/digests/sm3.dart';
 import 'package:pointycastle/export.dart' as pc;
 import '../models/comment.dart';
+import 'discussion_post_content.dart';
 
 /// 番茄小说移动端接口与解密网关 (Fanqie Mobile Gateway)
 /// 参考 Fanqie-novel-Downloader (POf-L) 及移动端协议实现：
@@ -78,6 +79,8 @@ class FanqieMobileGateway {
   int _keyVer = 0;
   Completer<bool>? _refreshKeyCompleter;
   HttpClient? _sharedClient;
+  final _forumIds = <String, ({String id, DateTime expires})>{};
+  final _forumRequests = <String, Future<String?>>{};
 
   HttpClient get _client {
     _sharedClient ??= HttpClient()
@@ -566,8 +569,234 @@ class FanqieMobileGateway {
     return null;
   }
 
-  /// 1.1 获取本章评论（章节维度评论 / 章评，来自 /reading/ugc/novel_comment/item/v/）
+  /// Official chapter discussions include both chapter comments and forum posts.
+  /// The feed already includes legacy comments: never sum/merge both endpoints.
   Future<CommentPageData?> fetchChapterComments(
+    String bookId,
+    String itemId, {
+    int offset = 0,
+    int count = 20,
+    String cursor = '',
+  }) async {
+    final cleanBookId = bookId.trim();
+    final cleanItemId = itemId.trim();
+    if (cleanItemId.isEmpty) return null;
+    final legacyOffset = int.tryParse(cursor);
+    if (legacyOffset != null || (cursor.isEmpty && offset > 0)) {
+      return _fetchLegacyChapterComments(
+        cleanBookId,
+        cleanItemId,
+        offset: legacyOffset ?? offset,
+        count: count,
+      );
+    }
+
+    final forumId = await _resolveForumId(cleanBookId);
+    if (forumId != null) {
+      final data = await _discussionRequest(
+        '/novel/articleapi/feed/v1',
+        body: {
+          'source': 2,
+          'channel': 7,
+          'aid': 1967,
+          'sort': 0,
+          // The mixed feed advances the post scan cursor before filling its
+          // comment slots. Tiny pages (notably count=1 stats probes) can lose
+          // posts. Use the official normal page size even for count probes.
+          'count': count.clamp(20, 50),
+          'cursor': cursor,
+          'business_param': {
+            'book_id': cleanBookId,
+            'item_id': cleanItemId,
+            'forum_id': forumId,
+            'fold_type': 1,
+            'need_author_speak': true,
+          },
+        },
+      );
+      if (data != null &&
+          data['data_list'] is List &&
+          data['common_list_info'] is Map) {
+        final info = data['common_list_info'] as Map;
+        final comments = <CommentItem>[];
+        final seen = <String>{};
+        var skipped = false;
+        for (final raw in data['data_list'] as List) {
+          final parsed = parseChapterDiscussion(
+            raw,
+            bookId: cleanBookId,
+            chapterId: cleanItemId,
+          );
+          if (parsed == null) {
+            skipped = true;
+          } else if (seen.add(parsed.identityKey)) {
+            comments.add(parsed);
+          }
+        }
+        return CommentPageData(
+          comments: comments,
+          cursor: info['cursor']?.toString() ?? '',
+          hasMore: _moreFlag(info['has_more']),
+          total:
+              int.tryParse(info['total']?.toString() ?? '') ?? comments.length,
+          warning: skipped ? '部分讨论类型暂不支持显示' : null,
+        );
+      }
+    }
+    // Never switch sources halfway through a feed or reinterpret its cursor.
+    if (cursor.isNotEmpty) return null;
+    return _fetchLegacyChapterComments(cleanBookId, cleanItemId, count: count);
+  }
+
+  Future<String?> _resolveForumId(String bookId) async {
+    if (bookId.isEmpty) return null;
+    final cached = _forumIds[bookId];
+    if (cached != null && cached.expires.isAfter(DateTime.now())) {
+      return cached.id;
+    }
+    final pending = _forumRequests[bookId];
+    if (pending != null) return pending;
+    final future = () async {
+      final data = await _discussionRequest(
+        '/reading/ugc/forum/desc/v1/',
+        query: {'relative_id': bookId, 'relative_type': '1'},
+      );
+      final forum = data?['forum'];
+      if (forum is! Map ||
+          (forum['relative_id'] != null &&
+              forum['relative_id'].toString() != bookId)) {
+        return null;
+      }
+      final id = forum['forum_id']?.toString() ?? '';
+      if (id.isEmpty || id == '0') return null;
+      _forumIds[bookId] = (
+        id: id,
+        expires: DateTime.now().add(const Duration(hours: 6)),
+      );
+      return id;
+    }();
+    _forumRequests[bookId] = future;
+    try {
+      return await future;
+    } finally {
+      _forumRequests.remove(bookId);
+    }
+  }
+
+  Future<Map?> _discussionRequest(
+    String path, {
+    Map<String, String> query = const {},
+    Map<String, dynamic>? body,
+  }) async {
+    // Keep the newer community version local to these endpoints; reader/key
+    // negotiation and paragraph-comment protocols remain unchanged.
+    final uri = Uri.https(
+      'reading.snssdk.com',
+      path,
+      _buildCommonParams(
+        extra: {
+          'version_code': '74332',
+          'version_name': '7.4.3.32',
+          'update_version_code': '74332',
+          'manifest_version_code': '74332',
+          'pv_player': '74332',
+          ...query,
+        },
+      ),
+    );
+    try {
+      final bytes = body == null ? null : utf8.encode(jsonEncode(body));
+      final req =
+          await (body == null ? _client.getUrl(uri) : _client.postUrl(uri))
+              .timeout(const Duration(seconds: 10));
+      req.headers.set('User-Agent', userAgent);
+      if (bytes != null) {
+        req.headers.set('Content-Type', 'application/json; charset=utf-8');
+      }
+      for (final header in signRequest(uri.toString(), body: bytes).entries) {
+        // Like paragraph comments, the article feed rejects x-ss-stub.
+        if (header.key != 'x-ss-stub') {
+          req.headers.set(header.key, header.value);
+        }
+      }
+      if (bytes != null) req.add(bytes);
+      final res = await req.close().timeout(const Duration(seconds: 10));
+      if (res.statusCode != 200) return null;
+      final responseBytes = await res
+          .fold<List<int>>([], (a, b) => a..addAll(b))
+          .timeout(const Duration(seconds: 10));
+      final value = jsonDecode(utf8.decode(responseBytes));
+      if (value is Map && value['code'] == 0 && value['data'] is Map) {
+        return value['data'] as Map;
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('Chapter discussion request failed: $e');
+    }
+    return null;
+  }
+
+  static bool _moreFlag(dynamic flag) =>
+      flag == true || flag == 1 || flag == '1' || flag == 'true';
+
+  static CommentItem? parseChapterDiscussion(
+    dynamic raw, {
+    required String bookId,
+    required String chapterId,
+  }) {
+    if (raw is! Map) return null;
+    final type = raw['data_type']?.toString();
+    if (type == '4' && raw['comment'] is Map) {
+      return parseCommentItem(raw, bookId: bookId, chapterId: chapterId);
+    }
+    final isTopic = type == '6';
+    final entity = raw[isTopic ? 'topic' : 'post'];
+    if ((!isTopic && type != '3') || entity is! Map) return null;
+    final post = entity;
+    final id = post[isTopic ? 'topic_id' : 'post_id']?.toString() ?? '';
+    if (id.isEmpty) return null;
+    final common = post['common'] is Map ? post['common'] as Map : const {};
+    final user = common['user_info'] is Map
+        ? common['user_info'] as Map
+        : const {};
+    final base = user['base_info'] is Map ? user['base_info'] as Map : user;
+    final tag = user['user_tag'] is Map ? user['user_tag'] as Map : const {};
+    final stat = post['stat'] is Map ? post['stat'] as Map : const {};
+    final content = DiscussionPostContent.parse(
+      common['content'] is Map ? common['content'] as Map : const {},
+    );
+    final title = common['title']?.toString().trim() ?? '';
+    return CommentItem(
+      id: id,
+      discussionPostId: isTopic ? null : id,
+      discussionTopicId: isTopic ? id : null,
+      bookId: bookId,
+      chapterId: chapterId,
+      userName: base['user_name']?.toString() ?? '书友',
+      userId: base['user_id']?.toString() ?? '',
+      avatar: cleanCommentImageUrl(
+        base['user_avatar']?.toString() ?? '',
+        targetWidth: 144,
+      ),
+      isAuthor: tag['is_author'] == true,
+      isVip: tag['is_vip'] == true || tag['is_blue_vip'] == true,
+      titles: extractUserTitles(tag),
+      text: title.isEmpty ? content.text : '$title\n${content.text}',
+      images: content.images,
+      createTime:
+          int.tryParse(common['create_timestamp']?.toString() ?? '') ?? 0,
+      diggCount: int.tryParse(stat['digg_count']?.toString() ?? '') ?? 0,
+      replyCount:
+          int.tryParse(
+            (isTopic ? stat['comment_count'] : stat['reply_count'])
+                    ?.toString() ??
+                '',
+          ) ??
+          0,
+    );
+  }
+
+  /// Older chapter-only endpoint, used as an explicitly incomplete fallback.
+  Future<CommentPageData?> _fetchLegacyChapterComments(
     String bookId,
     String itemId, {
     int offset = 0,
@@ -684,6 +913,8 @@ class FanqieMobileGateway {
               cursor: nextOffset.toString(),
               hasMore: hasMore,
               total: total,
+              warning: '完整章节讨论暂不可用，当前仅显示旧版章评',
+              isLegacySource: true,
             );
           }
         }

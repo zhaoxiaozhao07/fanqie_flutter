@@ -280,4 +280,137 @@ void main() {
       );
     },
   );
+
+  test('a terminal v3.3.3 single-comment cache still refreshes online', () async {
+    final old = File(
+      '${directory.path}/offline_books/book/comments/chapter_chapter_comments_20.json',
+    );
+    await old.parent.create(recursive: true);
+    await old.writeAsString(
+      jsonEncode(chapterCommentPage(['old'], total: 1, cursor: '1').toJson()),
+    );
+    final gateway = ChapterCommentGateway(
+      (_, _) async => chapterCommentPage(
+        List.generate(6, (i) => '$i'),
+        total: 6,
+        cursor: '{"post_next_offset":400}',
+      ),
+    );
+    final page = await service(gateway).getChapterComments('book', 'chapter');
+    expect(page?.total, 6);
+    expect(page?.comments, hasLength(6));
+    expect(gateway.requests, hasLength(1));
+    expect(await old.exists(), true);
+  });
+
+  test('legacy fallback cannot downgrade a complete feed cache', () async {
+    var degraded = false;
+    final api = service(
+      ChapterCommentGateway(
+        (_, _) async => degraded
+            ? CommentPageData(
+                comments: [chapterComment('old')],
+                total: 1,
+                cursor: '1',
+                warning: '仅显示旧版章评',
+                isLegacySource: true,
+              )
+            : chapterCommentPage(
+                List.generate(6, (i) => '$i'),
+                total: 6,
+                cursor: '{"post_next_offset":400}',
+              ),
+      ),
+    );
+    await api.getChapterComments('book', 'chapter', preferCache: false);
+    degraded = true;
+    final cached = await api.getChapterComments(
+      'book',
+      'chapter',
+      preferCache: false,
+    );
+    expect(cached?.total, 6);
+    expect(cached?.comments, hasLength(6));
+    expect(cached?.isLegacySource, false);
+    expect(cached?.warning, contains('离线缓存'));
+    final disk = File(
+      '${directory.path}/offline_books/book/comments/chapter_chapter_discussion_v2_20.json',
+    );
+    expect((jsonDecode(await disk.readAsString()) as Map)['total'], 6);
+  });
+
+  test(
+    'opaque continuations neither read nor replace the first-page cache',
+    () async {
+      var calls = 0;
+      final gateway = ChapterCommentGateway(
+        (_, _) async => ++calls == 1
+            ? chapterCommentPage(['first'], total: 6)
+            : chapterCommentPage(['second'], total: 6, cursor: 'end'),
+      );
+      final api = service(gateway);
+      await api.getChapterComments('book', 'chapter', preferCache: false);
+      const cursor = '{"post_next_offset":200}';
+      await api.getChapterComments('book', 'chapter', cursor: cursor);
+      expect(gateway.requests.last.cursor, cursor);
+      final disk = File(
+        '${directory.path}/offline_books/book/comments/chapter_chapter_discussion_v2_20.json',
+      );
+      expect((jsonDecode(await disk.readAsString()) as Map)['cursor'], '');
+      expect(
+        (jsonDecode(await disk.readAsString()) as Map)['comments'][0]['id'],
+        'first',
+      );
+    },
+  );
+
+  test(
+    'failed opaque continuation cannot fall back to cached first page',
+    () async {
+      var offline = false;
+      final api = service(
+        ChapterCommentGateway(
+          (_, _) async => offline ? null : chapterCommentPage(['first']),
+        ),
+      );
+      await api.getChapterComments('book', 'chapter', preferCache: false);
+      offline = true;
+      expect(
+        await api.getChapterComments(
+          'book',
+          'chapter',
+          cursor: '{"post_next_offset":200}',
+        ),
+        isNull,
+      );
+    },
+  );
+
+  test(
+    'legacy-only online fallback remains available offline with warning',
+    () async {
+      var offline = false;
+      final api = service(
+        ChapterCommentGateway(
+          (_, _) async => offline
+              ? null
+              : CommentPageData(
+                  comments: [chapterComment('old')],
+                  total: 1,
+                  isLegacySource: true,
+                ),
+        ),
+      );
+      await api.getChapterComments('book', 'chapter', preferCache: false);
+      offline = true;
+      final page = await api.getChapterComments(
+        'book',
+        'chapter',
+        preferCache: false,
+      );
+      expect(page?.comments, hasLength(1));
+      expect(page?.isLegacySource, true);
+      expect(page?.warning, contains('旧版离线章评'));
+    },
+  );
 }

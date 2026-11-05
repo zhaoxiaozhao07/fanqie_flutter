@@ -17,6 +17,13 @@ class CommentItem {
   final int replyCount;
   final int? score;
   final String? paraSrcContent;
+  final String? discussionPostId;
+  final String? discussionTopicId;
+  bool get isDiscussionPost => discussionPostId != null;
+  bool get isDiscussionTopic => discussionTopicId != null;
+  bool get isForumDiscussion => isDiscussionPost || isDiscussionTopic;
+  String get identityKey =>
+      '${isDiscussionTopic ? 'topic' : (isDiscussionPost ? 'post' : 'comment')}:$id';
 
   const CommentItem({
     required this.id,
@@ -36,6 +43,8 @@ class CommentItem {
     this.replyCount = 0,
     this.score,
     this.paraSrcContent,
+    this.discussionPostId,
+    this.discussionTopicId,
   });
 
   Map<String, dynamic> toJson() {
@@ -57,6 +66,8 @@ class CommentItem {
       'replyCount': replyCount,
       if (score != null) 'score': score,
       if (paraSrcContent != null) 'paraSrcContent': paraSrcContent,
+      if (discussionPostId != null) 'discussionPostId': discussionPostId,
+      if (discussionTopicId != null) 'discussionTopicId': discussionTopicId,
     };
   }
 
@@ -73,9 +84,17 @@ class CommentItem {
       avatar: json['avatar']?.toString() ?? '',
       isAuthor: json['isAuthor'] == true,
       isVip: json['isVip'] == true,
-      titles: (json['titles'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? const [],
+      titles:
+          (json['titles'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
       text: json['text']?.toString() ?? '',
-      images: (json['images'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? const [],
+      images:
+          (json['images'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
       createTime: json['createTime'] is int
           ? json['createTime'] as int
           : int.tryParse(json['createTime']?.toString() ?? '0') ?? 0,
@@ -89,6 +108,8 @@ class CommentItem {
           ? json['score'] as int
           : int.tryParse(json['score']?.toString() ?? ''),
       paraSrcContent: json['paraSrcContent']?.toString(),
+      discussionPostId: json['discussionPostId']?.toString(),
+      discussionTopicId: json['discussionTopicId']?.toString(),
     );
   }
 }
@@ -149,9 +170,17 @@ class CommentReplyItem {
       userId: json['userId']?.toString() ?? '',
       avatar: json['avatar']?.toString() ?? '',
       isAuthor: json['isAuthor'] == true,
-      titles: (json['titles'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? const [],
+      titles:
+          (json['titles'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
       text: json['text']?.toString() ?? '',
-      images: (json['images'] as List<dynamic>?)?.map((e) => e.toString()).toList() ?? const [],
+      images:
+          (json['images'] as List<dynamic>?)
+              ?.map((e) => e.toString())
+              .toList() ??
+          const [],
       createTime: json['createTime'] is int
           ? json['createTime'] as int
           : int.tryParse(json['createTime']?.toString() ?? '0') ?? 0,
@@ -191,7 +220,9 @@ class ChapterCommentStats {
     var total = 0;
     for (final e in rawCounts.entries) {
       final pIdx = int.tryParse(e.key);
-      final c = e.value is int ? e.value as int : int.tryParse(e.value.toString()) ?? 0;
+      final c = e.value is int
+          ? e.value as int
+          : int.tryParse(e.value.toString()) ?? 0;
       if (pIdx != null && c > 0) {
         counts[pIdx] = c;
         total += c;
@@ -200,9 +231,7 @@ class ChapterCommentStats {
     return ChapterCommentStats(
       chapterId: json['chapterId']?.toString() ?? '',
       counts: counts,
-      totalCount: json['totalCount'] is int
-          ? json['totalCount'] as int
-          : total,
+      totalCount: json['totalCount'] is int ? json['totalCount'] as int : total,
     );
   }
 }
@@ -213,12 +242,16 @@ class CommentPageData {
   final String cursor;
   final bool hasMore;
   final int total;
+  final String? warning;
+  final bool isLegacySource;
 
   const CommentPageData({
     this.comments = const [],
     this.cursor = '',
     this.hasMore = false,
     this.total = 0,
+    this.warning,
+    this.isLegacySource = false,
   });
 
   Map<String, dynamic> toJson() {
@@ -227,11 +260,14 @@ class CommentPageData {
       'cursor': cursor,
       'hasMore': hasMore,
       'total': total,
+      if (warning != null) 'warning': warning,
+      if (isLegacySource) 'isLegacySource': true,
     };
   }
 
   factory CommentPageData.fromJson(Map<String, dynamic> json) {
-    final list = (json['comments'] as List<dynamic>?)
+    final list =
+        (json['comments'] as List<dynamic>?)
             ?.map((e) => CommentItem.fromJson(e as Map<String, dynamic>))
             .toList() ??
         const [];
@@ -242,6 +278,8 @@ class CommentPageData {
       total: json['total'] is int
           ? json['total'] as int
           : int.tryParse(json['total']?.toString() ?? '0') ?? 0,
+      warning: json['warning']?.toString(),
+      isLegacySource: json['isLegacySource'] == true,
     );
   }
 }
@@ -270,7 +308,8 @@ class CommentReplyPageData {
   }
 
   factory CommentReplyPageData.fromJson(Map<String, dynamic> json) {
-    final list = (json['replies'] as List<dynamic>?)
+    final list =
+        (json['replies'] as List<dynamic>?)
             ?.map((e) => CommentReplyItem.fromJson(e as Map<String, dynamic>))
             .toList() ??
         const [];

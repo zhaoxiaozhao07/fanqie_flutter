@@ -46,6 +46,93 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets(
+    'mixed chapter feed paginates opaque cursors and retains all six',
+    (tester) async {
+      const cursor = '{"post_next_offset":200,"comment_next_offset":1}';
+      final api = ChapterCommentApi((r) async {
+        if (r.cursor.isEmpty) {
+          return chapterCommentPage(
+            ['0'],
+            total: 6,
+            cursor: cursor,
+            hasMore: true,
+          );
+        }
+        expect(r.cursor, cursor);
+        return CommentPageData(
+          total: 6,
+          cursor: '{"post_next_offset":400}',
+          comments: List.generate(
+            5,
+            (i) => CommentItem(
+              id: '${i + 1}',
+              discussionPostId: '${i + 1}',
+              bookId: 'book',
+              chapterId: 'chapter',
+              userName: '书友',
+              text: '帖子-${i + 1}',
+            ),
+          ),
+        );
+      });
+      await openChapterComments(tester, api);
+      expect(api.requests.map((r) => r.cursor), ['', cursor]);
+      expect(visibleListCount(tester), 6);
+      expect(find.text('已加载 6 / 6 条'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('stalled opaque cursor retains data and offers retry', (
+    tester,
+  ) async {
+    const cursor = '{"post_next_offset":200}';
+    final api = ChapterCommentApi(
+      (_) async => chapterCommentPage(['0'], cursor: cursor, hasMore: true),
+    );
+    await openChapterComments(tester, api);
+    await pumpComments(tester, frames: 20);
+    expect(api.requests, hasLength(2));
+    expect(find.text('后续评论分页未推进，请重试'), findsOneWidget);
+    expect(find.text('评论-0'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
+    'posts keep distinct identity and do not use chapter reply endpoint',
+    (tester) async {
+      final api = ChapterCommentApi(
+        (_) async => CommentPageData(
+          total: 2,
+          warning: '完整章节讨论暂不可用，当前显示离线缓存',
+          comments: [
+            chapterComment('same'),
+            const CommentItem(
+              id: 'same',
+              discussionPostId: 'same',
+              bookId: 'book',
+              chapterId: 'chapter',
+              userName: '书友',
+              text: '书圈正文',
+              replyCount: 2,
+            ),
+          ],
+        ),
+      );
+      await openChapterComments(tester, api);
+      expect(visibleListCount(tester), 2);
+      expect(find.text('书圈正文'), findsOneWidget);
+      expect(find.text('帖子含 2 条回复（暂不支持展开）'), findsOneWidget);
+      expect(find.text('查看 2 条回复'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('chapter-discussion-warning')),
+        findsOneWidget,
+      );
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets(
     'chapter list requests a fresh full page, not the count preview',
     (tester) async {
       final api = ChapterCommentApi(

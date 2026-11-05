@@ -38,6 +38,7 @@ class _CommentApi extends ApiService {
     String itemId, {
     int offset = 0,
     int count = 20,
+    String cursor = '',
     bool preferCache = true,
   }) {
     requests.add(itemId);

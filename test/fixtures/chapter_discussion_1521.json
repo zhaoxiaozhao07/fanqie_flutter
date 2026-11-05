@@ -1,0 +1,257 @@
+{
+  "_fixture_note": "2026-11-05: official discussion-feed shape for book 7322304923511557182, item 7561721731426026009; identities and user content anonymized. One chapter comment and five forum posts.",
+  "code": 0,
+  "data": {
+    "common_list_info": {
+      "cursor": "{\"post_next_offset\":400,\"topic_next_offset\":0,\"comment_next_offset\":0,\"self_offset\":0,\"book_next_offset\":0}",
+      "has_more": false,
+      "total": 6
+    },
+    "data_list": [
+      {
+        "data_type": 4,
+        "comment": {
+          "comment_id": "7561684599238148888",
+          "common": {
+            "service_id": 4,
+            "group_id": "7561721731426026009",
+            "create_timestamp": 1760638432,
+            "content": {
+              "text": "第1521章测试章评",
+              "image_data_list": []
+            },
+            "user_info": {
+              "base_info": {
+                "user_id": "fixture-user-0",
+                "user_name": "测试书友0",
+                "user_avatar": ""
+              },
+              "user_tag": {
+                "is_author": false
+              },
+              "user_id": "fixture-user-0"
+            }
+          },
+          "expand": {
+            "book_id": "7322304923511557182",
+            "item_info": {
+              "item_id": "7561721731426026009"
+            }
+          },
+          "stat": {
+            "digg_count": 0,
+            "reply_count": 0
+          }
+        }
+      },
+      {
+        "data_type": 3,
+        "post": {
+          "post_id": "7561614993045832254",
+          "common": {
+            "content": {
+              "pure_text": "",
+              "text": "{\"materials\": [], \"skeleton\": {\"type\": \"html\", \"data\": \"<p>第1521章讨论页的书圈帖子1</p>\"}}",
+              "text_exts": []
+            },
+            "create_timestamp": 1760617777,
+            "parent_id": "7322385134131368766",
+            "parent_type": 5,
+            "post_type": 1,
+            "title": "",
+            "user_info": {
+              "base_info": {
+                "user_id": "fixture-user-1",
+                "user_name": "测试书友1",
+                "user_avatar": ""
+              },
+              "user_tag": {
+                "is_author": false
+              },
+              "user_id": "fixture-user-1"
+            }
+          },
+          "expand": {
+            "book_id": "7322304923511557182",
+            "book_quote": "",
+            "schema": ""
+          },
+          "stat": {
+            "digg_count": 1,
+            "reply_count": 0
+          }
+        },
+        "parent": {
+          "data_type": 5
+        }
+      },
+      {
+        "data_type": 3,
+        "post": {
+          "post_id": "7561640971163746878",
+          "common": {
+            "content": {
+              "pure_text": "",
+              "text": "{\"materials\": [], \"skeleton\": {\"type\": \"html\", \"data\": \"<p>第1521章讨论页的书圈帖子2</p>\"}}",
+              "text_exts": []
+            },
+            "create_timestamp": 1760621915,
+            "parent_id": "7322385134131368766",
+            "parent_type": 5,
+            "post_type": 1,
+            "title": "",
+            "user_info": {
+              "base_info": {
+                "user_id": "fixture-user-2",
+                "user_name": "测试书友2",
+                "user_avatar": ""
+              },
+              "user_tag": {
+                "is_author": false
+              },
+              "user_id": "fixture-user-2"
+            }
+          },
+          "expand": {
+            "book_id": "7322304923511557182",
+            "book_quote": "",
+            "schema": ""
+          },
+          "stat": {
+            "digg_count": 0,
+            "reply_count": 0
+          }
+        },
+        "parent": {
+          "data_type": 5
+        }
+      },
+      {
+        "data_type": 3,
+        "post": {
+          "post_id": "7561815023622832702",
+          "common": {
+            "content": {
+              "pure_text": "",
+              "text": "{\"materials\": [], \"skeleton\": {\"type\": \"html\", \"data\": \"<p>第1521章讨论页的书圈帖子3</p>\"}}",
+              "text_exts": []
+            },
+            "create_timestamp": 1760654065,
+            "parent_id": "7322385134131368766",
+            "parent_type": 5,
+            "post_type": 1,
+            "title": "",
+            "user_info": {
+              "base_info": {
+                "user_id": "fixture-user-3",
+                "user_name": "测试书友3",
+                "user_avatar": ""
+              },
+              "user_tag": {
+                "is_author": false
+              },
+              "user_id": "fixture-user-3"
+            }
+          },
+          "expand": {
+            "book_id": "7322304923511557182",
+            "book_quote": "",
+            "schema": ""
+          },
+          "stat": {
+            "digg_count": 0,
+            "reply_count": 0
+          }
+        },
+        "parent": {
+          "data_type": 5
+        }
+      },
+      {
+        "data_type": 3,
+        "post": {
+          "post_id": "7561670042644005401",
+          "common": {
+            "content": {
+              "pure_text": "",
+              "text": "{\"materials\": [], \"skeleton\": {\"type\": \"html\", \"data\": \"<p>第1521章讨论页的书圈帖子4</p>\"}}",
+              "text_exts": []
+            },
+            "create_timestamp": 1760616171,
+            "parent_id": "7322385134131368766",
+            "parent_type": 5,
+            "post_type": 1,
+            "title": "",
+            "user_info": {
+              "base_info": {
+                "user_id": "fixture-user-4",
+                "user_name": "测试书友4",
+                "user_avatar": ""
+              },
+              "user_tag": {
+                "is_author": false
+              },
+              "user_id": "fixture-user-4"
+            }
+          },
+          "expand": {
+            "book_id": "7322304923511557182",
+            "book_quote": "",
+            "schema": ""
+          },
+          "stat": {
+            "digg_count": 0,
+            "reply_count": 0
+          }
+        },
+        "parent": {
+          "data_type": 5
+        }
+      },
+      {
+        "data_type": 3,
+        "post": {
+          "post_id": "7561736350337286681",
+          "common": {
+            "content": {
+              "pure_text": "",
+              "text": "{\"materials\": [{\"type\": \"mention_user\", \"data\": {\"user_name\": \"测试作者\", \"text\": \"@测试作者\"}}], \"skeleton\": {\"type\": \"html\", \"data\": \"<p>书圈帖子5：<cc_material_0></cc_material_0>，等待更新。</p>\"}}",
+              "text_exts": []
+            },
+            "create_timestamp": 1760625525,
+            "parent_id": "7322385134131368766",
+            "parent_type": 5,
+            "post_type": 1,
+            "title": "",
+            "user_info": {
+              "base_info": {
+                "user_id": "fixture-user-5",
+                "user_name": "测试书友5",
+                "user_avatar": ""
+              },
+              "user_tag": {
+                "is_author": false
+              },
+              "user_id": "fixture-user-5"
+            }
+          },
+          "expand": {
+            "book_id": "7322304923511557182",
+            "book_quote": "",
+            "schema": ""
+          },
+          "stat": {
+            "digg_count": 0,
+            "reply_count": 0
+          }
+        },
+        "parent": {
+          "data_type": 5
+        }
+      }
+    ],
+    "extra": {
+      "fold_type": 1
+    }
+  }
+}
