@@ -1,4 +1,4 @@
-# FanqieReader Windows release packaging.
+﻿# FanqieReader Windows release packaging.
 #
 # Builds the release binary, stages a portable directory (exe + DLLs + data +
 # app-local VC runtime), compresses it into a ZIP and emits a SHA-256 file.
@@ -79,6 +79,10 @@ if ($crt) {
 系统要求
 Windows 10 1809 及以上 64 位系统。若提示缺少 VCRUNTIME140.dll，
 安装 Microsoft Visual C++ 2015-2022 运行库（x64）后重试。
+
+首次运行提示
+本包未做代码签名，首次运行可能触发 Windows SmartScreen 提示；
+选择“更多信息 → 仍要运行”即可，无需关闭系统防护。
 
 包校验
 同目录 .sha256 文件是 ZIP 的 SHA-256 校验值：

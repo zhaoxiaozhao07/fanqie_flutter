@@ -68,8 +68,9 @@
 ### W6 Release 打包
 
 - `scripts/package_windows.ps1`：Release 构建 → 便携目录（FanqieReader.exe + flutter_windows.dll + 插件 DLL + data/ + **x64 VC 运行库 app-local** + 安装说明）→ ZIP + SHA-256。
-- 本轮产物：`dist/FanqieReader-3.3.4-340-windows-x64.zip`，26.2MB，SHA-256 `ED4A4CEE0D30FB900A43F58F64FCE2431DC4A2114C8DD21D592059D31FEAD40B`。
+- 本轮产物：`dist/FanqieReader-3.3.4-340-windows-x64.zip`，26.2MB，SHA-256 `6C051F866AF37A89EBAB56A57CF56964894C5F71F1E973FF304EBB7C183D18C6`。
 - 打包产物从 dist 独立启动/退出验证通过（验证 DLL 自包含性）。
+- 安装说明含 SmartScreen 提示说明（计划 5.3：不签名可以，但必须说明且不要求关闭防护）；脚本以 UTF-8 BOM 保存，PowerShell 5.1 中文文件名/内容不再乱码。
 
 ### 对照计划审计补强（第二轮）
 
