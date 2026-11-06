@@ -96,3 +96,6 @@ fanqie-backend/
 *.p12
 *.pfx
 *.mobileprovision
+
+# Windows release packages
+/dist/

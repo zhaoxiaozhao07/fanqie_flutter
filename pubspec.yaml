@@ -135,6 +135,9 @@ flutter:
 flutter_launcher_icons:
   android: true
   ios: false
+  windows:
+    generate: true
+    image_path: "assets/icons/fanqie.png"
   image_path: "assets/icons/fanqie.png"
   # Android 自适应图标
   adaptive_icon_background: "#FF6B6B"
