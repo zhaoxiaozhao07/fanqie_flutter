@@ -29,9 +29,6 @@ class ReaderPlatformBridge {
   // Returns true when the message is fully consumed.
   bool HandleMessage(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam);
 
-  // Marshals a callable onto the platform thread's message loop.
-  void PostToMainThread(std::function<void()> task);
-
  private:
   void HandleMethodCall(
       const flutter::MethodCall<flutter::EncodableValue>& call,
@@ -53,8 +50,10 @@ class ReaderPlatformBridge {
 
   std::unique_ptr<flutter::MethodChannel<flutter::EncodableValue>> channel_;
   std::function<Win32Window*()> window_;
-  std::unique_ptr<ReaderTextDecoder> decoder_;
-  std::unique_ptr<ReaderFileExporter> exporter_;
+  // Shared ownership: detached worker threads outlive the window during
+  // shutdown without touching freed state.
+  std::shared_ptr<ReaderTextDecoder> decoder_;
+  std::shared_ptr<ReaderFileExporter> exporter_;
 
   bool quit_pending_ = false;
   bool reader_commands_enabled_ = false;

@@ -130,10 +130,21 @@ std::string StringArg(const flutter::EncodableMap& args, const char* key,
 ReaderPlatformBridge::ReaderPlatformBridge(
     flutter::BinaryMessenger* messenger, std::function<Win32Window*()> window)
     : window_(std::move(window)) {
-  decoder_ = std::make_unique<ReaderTextDecoder>(
-      [this](std::function<void()> task) { PostToMainThread(std::move(task)); });
-  exporter_ = std::make_unique<ReaderFileExporter>(
-      [this](std::function<void()> task) { PostToMainThread(std::move(task)); },
+  // The poster captures only the HWND: posting after destruction checks a
+  // raw window handle instead of member state, and destroyed-window posts
+  // are dropped by the message loop itself.
+  const HWND task_hwnd = window_() ? window_()->GetHandle() : nullptr;
+  const auto post_main = [task_hwnd](std::function<void()> task) {
+    if (task_hwnd == nullptr || !IsWindow(task_hwnd)) return;
+    auto* boxed = new std::function<void()>(std::move(task));
+    if (PostMessageW(task_hwnd, kPostTaskMessage, 0,
+                     reinterpret_cast<LPARAM>(boxed)) == 0) {
+      delete boxed;
+    }
+  };
+  decoder_ = std::make_shared<ReaderTextDecoder>(post_main);
+  exporter_ = std::make_shared<ReaderFileExporter>(
+      post_main,
       [this] {
         Win32Window* window = window_();
         return window != nullptr && window->GetHandle() != nullptr &&
@@ -146,16 +157,6 @@ ReaderPlatformBridge::ReaderPlatformBridge(
   channel_->SetMethodCallHandler([this](const auto& call, auto result) {
     HandleMethodCall(call, std::move(result));
   });
-}
-
-void ReaderPlatformBridge::PostToMainThread(std::function<void()> task) {
-  const HWND hwnd = window_() ? window_()->GetHandle() : nullptr;
-  if (hwnd == nullptr) return;  // Window gone: late results are dropped.
-  auto* boxed = new std::function<void()>(std::move(task));
-  if (PostMessageW(hwnd, kPostTaskMessage, 0,
-                   reinterpret_cast<LPARAM>(boxed)) == 0) {
-    delete boxed;
-  }
 }
 
 bool ReaderPlatformBridge::HandleMessage(HWND hwnd, UINT message,

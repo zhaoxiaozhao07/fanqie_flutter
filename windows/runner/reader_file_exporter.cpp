@@ -189,7 +189,43 @@ std::string StringArg(const flutter::EncodableMap& args, const char* key,
   }
   return fallback;
 }
+bool IsReservedDeviceName(const std::wstring& stem) {
+  static const wchar_t* kDevices[] = {
+      L"CON",  L"PRN",  L"AUX",  L"NUL",  L"COM1", L"COM2", L"COM3",
+      L"COM4", L"COM5", L"COM6", L"COM7", L"COM8", L"COM9", L"LPT1",
+      L"LPT2", L"LPT3", L"LPT4", L"LPT5", L"LPT6", L"LPT7", L"LPT8",
+      L"LPT9"};
+  for (const wchar_t* device : kDevices) {
+    if (_wcsicmp(stem.c_str(), device) == 0) return true;
+  }
+  return false;
+}
 }  // namespace
+
+std::wstring ReaderFileExporter::SanitizeFileName(const std::wstring& name) {
+  std::wstring cleaned;
+  cleaned.reserve(name.size());
+  for (const wchar_t c : name) {
+    const bool forbidden = c < 0x20 || c == L'<' || c == L'>' || c == L':' ||
+                           c == L'"' || c == L'/' || c == L'\\' ||
+                           c == L'|' || c == L'?' || c == L'*';
+    // Colons would create NTFS alternate data streams; keep one readable
+    // replacement instead of silently dropping characters.
+    cleaned.push_back(forbidden ? L'_' : c);
+  }
+  while (!cleaned.empty() &&
+         (cleaned.back() == L'.' || cleaned.back() == L' ')) {
+    cleaned.pop_back();
+  }
+  const size_t dot = cleaned.find_first_of(L'.');
+  const std::wstring stem =
+      cleaned.substr(0, dot == std::wstring::npos ? cleaned.size() : dot);
+  if (stem.empty() || IsReservedDeviceName(stem)) {
+    cleaned.insert(cleaned.begin(), L'_');
+  }
+  if (cleaned.empty()) cleaned = L"export.txt";
+  return cleaned;
+}
 bool ReaderFileExporter::IsCancelled(const std::string& id) {
   std::scoped_lock guard(lock_);
   return cancelled_.count(id) > 0;
@@ -219,7 +255,8 @@ void ReaderFileExporter::SaveAs(const flutter::EncodableMap& args,
     return;
   }
   request.source = Utf8ToWide(StringArg(args, "filePath"));
-  request.name = Utf8ToWide(StringArg(args, "fileName", "export.txt"));
+  request.name = SanitizeFileName(
+      Utf8ToWide(StringArg(args, "fileName", "export.txt")));
   request.mime = StringArg(args, "mimeType", "text/plain");
   request.result = std::move(result);
   {
@@ -324,9 +361,10 @@ void ReaderFileExporter::RunCopy(const std::string& id,
                                  const std::wstring& source,
                                  const std::wstring& destination,
                                  bool allow_overwrite, Finish result) {
-  std::thread([this, id, source, destination, allow_overwrite,
+  auto self = shared_from_this();
+  std::thread([self, id, source, destination, allow_overwrite,
                result = std::move(result)]() mutable {
-    const auto cancelled = [this, &id] { return IsCancelled(id); };
+    const auto cancelled = [&self, &id] { return self->IsCancelled(id); };
     Outcome outcome;
     try {
       CopyAndCommit(source, destination, allow_overwrite, cancelled);
@@ -343,16 +381,16 @@ void ReaderFileExporter::RunCopy(const std::string& id,
     } catch (...) {
       outcome.error = "文件保存失败，请检查权限与存储空间";
     }
-    post_main_([this, id, outcome = std::move(outcome),
-                result = std::move(result)]() mutable {
+    self->post_main_([self, id, outcome = std::move(outcome),
+                      result = std::move(result)]() mutable {
       {
-        std::scoped_lock guard(lock_);
-        cancelled_.erase(id);
+        std::scoped_lock guard(self->lock_);
+        self->cancelled_.erase(id);
       }
       result(outcome);
-      if (active_id_ == id) {
-        active_id_.clear();
-        PresentNext();
+      if (self->active_id_ == id) {
+        self->active_id_.clear();
+        self->PresentNext();
       }
     });
   }).detach();
@@ -362,11 +400,13 @@ void ReaderFileExporter::CommitDownload(const flutter::EncodableMap& args,
   const std::string id = StringArg(args, "id");
   std::wstring source = Utf8ToWide(StringArg(args, "sourcePath"));
   std::wstring directory = Utf8ToWide(StringArg(args, "directory"));
-  std::wstring name = Utf8ToWide(StringArg(args, "fileName"));
-  std::thread([this, id, source = std::move(source),
+  std::wstring name =
+      SanitizeFileName(Utf8ToWide(StringArg(args, "fileName")));
+  auto self = shared_from_this();
+  std::thread([self, id, source = std::move(source),
                directory = std::move(directory), name = std::move(name),
                result = std::move(result)]() mutable {
-    const auto cancelled = [this, &id] { return IsCancelled(id); };
+    const auto cancelled = [&self, &id] { return self->IsCancelled(id); };
     Outcome outcome;
     try {
       if (cancelled()) throw CopyError(CopyError::Kind::cancelled);
@@ -391,11 +431,11 @@ void ReaderFileExporter::CommitDownload(const flutter::EncodableMap& args,
     } catch (...) {
       outcome.error = "文件保存失败，请检查权限与存储空间";
     }
-    post_main_([this, id, outcome = std::move(outcome),
-                result = std::move(result)]() mutable {
+    self->post_main_([self, id, outcome = std::move(outcome),
+                      result = std::move(result)]() mutable {
       {
-        std::scoped_lock guard(lock_);
-        cancelled_.erase(id);
+        std::scoped_lock guard(self->lock_);
+        self->cancelled_.erase(id);
       }
       result(outcome);
     });

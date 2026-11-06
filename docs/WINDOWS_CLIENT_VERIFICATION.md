@@ -68,8 +68,20 @@
 ### W6 Release 打包
 
 - `scripts/package_windows.ps1`：Release 构建 → 便携目录（FanqieReader.exe + flutter_windows.dll + 插件 DLL + data/ + **x64 VC 运行库 app-local** + 安装说明）→ ZIP + SHA-256。
-- 本轮产物：`dist/FanqieReader-3.3.4-340-windows-x64.zip`，26.2MB，SHA-256 `51579A0E4A92CBF9DD77E5C3A0C91E778829030079C138DCFA07010CEE1158A0`。
+- 本轮产物：`dist/FanqieReader-3.3.4-340-windows-x64.zip`，26.2MB，SHA-256 `ED4A4CEE0D30FB900A43F58F64FCE2431DC4A2114C8DD21D592059D31FEAD40B`。
 - 打包产物从 dist 独立启动/退出验证通过（验证 DLL 自包含性）。
+
+### 对照计划审计补强（第二轮）
+
+- **文件名净化（计划 3.3）**：原生 `SanitizeFileName` 拒绝 ADS 冒号、设备保留名（CON/NUL/COM1-9/LPT1-9）、非法字符与尾点/尾空格，另存为对话框默认名与下载提交名统一过毒；集成测试用真实文件验证（`书名:流.txt`→`书名_流.txt`、`CON`→`_CON`、`书名...`去尾点）。
+- **关闭竞态加固**：decoder/exporter 改为 `shared_ptr` + `enable_shared_from_this`，工作线程持有自引用；平台线程投递只捕获 HWND（窗口销毁后投递被丢弃），窗口中途销毁不再触碰已释放状态。
+- **目录穿越**：下载/导出文件名在 Dart 与原生两侧均不可携带 `/`、`\\`（原生净化替换），目录参数仅来自应用自身偏好或原生对话框，不接受任意外部字符串。
+
+## 与计划条目的有意偏差
+
+1. **不新增 `window_manager`/`file_selector` 插件**：跟随 macOS 检查点（`4c3ea14`）的原生桥接模式，用 runner 内纯 C++ 实现同一通道，保持三端 wire contract 一致（见开头架构决定）。
+2. **侧导航断点**：计划 3.4 写“主界面宽 900 用侧导航”，共享代码（macOS 检查点已定型）在任意桌面宽度始终用 NavigationRail，≥1000 展开标签；断点切换不重建页面状态已验证。为保持与 macOS 一致未改断点值。
+3. **能力入口**：计划建议“可注入的 ReaderPlatformCapabilities”，实际采用与 Android/macOS 同源的能力协商（通道返回 + `resetForTesting`），未另建注入层。
 
 ## 未验证与已知限制
 

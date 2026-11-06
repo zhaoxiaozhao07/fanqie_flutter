@@ -184,6 +184,21 @@ void main() {
       expect(third!['status'], 'saved');
       expect(third['path'], isNot('$target\\guard.txt'));
       expect(await guard.readAsString(), '已有文件');
+      // Hostile names never create ADS, device files or trailing-dot paths.
+      String fileNameOf(Map<dynamic, dynamic> r) =>
+          (r['path'] as String).split('\\').last;
+      final ads = await commit('书名:流.txt', 'dl-4');
+      expect(ads!['status'], 'saved');
+      expect(fileNameOf(ads), isNot(contains(':')));
+      expect(await File(ads['path'] as String).exists(), true);
+      final device = await commit('CON', 'dl-5');
+      expect(device!['status'], 'saved');
+      expect(fileNameOf(device), isNot(equals('CON')));
+      expect(await File(device['path'] as String).exists(), true);
+      final dotted = await commit('书名...', 'dl-6');
+      expect(dotted!['status'], 'saved');
+      expect(fileNameOf(dotted), isNot(endsWith('.')));
+      expect(await File(dotted['path'] as String).exists(), true);
     },
   );
 

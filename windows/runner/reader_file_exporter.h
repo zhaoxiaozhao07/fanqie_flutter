@@ -9,6 +9,7 @@
 #include <wrl/client.h>
 
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -19,7 +20,10 @@
 // MoveFileExW (new file); cancellation never truncates an existing file.
 // Direct download commits pick a unique numbered name in the configured
 // output directory instead of popping a dialog at the end of a task.
-class ReaderFileExporter {
+//
+// Worker threads keep the exporter alive through shared_ptr, so a window
+// destroyed mid-copy never touches freed state.
+class ReaderFileExporter : public std::enable_shared_from_this<ReaderFileExporter> {
  public:
   struct Outcome {
     bool saved = false;
@@ -49,6 +53,11 @@ class ReaderFileExporter {
   // Native folder picker for the download output directory; cancelled when
   // the user closes the dialog.
   void PickDirectory(Finish result);
+
+  // Rejects NTFS ADS ("name:stream"), reserved device names (CON, NUL,
+  // COM1...), forbidden characters and trailing dots/spaces before any path
+  // is built from untrusted book titles.
+  static std::wstring SanitizeFileName(const std::wstring& name);
 
  private:
   struct Request {

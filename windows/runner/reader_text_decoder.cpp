@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <memory>
 #include <thread>
 #include <vector>
 
@@ -381,15 +382,16 @@ void ReaderTextDecoder::Normalize(const flutter::EncodableMap& args,
   }
 
   RememberPending(id);
-  std::thread([this, id = std::move(id), path = std::move(path),
+  auto self = shared_from_this();
+  std::thread([self, id = std::move(id), path = std::move(path),
                requested = std::move(requested),
                result = std::move(result)]() mutable {
     const std::string request_id = id;
     Outcome outcome;
     std::wstring target;
     try {
-      const auto check = [this, &request_id] {
-        if (IsCancelled(request_id)) {
+      const auto check = [&self, &request_id] {
+        if (self->IsCancelled(request_id)) {
           throw DecodeError(DecodeError::Kind::cancelled);
         }
       };
@@ -460,9 +462,9 @@ void ReaderTextDecoder::Normalize(const flutter::EncodableMap& args,
       outcome.error_code = "TEXT_DECODE";
       outcome.error_message = "文本解码失败，请检查文件或手动选择编码";
     }
-    post_main_([this, request_id, result = std::move(result),
-                outcome = std::move(outcome)]() mutable {
-      Forget(request_id);
+    self->post_main_([self, request_id, result = std::move(result),
+                      outcome = std::move(outcome)]() mutable {
+      self->Forget(request_id);
       result(outcome);
     });
   }).detach();

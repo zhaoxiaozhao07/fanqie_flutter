@@ -5,6 +5,7 @@
 #include <flutter/method_channel.h>
 
 #include <functional>
+#include <memory>
 #include <mutex>
 #include <set>
 #include <string>
@@ -14,7 +15,11 @@
 // GB18030 (GBK-compatible) and finally Big5 in automatic mode; cross-chunk
 // multibyte sequences are retained between bounded reads; cancellation never
 // publishes a partial file. All results are delivered on the platform thread.
-class ReaderTextDecoder {
+//
+// Worker threads keep the decoder alive through shared_ptr, so a window
+// destroyed mid-import never touches freed state; late replies are dropped
+// by the HWND-guarded main-thread poster.
+class ReaderTextDecoder : public std::enable_shared_from_this<ReaderTextDecoder> {
  public:
   struct Outcome {
     bool ok = false;
@@ -25,7 +30,8 @@ class ReaderTextDecoder {
   };
   using Finish = std::function<void(const Outcome&)>;
 
-  // |post_main| marshals a callable onto the platform (STA) thread.
+  // |post_main| marshals a callable onto the platform (STA) thread; it must
+  // stay callable even after this object is destroyed.
   explicit ReaderTextDecoder(
       std::function<void(std::function<void()>)> post_main)
       : post_main_(std::move(post_main)) {}
