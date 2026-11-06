@@ -6,6 +6,8 @@
 
 macOS 核心阅读客户端已完成主要适配代码与本地自动化验证，当前仅提供 Apple Silicon 内部测试构建，部分手工验收仍待完成。正式签名、公证与 GitHub Actions 构建按当前决定延期。见 [开发计划](docs/MACOS_CLIENT_DEVELOPMENT_PLAN.md) 与 [实施和验证记录](docs/MACOS_CLIENT_VERIFICATION.md)。
 
+Windows 桌面客户端（v3.3.4 构建 340）已完成原生模块、共享代码桌面化与本地自动化验证，提供 x64 免安装 ZIP 包（含 SHA-256）。实现细节见 [开发计划](docs/WINDOWS_CLIENT_DEVELOPMENT_PLAN.md)，验证结论见 [验证记录](docs/WINDOWS_CLIENT_VERIFICATION.md)。
+
 ## v3.3.4 帖子回复展开（覆盖更新，构建 340）
 
 - 已接入帖子回复和楼中楼的独立读取接口，支持展开/收起、游标分页、配图和回复对象显示；失败保留内容并支持重试，刷新或收起后不再附加迟到的旧回复。
@@ -193,6 +195,24 @@ flutter test integration_test/macos_reader_soak_test.dart -d macos \
 macOS 阅读文件、缓存和恢复日志使用 Application Support；导出通过系统“另存为”流式保存，取消不写入下载成功记录、不删除已下载正文。平台测试使用隔离目录/偏好设置，不用于日常阅读数据。
 
 当前不配置或运行 macOS GitHub Actions，先在本机测试；正式签名、公证及公开分发后续再做。现有 Android 工作流保持不变，本次检查点提交通过 `[skip ci]` 避免触发云端构建。阶段状态和后续配置见 [macOS 验证记录](docs/MACOS_CLIENT_VERIFICATION.md)。
+
+### Windows 内部构建与验证
+
+Windows 10 1809+ 64 位，工具链 **Flutter 3.47.9 / Dart 3.13.7 / Visual Studio 2022（C++ 桌面开发）**。首版范围：阅读、本地导入（五种编码转码）、TXT/EPUB 下载（固定输出目录，重名自动编号）、备份恢复、章评、阅读体验与桌面快捷键；听书（TTS）入口隐藏，与 macOS 同步延后。
+
+```powershell
+flutter pub get
+flutter run -d windows
+flutter test integration_test/windows_reader_platform_test.dart -d windows  # 真实原生通道验证
+scripts/package_windows.ps1   # Release ZIP（exe + DLL + data + VC 运行库）+ SHA-256
+
+# 可选手工门（真实保存面板 / 原生全屏）：
+flutter test integration_test/windows_reader_platform_test.dart -d windows `
+  --dart-define=WINDOWS_SAVE_PANEL_TEST=true `
+  --dart-define=WINDOWS_NATIVE_FULLSCREEN_TEST=true
+```
+
+Windows 阅读数据保存在 `%APPDATA%\com.fanqie\FanqieReader`，与安装位置无关；笔记/备份通过系统“另存为”保存，下载直接提交到所选目录（默认“下载/fanqie”，重名自动编号不覆盖）。关闭窗口前会完成阅读位置落盘握手；第二实例启动时唤起已有窗口。退出前请先停止使用中的导入/恢复。
 
 ## 发布
 
