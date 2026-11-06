@@ -571,6 +571,21 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                                 _change(_settings.copyWith(pageMode: value)),
                           ),
                         ),
+                        // 宽屏桌面双栏排版；窄屏自动回退单栏。
+                        if (ReaderPlatform.isDesktop)
+                          _section(
+                            '双栏阅读',
+                            _choices(
+                              {false: '关闭', true: '开启'},
+                              _settings.dualColumn,
+                              (value) => _change(
+                                _settings.copyWith(
+                                  dualColumn: value,
+                                  pageMode: true,
+                                ),
+                              ),
+                            ),
+                          ),
                         _section(
                           '翻页动画',
                           _choices(

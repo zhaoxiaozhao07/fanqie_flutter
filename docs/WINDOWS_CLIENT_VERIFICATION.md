@@ -91,3 +91,19 @@
 3. **听书（TTS）、音量键、亮度调节、触感**：按计划与 macOS 同步延后（能力位为 false，入口隐藏）。
 4. **正式分发**：未做代码签名（无证书）、SmartScreen 信誉、GitHub Actions Windows 构建——与 macOS 内部构建策略一致，后续再议。
 5. **多显示器/DPI 动态切换**：单实例、工作区钳制、每显示器 DPI 已实现并有单元级钩子，但未做多显示器手动矩阵验收。
+
+## 第二轮：实测反馈修复（阅读交互五项）
+
+真机使用反馈的问题与修复（分支同 `feat/windows-client`，本轮提交）：
+
+| # | 反馈 | 根因 | 修复与验证 |
+| --- | --- | --- | --- |
+| 1 | 需要双栏阅读 | 分页器仅单栏 | `ReaderLayout.columns/columnGap` + 分页按"栏"装配（`columnSpans`）；渲染端 Row 双栏、窄屏(<672px)自动回退单栏；设置面板新增"双栏阅读"（桌面显示）。分页单元测试（两栏占满、片断连续、锚点定位）+ 组件测试（1400×900 双栏、缩至 560 回退单栏且锚点保持） |
+| 2 | 翻页模式无法点击翻页，只能滚轮 | 桌面段落是 SelectableText，赢下手势竞技场，页面级热区 onTapUp 收不到 | 段落 onTap 在桌面转发 `_handleDesktopTextTap`：用 Scaffold 级 Listener 记录的鼠标位置重放热区判定（左/右翻页、中部菜单）；仿真翻页同样暴露 `handleExternalTap`。鼠标手势测试：点段落右侧→下页、左侧→上页 |
+| 3 | 字体有些粗有些细 | 桌面默认 `Roboto` 不存在，未指定字体族按字形回退：中文与拉丁/数字取自不同系统字体，视觉粗细混杂 | 正文/章节标题/分页度量统一回退到打包的 `ReaderKaiTi`（全字符覆盖），非阻塞预载 + 载入后一次重排（fake-async 测试中 await 会悬挂，改为 then+setState） |
+| 4 | 点击无法展开上下栏 | 同 #2（中部热区被 SelectableText 吞掉） | 同 #2；滚动模式点击段落中部=切换控制栏（测试验证返回按钮出现） |
+| 5 | 阅读无法返回主页 | 控制栏根本无法展开（#4），返回按钮在其中 | 修复后中部点击展开上下栏→左上角"返回"可用；widget 测试从 pushed route 点返回按钮确认退出阅读 |
+
+Android 回归：按用户提供的代理（127.0.0.1:7890，`JAVA_TOOL_OPTIONS` 注入 JVM 代理参数）完成 `flutter build apk --debug`（此前网络阻断项补齐），输出 `build/app/outputs/flutter-apk/app-debug.apk`。
+
+本轮回归：`flutter analyze` 0 issues；`flutter test` 451 通过（+4：点击翻页×1、滚动点击×1、双栏组件×1、双栏分页×1）；Windows 集成 6 通过 + 2 手工门。重新打包 `dist/FanqieReader-3.3.4-340-windows-x64.zip`（SHA-256 `926CDDE64BF0CC4D12F1DB818B6B04D840419684F6CB64E9B2F0F8CEE7481753`），打包产物独立启动/退出冒烟通过。

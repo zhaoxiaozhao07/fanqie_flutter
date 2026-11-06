@@ -18,6 +18,11 @@ class ReaderLayout {
   final bool showPageNumber;
   final double chapterEndHeight;
 
+  /// Text columns per page (1 or 2). Dual-column is a layout preference;
+  /// the caller only enables it on wide desktop pages in page mode.
+  final int columns;
+  final double columnGap;
+
   const ReaderLayout({
     required this.size,
     required this.bodyStyle,
@@ -28,6 +33,8 @@ class ReaderLayout {
     this.inlineCommentSize = Size.zero,
     this.showPageNumber = true,
     this.chapterEndHeight = 0,
+    this.columns = 1,
+    this.columnGap = 32,
   });
 
   Object get key => (
@@ -40,6 +47,8 @@ class ReaderLayout {
     inlineCommentSize,
     showPageNumber,
     chapterEndHeight,
+    columns,
+    columnGap,
   );
 
   // Paint-only changes (night theme, highlights) must reuse measured pages.
@@ -81,6 +90,10 @@ class ReaderPageFragment {
 
 class ReaderPage {
   final List<ReaderPageFragment> fragments;
+
+  /// Fragments per text column, in reading order; length matches the page's
+  /// column count (a trailing column may be empty at a chapter's end).
+  final List<int> columnSpans;
   final double availableHeight;
   final bool oversized;
   final double titleHeight;
@@ -88,6 +101,7 @@ class ReaderPage {
 
   const ReaderPage({
     required this.fragments,
+    required this.columnSpans,
     required this.availableHeight,
     this.oversized = false,
     this.titleHeight = 0,
@@ -202,9 +216,13 @@ class ReaderPaginationCache {
     required bool indent,
     List<ReaderIllustration> illustrations = const [],
   }) {
+    final columnCount = math.max(1, layout.columns);
+    final columnGap = columnCount > 1 ? layout.columnGap : 0.0;
     final width = math.max(
       1.0,
-      layout.size.width - layout.horizontalPadding * 2,
+      (layout.size.width - layout.horizontalPadding * 2 -
+              columnGap * (columnCount - 1)) /
+          columnCount,
     );
     final painter = TextPainter(
       textDirection: TextDirection.ltr,
@@ -265,24 +283,42 @@ class ReaderPaginationCache {
     final firstHeight = math.max(1.0, normalHeight - titleHeight - 10);
     final pages = <ReaderPage>[];
     final fragments = <ReaderPageFragment>[];
+    // Columns of the page currently being assembled (reading order).
+    final pageColumns = <List<ReaderPageFragment>>[];
     var usedHeight = 0.0;
     var oversized = false;
-    double available() => pages.isEmpty ? firstHeight : normalHeight;
-    void flush({bool chapterEnd = false}) {
-      if (fragments.isEmpty) return;
+    double available() =>
+        pages.isEmpty && pageColumns.isEmpty ? firstHeight : normalHeight;
+    void emitPage({bool chapterEnd = false}) {
+      final columns = List<List<ReaderPageFragment>>.from(pageColumns);
+      if (columns.isEmpty) columns.add(const []);
       final endHeight = chapterEnd ? layout.chapterEndHeight : 0.0;
       pages.add(
         ReaderPage(
-          fragments: List.unmodifiable(fragments),
+          fragments: List.unmodifiable(columns.expand((c) => c)),
+          columnSpans: List.unmodifiable(
+            columns.map((c) => c.length),
+          ),
           availableHeight: math.max(1, available() - endHeight).toDouble(),
           oversized: oversized,
           titleHeight: pages.isEmpty ? titleHeight : 0,
           chapterEndHeight: endHeight,
         ),
       );
-      fragments.clear();
+      pageColumns.clear();
       usedHeight = 0;
       oversized = false;
+    }
+
+    void flush({bool chapterEnd = false}) {
+      if (fragments.isNotEmpty) {
+        pageColumns.add(List<ReaderPageFragment>.from(fragments));
+        fragments.clear();
+        usedHeight = 0;
+      }
+      if (chapterEnd || pageColumns.length >= columnCount) {
+        emitPage(chapterEnd: chapterEnd);
+      }
     }
 
     try {
@@ -429,6 +465,7 @@ class ReaderPaginationCache {
         pages.add(
           ReaderPage(
             fragments: const [],
+            columnSpans: const [0],
             availableHeight: math
                 .max(1, firstHeight - layout.chapterEndHeight)
                 .toDouble(),

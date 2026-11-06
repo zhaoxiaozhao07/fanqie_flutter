@@ -4,6 +4,7 @@ library;
 import 'dart:io';
 
 import 'package:flutter/gestures.dart';
+import 'package:flutter/rendering.dart';
 
 import 'package:fanqie_flutter/models/book.dart';
 import 'package:fanqie_flutter/models/chapter.dart';
@@ -305,30 +306,46 @@ void main() {
     String id,
     ReaderSettings settings, {
     int chapterCount = 3,
+    bool asRoute = false,
   }) async {
-    await tester.pumpWidget(
-      MaterialApp(
-        navigatorObservers: [readerRouteObserver],
-        home: ReaderScreen(
-          book: Book(bookId: 'win_$id', bookName: '桌面测试', author: '测试'),
-          chapters: List.generate(
-            chapterCount,
-            (index) => Chapter(
-              itemId: 'c$index',
-              title: '第${index + 1}章',
-              content: List.generate(
-                140,
-                (i) =>
-                    '第${index + 1}章第${i.toString().padLeft(3, '0')}段。这是一段足够长的原文用于测试窗口重新排版、字符锚点和鼠标选择操作。',
-              ).join('\n\n'),
-            ),
-          ),
-          resumeSavedPosition: false,
-          bookDocuments: () async => directory,
-          initialSettings: ReaderSettingsRecord(settings),
+    Widget readerScreen() => ReaderScreen(
+      book: Book(bookId: 'win_$id', bookName: '桌面测试', author: '测试'),
+      chapters: List.generate(
+        chapterCount,
+        (index) => Chapter(
+          itemId: 'c$index',
+          title: '第${index + 1}章',
+          content: List.generate(
+            140,
+            (i) =>
+                '第${index + 1}章第${i.toString().padLeft(3, '0')}段。这是一段足够长的原文用于测试窗口重新排版、字符锚点和鼠标选择操作。',
+          ).join('\n\n'),
         ),
       ),
+      resumeSavedPosition: false,
+      bookDocuments: () async => directory,
+      initialSettings: ReaderSettingsRecord(settings),
     );
+    Widget reader() => MaterialApp(
+      navigatorObservers: [readerRouteObserver],
+      home: asRoute
+          ? Scaffold(
+              body: Builder(
+                builder: (context) => TextButton(
+                  onPressed: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(builder: (_) => readerScreen()),
+                  ),
+                  child: const Text('进入阅读'),
+                ),
+              ),
+            )
+          : readerScreen(),
+    );
+    await tester.pumpWidget(reader());
+    if (asRoute) {
+      await tester.tap(find.text('进入阅读'));
+    }
     await tester.pumpAndSettle();
   }
 
@@ -377,6 +394,139 @@ void main() {
       expect(tester.takeException(), isNull);
     },
   );
+
+  windowsWidgets('mouse taps on paragraphs turn pages and open controls', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1024, 768);
+    addTearDown(tester.view.reset);
+    await mountReader(
+      tester,
+      'taps',
+      const ReaderSettings(
+        pageMode: true,
+        pageAnimation: 'none',
+        commentBubbles: false,
+        pureMode: true,
+      ),
+      asRoute: true,
+    );
+    final pageState = tester.state<ReaderPageViewState>(
+      find.byType(ReaderPageView),
+    );
+    final first = pageState.currentPageId;
+    expect(find.byIcon(Icons.arrow_back_ios_new), findsNothing);
+
+    Future<void> mouseTap(Offset global) async {
+      final gesture = await tester.startGesture(
+        global,
+        kind: PointerDeviceKind.mouse,
+      );
+      await gesture.up();
+      await tester.pumpAndSettle();
+    }
+
+    // 右侧热区：点击段落文字本身也要翻页（SelectableText 在手势竞技场获胜）。
+    var rect = tester.getRect(find.byType(SelectableText).first);
+    await mouseTap(Offset(rect.right - 24, rect.top + 8));
+    expect(pageState.currentPageId, isNot(first));
+
+    // 左侧热区翻回上一页。
+    rect = tester.getRect(find.byType(SelectableText).first);
+    await mouseTap(Offset(rect.left + 24, rect.top + 8));
+    expect(pageState.currentPageId, first);
+
+    // 中部点击展开上下栏，出现返回主页按钮。
+    rect = tester.getRect(find.byType(SelectableText).first);
+    await mouseTap(Offset(rect.center.dx, rect.top + 8));
+    expect(find.byIcon(Icons.arrow_back_ios_new), findsOneWidget);
+
+    // 返回按钮退出阅读，回到上一页。
+    await tester.tap(find.byIcon(Icons.arrow_back_ios_new));
+    await tester.pumpAndSettle();
+    expect(find.byType(ReaderScreen), findsNothing);
+  });
+
+  windowsWidgets('scroll mode mouse tap on text toggles the control bars', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1024, 768);
+    addTearDown(tester.view.reset);
+    await mountReader(
+      tester,
+      'scroll-tap',
+      const ReaderSettings(
+        pageMode: false,
+        commentBubbles: false,
+        pureMode: true,
+      ),
+    );
+    expect(find.byIcon(Icons.arrow_back_ios_new), findsNothing);
+    final rect = tester.getRect(find.byType(SelectableText).first);
+    final gesture = await tester.startGesture(
+      Offset(rect.center.dx, rect.top + 8),
+      kind: PointerDeviceKind.mouse,
+    );
+    await gesture.up();
+    await tester.pumpAndSettle();
+    expect(find.byIcon(Icons.arrow_back_ios_new), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  windowsWidgets('dual column layout splits wide pages into two columns', (
+    tester,
+  ) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1400, 900);
+    addTearDown(tester.view.reset);
+    await mountReader(
+      tester,
+      'dual',
+      const ReaderSettings(
+        pageMode: true,
+        pageAnimation: 'none',
+        dualColumn: true,
+        commentBubbles: false,
+        pureMode: true,
+      ),
+    );
+    expect(
+      find.byKey(const ValueKey('reader-dual-columns')),
+      findsOneWidget,
+    );
+    // 两栏并排：同一段落层级的可编辑文本横向分布在不同左缘。
+    final columns = find
+        .byKey(const ValueKey('reader-dual-columns'));
+    final dualRow = tester.renderObject<RenderFlex>(columns);
+    final childWidths = <double>[];
+    dualRow.visitChildren((child) {
+      childWidths.add((child as RenderBox).size.width);
+    });
+    // [左栏, 32 间距, 右栏]
+    expect(childWidths.length, 3);
+    expect(childWidths[1], 32);
+    expect(childWidths[0], moreOrLessEquals(childWidths[2], epsilon: 1));
+    expect(childWidths[0], greaterThan(300));
+    // 窄屏自动回退单栏，锚点不丢。
+    await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+    await tester.pumpAndSettle();
+    await ReaderSystemService.flushParticipants();
+    final before = await ReaderPositionService().load('win_dual');
+    expect(before, isNotNull);
+    tester.view.physicalSize = const Size(560, 540);
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('reader-dual-columns')),
+      findsNothing,
+    );
+    await ReaderSystemService.flushParticipants();
+    final after = await ReaderPositionService().load('win_dual');
+    expect(after!.chapterId, before!.chapterId);
+    expect(after.paragraphIndex, lessThanOrEqualTo(before.paragraphIndex));
+    expect(tester.takeException(), isNull);
+  });
 
   windowsWidgets(
     'windows paged mode supports keys, 840px viewport and anchor resize',

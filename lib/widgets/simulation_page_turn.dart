@@ -526,6 +526,10 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
 
   void clearQueuedTurns() => _queuedDirection = null;
 
+  /// Paragraph-level tap forward for desktop, where SelectableText wins the
+  /// gesture arena over the page-level zone detector.
+  void handleExternalTap(Offset position) => _handleTapAt(position);
+
   Widget _buildCachedPage(BuildContext context, int index) {
     if (index >= 0 && index < widget.totalPages) {
       return _pageWidgets.putIfAbsent(

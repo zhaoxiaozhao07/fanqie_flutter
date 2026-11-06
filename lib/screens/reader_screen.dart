@@ -5,6 +5,7 @@ import 'dart:io' show Directory;
 import 'dart:math' as math;
 import 'dart:ui' as ui;
 import 'package:flutter/foundation.dart';
+import 'package:flutter/gestures.dart' show PointerDeviceKind, kPrimaryButton;
 import 'package:flutter/material.dart';
 import '../widgets/reader_status_bar.dart';
 import '../widgets/reader_illustration.dart';
@@ -94,6 +95,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   Size? _desktopViewport;
   double? _desktopRestoredScrollOffset;
   final _desktopFocus = FocusNode(debugLabel: 'desktop-reader');
+  // Desktop SelectableText wins the tap arena; paragraph taps are forwarded
+  // with the last primary pointer position (global) recorded here.
+  Offset? _desktopPrimaryTap;
   final ReadingActivityService _activity = ReadingActivityService();
   final ReaderNavigationHistory _jumpHistory = ReaderNavigationHistory();
   bool _navigationLoading = false;
@@ -1006,6 +1010,17 @@ class _ReaderScreenState extends State<ReaderScreen>
     } catch (_) {
       if (mounted) setState(() => _fontFamily = 'system');
     }
+    // Windows has no Roboto: an unspecified family falls back per glyph
+    // (CJK vs Latin from different system fonts, visibly mixed stroke
+    // weights). Preload the bundled full-coverage face without blocking the
+    // first layout; one relayout fires when the family becomes available.
+    if (ReaderPlatform.isWindows && _resolveFontFamily(_fontFamily) == null) {
+      unawaited(
+        ReaderFontService.ensureLoaded('kaiti').then((_) {
+          if (mounted) setState(() {});
+        }).catchError((_) {}),
+      );
+    }
   }
 
   void _savePreferences() {
@@ -1386,7 +1401,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     textBaseline: TextBaseline.alphabetic,
     letterSpacing: _letterSpacing,
     wordSpacing: 0,
-    fontFamily: _resolveFontFamily(_fontFamily) ?? 'Roboto',
+    fontFamily: _resolveFontFamily(_fontFamily) ??
+        (ReaderPlatform.isWindows ? 'ReaderKaiTi' : 'Roboto'),
   );
 
   double _estimatedParagraphHeight(int chapterIndex, int paragraphIndex) {
@@ -2744,6 +2760,41 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (_showControls) _checkBookmarkStatus();
   }
 
+  /// Paragraph taps on desktop: SelectableText owns the gesture, so its onTap
+  /// forwards here. Zone semantics stay identical to the page-level detector.
+  void _handleDesktopTextTap() {
+    if (!ReaderPlatform.isDesktop) return;
+    final keyboard = HardwareKeyboard.instance;
+    if (keyboard.isShiftPressed ||
+        keyboard.isControlPressed ||
+        keyboard.isAltPressed ||
+        keyboard.isMetaPressed) {
+      return; // Shift-click extends selection; modifier clicks stay native.
+    }
+    if (_isPageMode) {
+      final context = _pageViewKey.currentContext;
+      final box = context?.findRenderObject();
+      final tap = _desktopPrimaryTap;
+      if (context != null &&
+          box is RenderBox &&
+          tap != null &&
+          box.size.width > 0) {
+        _pageViewKey.currentState?.handleExternalTap(
+          box.globalToLocal(tap),
+          box.size.width,
+        );
+      } else {
+        _toggleControls();
+      }
+      return;
+    }
+    if (_activeSelectableParaNotifier.value != null) {
+      _activeSelectableParaNotifier.value = null;
+      return;
+    }
+    _toggleControls();
+  }
+
   void _beginReaderPanel() {
     _pageViewKey.currentState?.clearQueuedTurns();
     if (_readerPanels++ == 0) _panelsClosed = Completer<void>();
@@ -3312,7 +3363,17 @@ class _ReaderScreenState extends State<ReaderScreen>
         },
         child: Scaffold(
           backgroundColor: theme.backgroundColor,
-          body: Stack(
+          body: Listener(
+            // Raw pointer capture: desktop paragraph taps are forwarded from
+            // SelectableText with this recorded global position.
+            onPointerDown: (event) {
+              _desktopPrimaryTap =
+                  event.kind == PointerDeviceKind.mouse &&
+                      event.buttons == kPrimaryButton
+                  ? event.position
+                  : null;
+            },
+            child: Stack(
             children: [
               // 阅读主要连续内容区域
               GestureDetector(
@@ -3477,6 +3538,7 @@ class _ReaderScreenState extends State<ReaderScreen>
               // 沉浸式自动阅读浮动控制条
               if (_isAutoScrolling) _buildAutoScrollControlBar(theme),
             ],
+          ),
           ),
         ),
       ),
@@ -3837,7 +3899,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                         fontWeight: FontWeight.bold,
                         color: theme.textColor,
                         height: 1.4,
-                        fontFamily: _resolveFontFamily(_fontFamily),
+                        fontFamily: _resolveFontFamily(_fontFamily) ??
+                            (ReaderPlatform.isWindows ? 'ReaderKaiTi' : null),
                       ),
                     ),
                   ],
@@ -4127,7 +4190,10 @@ class _ReaderScreenState extends State<ReaderScreen>
             TextSpan(children: inlineSpans),
             style: baseStyle,
             onTap: () {
-              if (ReaderPlatform.isDesktop) return;
+              if (ReaderPlatform.isDesktop) {
+                _handleDesktopTextTap();
+                return;
+              }
               _activeSelectableParaNotifier.value = null;
               onTap?.call();
             },
@@ -4858,12 +4924,20 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   ReaderLayout _layoutFor(Size size) => ReaderLayout(
     size: size,
+    // 双栏只在足够宽的桌面页面启用：每栏不窄于 300 逻辑像素。
+    columns:
+        _readerPreferences.dualColumn &&
+            size.width >= 300 * 2 + 32 + _horizontalPadding * 2
+        ? 2
+        : 1,
+    columnGap: 32,
     bodyStyle: _readerBodyStyle(),
     titleStyle: TextStyle(
       fontSize: _fontSize + 4,
       height: 1.4,
       fontWeight: FontWeight.bold,
-      fontFamily: _resolveFontFamily(_fontFamily),
+      fontFamily: _resolveFontFamily(_fontFamily) ??
+          (ReaderPlatform.isWindows ? 'ReaderKaiTi' : null),
     ),
     textScaler: MediaQuery.textScalerOf(context),
     horizontalPadding: _horizontalPadding,
@@ -5180,7 +5254,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                         height: 1.4,
                         fontWeight: FontWeight.bold,
                         color: theme.textColor,
-                        fontFamily: _resolveFontFamily(_fontFamily),
+                        fontFamily: _resolveFontFamily(_fontFamily) ??
+                            (ReaderPlatform.isWindows ? 'ReaderKaiTi' : null),
                       ),
                     ),
                   ),
@@ -5196,46 +5271,79 @@ class _ReaderScreenState extends State<ReaderScreen>
                       : const NeverScrollableScrollPhysics(),
                   child: AnimatedBuilder(
                     animation: _paragraphSignals,
-                    builder: (context, _) => Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        for (
-                          var index = 0;
-                          index < page.fragments.length;
-                          index++
-                        ) ...[
-                          if (index > 0) SizedBox(height: _paragraphSpacing),
-                          if (page.fragments[index].image != null)
-                            _illustrationView(
-                              page.fragments[index].image!,
-                              page.fragments[index].height,
-                              theme,
-                              address.chapterIndex,
-                            )
-                          else
-                            _buildParagraphWithUnderlines(
-                              page.fragments[index].text,
-                              theme,
-                              chapter,
-                              page.fragments[index].paragraphIndex,
-                              chapterIndex: address.chapterIndex,
-                              pageIdx: address.pageIndex,
-                              sourceParagraphs: paragraphs,
-                              sourceParagraph:
-                                  paragraphs[page
-                                          .fragments[index]
-                                          .paragraphIndex]
-                                      .trim(),
-                              startOffset: page.fragments[index].startOffset,
-                              endOffset: page.fragments[index].endOffset,
+                    builder: (context, _) {
+                      // Fragment ranges per column; single-column pages keep
+                      // the original flat layout byte-for-byte.
+                      final spans = page.columnSpans;
+                      final columnRanges = <(int, int)>[];
+                      var cursor = 0;
+                      for (final span in spans) {
+                        columnRanges.add((cursor, cursor + span));
+                        cursor += span;
+                      }
+                      Widget columnBody(int start, int end, bool last) =>
+                          Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              for (var index = start; index < end; index++) ...[
+                                if (index > start)
+                                  SizedBox(height: _paragraphSpacing),
+                                if (page.fragments[index].image != null)
+                                  _illustrationView(
+                                    page.fragments[index].image!,
+                                    page.fragments[index].height,
+                                    theme,
+                                    address.chapterIndex,
+                                  )
+                                else
+                                  _buildParagraphWithUnderlines(
+                                    page.fragments[index].text,
+                                    theme,
+                                    chapter,
+                                    page.fragments[index].paragraphIndex,
+                                    chapterIndex: address.chapterIndex,
+                                    pageIdx: address.pageIndex,
+                                    sourceParagraphs: paragraphs,
+                                    sourceParagraph:
+                                        paragraphs[page
+                                                .fragments[index]
+                                                .paragraphIndex]
+                                            .trim(),
+                                    startOffset: page.fragments[index].startOffset,
+                                    endOffset: page.fragments[index].endOffset,
+                                  ),
+                              ],
+                              if (last && page.chapterEndHeight > 0) ...[
+                                const SizedBox(height: 28),
+                                _buildChapterEndComments(chapter, theme),
+                              ],
+                            ],
+                          );
+                      if (columnRanges.length <= 1) {
+                        final (start, end) = columnRanges.isEmpty
+                            ? (0, 0)
+                            : columnRanges.first;
+                        return columnBody(start, end, true);
+                      }
+                      return Row(
+                        key: const ValueKey('reader-dual-columns'),
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          for (var column = 0;
+                              column < columnRanges.length;
+                              column++) ...[
+                            if (column > 0) const SizedBox(width: 32),
+                            Expanded(
+                              child: columnBody(
+                                columnRanges[column].$1,
+                                columnRanges[column].$2,
+                                column == columnRanges.length - 1,
+                              ),
                             ),
+                          ],
                         ],
-                        if (page.chapterEndHeight > 0) ...[
-                          const SizedBox(height: 28),
-                          _buildChapterEndComments(chapter, theme),
-                        ],
-                      ],
-                    ),
+                      );
+                    },
                   ),
                 ),
               ),

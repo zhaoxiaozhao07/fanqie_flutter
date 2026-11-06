@@ -30,6 +30,7 @@ class ReaderSettings {
   final bool haptics;
   final bool restReminder;
   final int restMinutes;
+  final bool dualColumn;
 
   const ReaderSettings({
     this.fontSize = 18,
@@ -59,6 +60,7 @@ class ReaderSettings {
     this.haptics = false,
     this.restReminder = false,
     this.restMinutes = 30,
+    this.dualColumn = false,
   });
 
   int effectiveTheme({required bool systemDark, required DateTime now}) {
@@ -101,6 +103,7 @@ class ReaderSettings {
     'haptics': haptics,
     'restReminder': restReminder,
     'restMinutes': restMinutes,
+    'dualColumn': dualColumn,
   };
 
   factory ReaderSettings.fromJson(Map<String, dynamic> json) {
@@ -162,6 +165,7 @@ class ReaderSettings {
       haptics: flag('haptics', false),
       restReminder: flag('restReminder', false),
       restMinutes: number('restMinutes', 30, 10, 120).toInt(),
+      dualColumn: flag('dualColumn', false),
       tapLayout: choice('tapLayout', {
         'balanced',
         'right_hand',
@@ -198,6 +202,7 @@ class ReaderSettings {
     bool? haptics,
     bool? restReminder,
     int? restMinutes,
+    bool? dualColumn,
   }) => ReaderSettings.fromJson({
     ...toJson(),
     if (fontSize != null) 'fontSize': fontSize,
@@ -227,6 +232,7 @@ class ReaderSettings {
     if (haptics != null) 'haptics': haptics,
     if (restReminder != null) 'restReminder': restReminder,
     if (restMinutes != null) 'restMinutes': restMinutes,
+    if (dualColumn != null) 'dualColumn': dualColumn,
   });
 
   ReaderSettings typographyFrom(ReaderSettings preset) => copyWith(

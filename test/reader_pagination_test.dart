@@ -12,6 +12,7 @@ ReaderLayout layout(
   double width = 400,
   bool comments = true,
   double chapterEndHeight = 0,
+  int columns = 1,
 }) => ReaderLayout(
   size: Size(width, 760),
   bodyStyle: const TextStyle(fontSize: 18, height: 1.8, letterSpacing: 0.5),
@@ -27,6 +28,7 @@ ReaderLayout layout(
       ? ReaderCommentBubble.sizeFor(TextScaler.linear(scale))
       : Size.zero,
   chapterEndHeight: chapterEndHeight,
+  columns: columns,
 );
 
 void main() {
@@ -275,4 +277,64 @@ void main() {
       expect(await service.load('book'), isNull);
     },
   );
+  test('dual column fills both columns and keeps fragment continuity', () {
+    final content = List.generate(
+      60,
+      (i) => '双栏验证第$i段，这是一段足够长的正文，用来填满左右两栏并检验跨栏连续性。',
+    ).join('\n\n');
+    ReaderChapterPages prepare(int columns) => ReaderPaginationCache().paginate(
+      chapterId: 'dual',
+      title: '双栏',
+      content: content,
+      layout: layout(1, width: 840, columns: columns),
+      indent: true,
+    );
+    final single = prepare(1);
+    final dual = prepare(2);
+    // 双栏不减少每页总容量（栏宽减半、两栏并排），页数与单栏相当；
+    // 除末页外每页都应占满两栏。
+    expect(
+      dual.pages.length,
+      inInclusiveRange(single.pages.length - 1, single.pages.length + 3),
+    );
+    expect(dual.pages.length, greaterThan(1));
+    for (final page in dual.pages.take(dual.pages.length - 1)) {
+      expect(page.columnSpans.length, 2);
+      expect(page.columnSpans.first, greaterThan(0));
+      expect(page.columnSpans.last, greaterThan(0));
+    }
+    for (final page in dual.pages) {
+      expect(page.columnSpans.length, inInclusiveRange(1, 2));
+      expect(page.columnSpans.reduce((a, b) => a + b), page.fragments.length);
+    }
+    // 跨页跨栏的原文片段保持连续：上一片尾 = 下一片头。
+    final all = dual.pages.expand((p) => p.fragments).toList();
+    for (var i = 1; i < all.length; i++) {
+      final previous = all[i - 1];
+      final next = all[i];
+      if (previous.image != null || next.image != null) continue;
+      expect(
+        next.startOffset == (previous.paragraphIndex == next.paragraphIndex
+            ? previous.endOffset
+            : 0),
+        true,
+        reason: 'fragment $i offset gap',
+      );
+    }
+    // 重新排版后锚点定位仍能找到正确的双栏页。
+    final anchor = ReadingPosition(
+      chapterId: 'dual',
+      paragraphIndex: 30,
+      characterOffset: 5,
+    );
+    final page = dual.pageFor(anchor);
+    expect(
+      dual.pages[page].fragments.any(
+        (f) =>
+            f.paragraphIndex > 30 ||
+            (f.paragraphIndex == 30 && f.endOffset > 5),
+      ),
+      true,
+    );
+  });
 }

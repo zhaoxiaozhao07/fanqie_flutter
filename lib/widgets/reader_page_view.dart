@@ -251,6 +251,16 @@ class ReaderPageViewState extends State<ReaderPageView> {
     WidgetsBinding.instance.ensureVisualUpdate();
   }
 
+  /// Desktop paragraphs are SelectableText and win the tap gesture arena;
+  /// the reader forwards their taps here with viewport-local coordinates.
+  void handleExternalTap(Offset localPosition, double viewportWidth) {
+    if (_mode == 'simulation') {
+      _simulationKey.currentState?.handleExternalTap(localPosition);
+    } else {
+      _tap(localPosition, viewportWidth);
+    }
+  }
+
   void _tap(Offset position, double width) {
     if (DateTime.now().difference(widget.lastBubbleTap()) <
         const Duration(milliseconds: 400)) {
