@@ -163,6 +163,26 @@ class ReaderSystemService {
     }
   }
 
+  /// Desktop native borderless full-screen (F11 / Esc chain). Only the app
+  /// itself toggles it, so this flag mirrors the native window state.
+  static bool _fullScreen = false;
+
+  static bool get isFullScreen => _fullScreen;
+
+  static Future<void> toggleFullScreen() async {
+    if (!ReaderPlatform.isDesktop) return;
+    try {
+      final value = await _channel.invokeMethod<bool>('toggleFullScreen');
+      _fullScreen = value ?? !_fullScreen;
+    } catch (_) {}
+  }
+
+  static Future<bool> exitFullScreenIfActive() async {
+    if (!_fullScreen) return false;
+    await toggleFullScreen();
+    return true;
+  }
+
   /// 获取系统电量百分比 (0~100，异常返回 -1)
   static Future<int> getBatteryLevel() async {
     if (!ReaderPlatform.capabilities.battery) return -1;

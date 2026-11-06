@@ -32,7 +32,7 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       DesktopCommands.register(this, _desktopCommand);
     }
   }
@@ -129,7 +129,7 @@ class _MainScreenState extends State<MainScreen> {
         HistoryScreen(key: _historyKey),
       ],
     );
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       return Scaffold(
         body: LayoutBuilder(
           builder: (context, constraints) {

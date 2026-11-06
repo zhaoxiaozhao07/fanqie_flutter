@@ -42,7 +42,7 @@ Future<NormalizedLocalText> normalizeLocalText(
   LocalImportToken token,
 ) async {
   token.check();
-  if (Platform.isAndroid || ReaderPlatform.isMacOS) {
+  if (Platform.isAndroid || ReaderPlatform.isDesktop) {
     final result =
         await const MethodChannel(
           'com.fanqie.fanqie_flutter/download',

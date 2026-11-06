@@ -13,7 +13,7 @@ class AppStorage {
 
   static Future<Directory> documents() async {
     if (documentsOverride != null) return documentsOverride!();
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       final root = await getApplicationSupportDirectory();
       await root.create(recursive: true);
       return root;

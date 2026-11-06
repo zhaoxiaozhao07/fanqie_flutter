@@ -15,6 +15,7 @@ import 'epub_chapter_content.dart';
 import 'cover_cache_service.dart';
 import 'book_image_fetcher.dart';
 import 'app_storage.dart';
+import 'desktop_download_output.dart';
 import 'file_export_service.dart';
 import 'reader_platform.dart';
 
@@ -148,7 +149,7 @@ class DownloadService extends ChangeNotifier {
         task.isCancelled = true;
         task.status = DownloadTaskStatus.cancelled;
         task.message = '已取消下载';
-        if (ReaderPlatform.isMacOS) {
+        if (ReaderPlatform.isDesktop) {
           unawaited(
             ReaderPlatform.invoke('cancelExport', {
               'id': task.id,
@@ -245,7 +246,7 @@ class DownloadService extends ChangeNotifier {
 
       // A saved native result is authoritative: cancellation after the atomic
       // commit cannot turn an existing exported file into a cancelled task.
-      if (task.isCancelled && !(ReaderPlatform.isMacOS && filePath != null)) {
+      if (task.isCancelled && !(ReaderPlatform.isDesktop && filePath != null)) {
         task.status = DownloadTaskStatus.cancelled;
         task.message = '导出已取消，已下载正文仍保留';
       } else if (filePath != null) {
@@ -404,7 +405,7 @@ class DownloadService extends ChangeNotifier {
       }
 
       if (savedPath != null) {
-        if (!ReaderPlatform.isMacOS && isCancelled?.call() == true) {
+        if (!ReaderPlatform.isDesktop && isCancelled?.call() == true) {
           throw const FileExportCancelled();
         }
         int fileSize = 0;
@@ -734,7 +735,7 @@ $navPoints  </navMap>
       }
 
       if (savedPath != null) {
-        if (!ReaderPlatform.isMacOS && isCancelled?.call() == true) {
+        if (!ReaderPlatform.isDesktop && isCancelled?.call() == true) {
           throw const FileExportCancelled();
         }
         final file = File(savedPath);
@@ -779,7 +780,24 @@ $navPoints  </navMap>
     String? requestId,
     bool Function()? isCancelled,
   }) async {
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isWindows) {
+      // Downloads never pop a panel at the end of a task; they commit into the
+      // configured output directory with automatic name numbering.
+      final result = await DesktopDownloadOutput.commit(
+        File(tempFilePath),
+        safeFileName,
+        requestId: requestId,
+        isCancelled: isCancelled,
+      );
+      if (result.status == FileExportStatus.cancelled) {
+        throw const FileExportCancelled();
+      }
+      if (result.status == FileExportStatus.failed) {
+        throw FileSystemException(result.error ?? '导出保存失败');
+      }
+      return result.path;
+    }
+    if (ReaderPlatform.isDesktop) {
       final result = await FileExportService().save(
         File(tempFilePath),
         name: safeFileName,

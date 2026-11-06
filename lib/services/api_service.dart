@@ -127,7 +127,7 @@ class ApiService {
     try {
       baseDir = await (commentDocuments?.call() ?? AppStorage.documents());
     } catch (_) {
-      if (ReaderPlatform.isMacOS) rethrow;
+      if (ReaderPlatform.isDesktop) rethrow;
       baseDir = Directory.systemTemp;
     }
     String path;

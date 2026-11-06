@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../app_theme.dart';
+import '../services/desktop_download_output.dart';
+import '../services/reader_platform.dart';
 
 /// 下载格式选择对话框
 class DownloadDialog extends StatelessWidget {
@@ -67,6 +69,11 @@ class DownloadDialog extends StatelessWidget {
             subtitle: '电子书格式，支持目录导航',
             format: 'EPUB',
           ),
+          // Windows 下载提交到固定输出目录，避免任务结束时突然弹窗
+          if (ReaderPlatform.isWindows) ...[
+            const SizedBox(height: 16),
+            const _WindowsOutputDirectoryRow(),
+          ],
         ],
       ),
       actions: [
@@ -120,6 +127,96 @@ class DownloadDialog extends StatelessWidget {
             Icon(Icons.chevron_right, color: Colors.grey.shade400),
           ],
         ),
+      ),
+    );
+  }
+}
+
+/// Windows 下载输出目录行：显示当前目录并可打开原生目录选择器更换。
+class _WindowsOutputDirectoryRow extends StatefulWidget {
+  const _WindowsOutputDirectoryRow();
+
+  @override
+  State<_WindowsOutputDirectoryRow> createState() =>
+      _WindowsOutputDirectoryRowState();
+}
+
+class _WindowsOutputDirectoryRowState extends State<_WindowsOutputDirectoryRow> {
+  String? _directory;
+  String? _error;
+  bool _switching = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final directory = await DesktopDownloadOutput.resolve();
+      if (mounted) setState(() => _directory = directory);
+    } catch (_) {
+      if (mounted) {
+        setState(() => _error = '目录不可用，下载前请重新选择保存位置');
+      }
+    }
+  }
+
+  Future<void> _change() async {
+    setState(() => _switching = true);
+    try {
+      final chosen = await DesktopDownloadOutput.choose();
+      if (chosen != null && mounted) {
+        setState(() {
+          _directory = chosen;
+          _error = null;
+        });
+      }
+    } finally {
+      if (mounted) setState(() => _switching = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final directory = _directory;
+    return Container(
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        border: Border.all(color: Colors.grey.shade300),
+        borderRadius: BorderRadius.circular(12),
+      ),
+      child: Row(
+        children: [
+          const Icon(Icons.folder_outlined, size: 20),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Text(
+                  '保存到（重名自动编号，不会覆盖其他文件）',
+                  style: TextStyle(fontSize: 11, color: AppTheme.textSecondary),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  _error ?? directory ?? '正在定位下载目录…',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: _error != null ? AppTheme.errorColor : null,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
+            ),
+          ),
+          TextButton(
+            onPressed: _switching ? null : _change,
+            child: const Text('更改'),
+          ),
+        ],
       ),
     );
   }

@@ -316,7 +316,7 @@ class ReaderPageViewState extends State<ReaderPageView> {
       },
       child: Listener(
         onPointerSignal: (event) {
-          if (!ReaderPlatform.isMacOS ||
+          if (!ReaderPlatform.isDesktop ||
               event is! PointerScrollEvent ||
               widget.selection.value != null ||
               event.scrollDelta.dy.abs() < event.scrollDelta.dx.abs() ||
@@ -332,7 +332,7 @@ class ReaderPageViewState extends State<ReaderPageView> {
         },
         onPointerDown: (event) {
           _pointerStart =
-              ReaderPlatform.isMacOS && event.kind == PointerDeviceKind.mouse
+              ReaderPlatform.isDesktop && event.kind == PointerDeviceKind.mouse
               ? null
               : event.localPosition;
           _reportedPointer = false;
@@ -364,7 +364,7 @@ class ReaderPageViewState extends State<ReaderPageView> {
                 pageContentChanges: widget.pageContentChanges,
                 backgroundColor: widget.backgroundColor,
                 isDark: widget.isDark,
-                supportedDevices: ReaderPlatform.isMacOS
+                supportedDevices: ReaderPlatform.isDesktop
                     ? const {
                         PointerDeviceKind.touch,
                         PointerDeviceKind.stylus,

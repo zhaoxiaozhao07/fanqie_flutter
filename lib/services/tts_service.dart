@@ -82,14 +82,14 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     String method,
     Map<String, Object?>? args,
   ) async {
-    if (ReaderPlatform.isMacOS && !ReaderPlatform.capabilities.tts) return null;
+    if (ReaderPlatform.isDesktop && !ReaderPlatform.capabilities.tts) return null;
     return _channel.invokeMethod<Object?>(method, args);
   }
 
   final bool _testInvoker;
   bool get isAvailable =>
       _testInvoker ||
-      !ReaderPlatform.isMacOS ||
+      !ReaderPlatform.isDesktop ||
       ReaderPlatform.capabilities.tts;
   final TtsInvoker _invoke;
   final http.Client _http;

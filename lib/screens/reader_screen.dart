@@ -378,7 +378,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void initState() {
     super.initState();
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       DesktopCommands.register(this, _desktopCommand);
       ReaderSystemService.registerSaveParticipant(this, _flushForExit);
     }
@@ -1051,7 +1051,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _updateDesktopCommands() {
-    if (!ReaderPlatform.isMacOS) return;
+    if (!ReaderPlatform.isDesktop) return;
     unawaited(
       ReaderPlatform.invoke('setReaderCommandsEnabled', {
         'enabled': _readerRouteActive && _readerPanels == 0,
@@ -1084,17 +1084,59 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     final keyboard = HardwareKeyboard.instance;
     final focus = FocusManager.instance.primaryFocus?.context;
+    final editingText =
+        focus?.findAncestorWidgetOfExactType<EditableText>() != null;
     if (_readerPanels > 0 ||
         _activeSelectableParaNotifier.value != null ||
         !(ModalRoute.of(context)?.isCurrent ?? false) ||
-        focus?.findAncestorWidgetOfExactType<EditableText>() != null ||
+        editingText ||
         keyboard.isMetaPressed ||
-        keyboard.isControlPressed ||
-        keyboard.isAltPressed ||
-        keyboard.isShiftPressed) {
+        keyboard.isAltPressed) {
       return KeyEventResult.ignored;
     }
     final key = event.logicalKey;
+    if (keyboard.isControlPressed) {
+      // Ctrl+C keeps native copy; Ctrl+F/B/,/O are app-level bindings. Only
+      // chapter navigation belongs to the reader itself.
+      if (keyboard.isShiftPressed) return KeyEventResult.ignored;
+      final delta = key == LogicalKeyboardKey.arrowRight
+          ? 1
+          : key == LogicalKeyboardKey.arrowLeft
+          ? -1
+          : 0;
+      if (delta == 0) return KeyEventResult.ignored;
+      final target = _currentActiveIndex + delta;
+      if (target < 0 || target >= widget.chapters.length) {
+        return KeyEventResult.handled;
+      }
+      if (_navigationLoading) _cancelNavigation();
+      _showControls = false;
+      unawaited(_startFromChapter(target));
+      return KeyEventResult.handled;
+    }
+    if (keyboard.isShiftPressed) {
+      return KeyEventResult.ignored;
+    }
+    if (key == LogicalKeyboardKey.f11) {
+      unawaited(ReaderSystemService.toggleFullScreen());
+      return KeyEventResult.handled;
+    }
+    if (key == LogicalKeyboardKey.escape) {
+      // Top dialogs and active selections consume Escape before this handler.
+      if (ReaderSystemService.isFullScreen) {
+        unawaited(ReaderSystemService.exitFullScreenIfActive());
+        return KeyEventResult.handled;
+      }
+      if (_showControls) {
+        _toggleControls();
+        return KeyEventResult.handled;
+      }
+      if (Navigator.of(context).canPop()) {
+        Navigator.of(context).pop();
+        return KeyEventResult.handled;
+      }
+      return KeyEventResult.ignored;
+    }
     final forward =
         key == LogicalKeyboardKey.pageDown ||
         (_isPageMode && key == LogicalKeyboardKey.arrowRight);
@@ -1253,7 +1295,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     // A resized viewport can move the saved line away from the fixed 24px
     // sampling line. Keep the original character anchor while the reader is
     // idle, just as paged mode does; actual scrolling resumes normal sampling.
-    if (ReaderPlatform.isMacOS &&
+    if (ReaderPlatform.isDesktop &&
         _desktopRestoredScrollOffset != null &&
         _scrollController.hasClients &&
         (_scrollController.offset - _desktopRestoredScrollOffset!).abs() < .5) {
@@ -1552,7 +1594,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _lastDetectPixels = _scrollController.hasClients
             ? _scrollController.offset
             : 0;
-        if (ReaderPlatform.isMacOS && _scrollController.hasClients) {
+        if (ReaderPlatform.isDesktop && _scrollController.hasClients) {
           _desktopRestoredScrollOffset = _scrollController.offset;
         }
         _dropRestorationImage();
@@ -2706,7 +2748,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pageViewKey.currentState?.clearQueuedTurns();
     if (_readerPanels++ == 0) _panelsClosed = Completer<void>();
     _updateDesktopCommands();
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       _pauseAutoScroll();
       ReaderSystemService.setKeepScreenOn(false, owner: this);
     }
@@ -2721,7 +2763,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _panelsClosed!.complete();
       }
       if (mounted) {
-        if (ReaderPlatform.isMacOS &&
+        if (ReaderPlatform.isDesktop &&
             _readerRouteActive &&
             WidgetsBinding.instance.lifecycleState ==
                 AppLifecycleState.resumed) {
@@ -3216,7 +3258,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   Widget build(BuildContext context) {
-    if (!ReaderPlatform.isMacOS) return _buildReaderScaffold(context);
+    if (!ReaderPlatform.isDesktop) return _buildReaderScaffold(context);
     return LayoutBuilder(
       builder: (context, constraints) {
         final size = Size(
@@ -4077,19 +4119,19 @@ class _ReaderScreenState extends State<ReaderScreen>
       valueListenable: _activeSelectableParaNotifier,
       builder: (context, activeParaKey, _) {
         final isSelectedPara = activeParaKey == paraKeyStr;
-        if (isSelectedPara || ReaderPlatform.isMacOS) {
+        if (isSelectedPara || ReaderPlatform.isDesktop) {
           final selectable = SelectableText.rich(
-            key: ReaderPlatform.isMacOS
+            key: ReaderPlatform.isDesktop
                 ? ValueKey('desktop-paragraph-$paraKeyStr')
                 : _activeSelectableTextKey,
             TextSpan(children: inlineSpans),
             style: baseStyle,
             onTap: () {
-              if (ReaderPlatform.isMacOS) return;
+              if (ReaderPlatform.isDesktop) return;
               _activeSelectableParaNotifier.value = null;
               onTap?.call();
             },
-            onSelectionChanged: ReaderPlatform.isMacOS
+            onSelectionChanged: ReaderPlatform.isDesktop
                 ? (selection, cause) {
                     if (!selection.isCollapsed) {
                       _activeSelectableParaNotifier.value = paraKeyStr;

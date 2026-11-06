@@ -46,7 +46,7 @@ class FileExportService {
       return const FileExportResult.cancelled();
     }
     try {
-      if (ReaderPlatform.isMacOS) {
+      if (ReaderPlatform.isDesktop) {
         final value = await ReaderPlatform.invoke<Map<dynamic, dynamic>>(
           'saveExportFile',
           {

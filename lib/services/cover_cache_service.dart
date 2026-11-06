@@ -31,7 +31,7 @@ class CoverCacheService {
     try {
       baseDir = await (documents ?? AppStorage.documents)();
     } catch (_) {
-      if (ReaderPlatform.isMacOS) rethrow;
+      if (ReaderPlatform.isDesktop) rethrow;
       baseDir = Directory.systemTemp;
     }
     final dir = Directory('${baseDir.path}/offline_books/$cleanId');

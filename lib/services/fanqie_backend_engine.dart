@@ -80,11 +80,11 @@ class FanqieBackendEngine {
   Future<Directory> _getChapterCacheDir() async {
     Directory baseDir;
     try {
-      baseDir = ReaderPlatform.isMacOS
+      baseDir = ReaderPlatform.isDesktop
           ? await readerCache.documents()
           : await getTemporaryDirectory();
     } catch (_) {
-      if (ReaderPlatform.isMacOS) rethrow;
+      if (ReaderPlatform.isDesktop) rethrow;
       baseDir = Directory.systemTemp;
     }
     final dir = Directory('${baseDir.path}/fanqie_cache/chapters');

@@ -1063,7 +1063,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
   Widget _buildFavoritesGrid() {
     final screenWidth = MediaQuery.of(context).size.width;
     final isWide = screenWidth > 900;
-    final columns = ReaderPlatform.isMacOS
+    final columns = ReaderPlatform.isDesktop
         ? ((math.min(screenWidth, 900) - 32) / 170).floor().clamp(2, 5)
         : 3;
     final width =
@@ -1538,7 +1538,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
   Widget _buildDownloadsGrid() {
     final screenWidth = MediaQuery.of(context).size.width;
     final isWide = screenWidth > 900;
-    final columns = ReaderPlatform.isMacOS
+    final columns = ReaderPlatform.isDesktop
         ? ((math.min(screenWidth, 900) - 32) / 170).floor().clamp(2, 5)
         : 3;
     final width =

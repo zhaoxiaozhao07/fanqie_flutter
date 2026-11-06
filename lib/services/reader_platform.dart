@@ -29,18 +29,19 @@ class ReaderCapabilities {
 
   factory ReaderCapabilities.forPlatform(TargetPlatform platform) {
     final android = platform == TargetPlatform.android;
-    final macos = platform == TargetPlatform.macOS;
+    final desktop =
+        platform == TargetPlatform.macOS || platform == TargetPlatform.windows;
     return ReaderCapabilities(
       tts: android,
       secureStorage: android,
       windowBrightness: android,
       volumeKeys: android,
       haptics: android,
-      battery: android,
-      keepAwake: android || macos,
-      networkType: android || macos,
-      textDecoder: android || macos,
-      fileExport: android || macos,
+      battery: android || desktop,
+      keepAwake: android || desktop,
+      networkType: android || desktop,
+      textDecoder: android || desktop,
+      fileExport: android || desktop,
     );
   }
 
@@ -78,6 +79,15 @@ class ReaderPlatform {
   static bool get isMacOS =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
 
+  static bool get isWindows =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+
+  /// Desktop platforms share the native bridge contract (quit handshake,
+  /// transcoding, save panels, window integration) and desktop UX.
+  static bool get isDesktop => isMacOS || isWindows;
+
+  static bool get requiresNativeBridge => isMacOS || isWindows;
+
   static ReaderCapabilities get capabilities =>
       _initializedPlatform == defaultTargetPlatform && _capabilities != null
       ? _capabilities!
@@ -85,7 +95,7 @@ class ReaderPlatform {
 
   static Future<void> initialize() async {
     final platform = defaultTargetPlatform;
-    if (platform != TargetPlatform.android && !isMacOS) return;
+    if (platform != TargetPlatform.android && !requiresNativeBridge) return;
     try {
       final values = await channel.invokeMapMethod<String, dynamic>(
         'getReaderCapabilities',
@@ -95,8 +105,10 @@ class ReaderPlatform {
       _initializedPlatform = platform;
     } catch (_) {
       // Android keeps its existing support even on older native bridges.
-      if (isMacOS) {
-        throw StateError('macOS 原生模块未能初始化，请重新启动或重新构建客户端');
+      if (requiresNativeBridge) {
+        throw StateError(
+          isMacOS ? 'macOS 原生模块未能初始化，请重新启动或重新构建客户端' : 'Windows 原生模块未能初始化，请重新启动或重新构建客户端',
+        );
       }
     }
   }
