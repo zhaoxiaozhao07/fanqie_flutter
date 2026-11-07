@@ -6,6 +6,8 @@ import 'package:path/path.dart' as path;
 import 'package:path_provider/path_provider.dart';
 import '../services/reader_backup_service.dart';
 import '../services/reader_export_service.dart';
+import 'reader_auto_backup_panel.dart';
+import 'reader_trash_dialog.dart';
 
 class ReaderBackupDialog extends StatefulWidget {
   const ReaderBackupDialog({super.key});
@@ -16,6 +18,7 @@ class ReaderBackupDialog extends StatefulWidget {
 class _ReaderBackupDialogState extends State<ReaderBackupDialog> {
   final _service = ReaderBackupService();
   bool _includeBooks = false;
+  bool _includeFonts = true;
   bool _busy = false;
   String _message = '';
   ReaderRestoreMode _mode = ReaderRestoreMode.merge;
@@ -38,7 +41,10 @@ class _ReaderBackupDialogState extends State<ReaderBackupDialog> {
   }
 
   Future<void> _create() => _run(() async {
-    final file = await _service.create(includeBooks: _includeBooks);
+    final file = await _service.create(
+      includeBooks: _includeBooks,
+      includeFonts: _includeFonts,
+    );
     final location = await ReaderExportService().saveToDownloads(file);
     if (mounted) {
       setState(
@@ -166,10 +172,42 @@ class _ReaderBackupDialogState extends State<ReaderBackupDialog> {
                     ? null
                     : (value) => setState(() => _includeBooks = value),
               ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('同时备份外部字体'),
+                subtitle: const Text('包含应用内字体副本；请确认字体授权允许备份'),
+                value: _includeFonts,
+                onChanged: _busy
+                    ? null
+                    : (value) => setState(() => _includeFonts = value),
+              ),
               FilledButton.icon(
                 onPressed: _busy ? null : _create,
                 icon: const Icon(Icons.save_alt),
                 label: const Text('创建备份'),
+              ),
+              const Divider(),
+              TextButton.icon(
+                onPressed: _busy
+                    ? null
+                    : () => showDialog<void>(
+                        context: context,
+                        builder: (_) => const ReaderTrashDialog(),
+                      ),
+                icon: const Icon(Icons.restore_from_trash_outlined),
+                label: const Text('回收站与修改历史'),
+              ),
+              ReaderAutoBackupPanel(
+                onChoose: (file) => _run(() async {
+                  final info = await _service.inspect(file);
+                  if (mounted) {
+                    setState(() {
+                      _file = file;
+                      _info = info;
+                      _message = '已选择自动快照，确认后才恢复';
+                    });
+                  }
+                }, '正在校验快照…'),
               ),
               const Divider(),
               OutlinedButton.icon(
@@ -180,7 +218,7 @@ class _ReaderBackupDialogState extends State<ReaderBackupDialog> {
               if (_info != null) ...[
                 const SizedBox(height: 10),
                 Text(
-                  '书籍 ${_info!.books} · 笔记 ${_info!.notes} · 书签 ${_info!.bookmarks} · 文件 ${_info!.files}',
+                  '书籍 ${_info!.books} · 笔记 ${_info!.notes} · 书签 ${_info!.bookmarks} · 字体 ${_info!.fonts} · 文件 ${_info!.files}',
                 ),
                 Text(
                   '创建于 ${_info!.createdAt.toLocal().toString().split('.').first}',

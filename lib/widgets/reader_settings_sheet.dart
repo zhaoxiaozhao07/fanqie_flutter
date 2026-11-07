@@ -7,6 +7,11 @@ import '../models/reader_theme.dart';
 import '../services/reader_font_service.dart';
 import '../services/reader_settings_repository.dart';
 import '../services/reader_platform.dart';
+import 'reader_shortcuts_dialog.dart';
+import 'reader_colors_dialog.dart';
+import '../services/reader_display_text.dart';
+import '../services/external_reader_fonts.dart';
+import 'reader_fonts_dialog.dart';
 
 class ReaderSettingsSheet extends StatefulWidget {
   final String bookId;
@@ -84,6 +89,7 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _loadPresets();
+    _loadFonts();
     _themeClock = Timer.periodic(const Duration(seconds: 30), (_) {
       if (mounted && _settings.themeMode == ReaderThemeMode.scheduled) {
         setState(() {});
@@ -108,11 +114,38 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
     if (mounted) setState(() => _presets = presets);
   }
 
-  ReaderTheme get _palette =>
-      ReaderTheme.presets[_settings.effectiveTheme(
+  Future<void> _loadFonts() async {
+    try {
+      await ExternalReaderFonts().reload();
+      if (mounted) setState(() {});
+    } catch (_) {
+      // Damaged font metadata is preserved; built-in fonts remain usable.
+    }
+  }
+
+  Future<void> _fontsDialog() async {
+    final selected = await _dialog<String>(
+      (_) => ReaderFontsDialog(selected: _settings.fontFamily),
+    );
+    if (!mounted) return;
+    setState(() {});
+    if (selected != null) {
+      await _change(_settings.copyWith(fontFamily: selected));
+    } else if (_settings.fontFamily.startsWith('external_') &&
+        !ExternalReaderFonts().fonts.any((e) => e.id == _settings.fontFamily)) {
+      await _change(_settings.copyWith(fontFamily: 'system'));
+    }
+  }
+
+  ReaderTheme get _palette => ReaderTheme
+      .presets[_settings.effectiveTheme(
         systemDark: MediaQuery.platformBrightnessOf(context) == Brightness.dark,
         now: DateTime.now(),
-      )];
+      )]
+      .withColors(
+        background: _settings.customBackground,
+        text: _settings.customText,
+      );
 
   ThemeData get _themeData => ThemeData(
     brightness: _palette.systemBrightness,
@@ -150,6 +183,7 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
     if (_busy) return;
     setState(() => _busy = true);
     try {
+      await ReaderDisplayText.ensureLoaded();
       await ReaderFontService.ensureLoaded(next.fontFamily);
       await _repository.save(
         next,
@@ -277,12 +311,7 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
 
   @override
   Widget build(BuildContext context) {
-    final palette =
-        ReaderTheme.presets[_settings.effectiveTheme(
-          systemDark:
-              MediaQuery.platformBrightnessOf(context) == Brightness.dark,
-          now: DateTime.now(),
-        )];
+    final palette = _palette;
     return palette.wrap(
       Builder(
         builder: (context) => Material(
@@ -331,7 +360,10 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                             borderRadius: BorderRadius.circular(10),
                           ),
                           child: Text(
-                            '春风轻拂书页，故事从这里继续。',
+                            ReaderDisplayText.convert(
+                              '春风轻拂书页，故事从这里继续。',
+                              _settings.displayScript,
+                            ),
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(
@@ -339,12 +371,13 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                               height: _settings.lineHeight,
                               letterSpacing: _settings.letterSpacing,
                               color: palette.textColor,
-                              fontFamily: switch (_settings.fontFamily) {
-                                'serif' => 'ReaderSongTi',
-                                'kaiti' => 'ReaderKaiTi',
-                                'sans-serif' => 'sans-serif',
-                                _ => null,
-                              },
+                              fontFamily: ReaderFontService.familyFor(
+                                _settings.fontFamily,
+                              ),
+                              fontFamilyFallback: const [
+                                'sans-serif',
+                                'Roboto',
+                              ],
                             ),
                           ),
                         ),
@@ -450,11 +483,18 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                               'kaiti': '楷体',
                               'serif': '宋体',
                               'sans-serif': '黑体',
+                              for (final font in ExternalReaderFonts().fonts)
+                                font.id: font.name,
                             },
                             _settings.fontFamily,
                             (value) =>
                                 _change(_settings.copyWith(fontFamily: value)),
                           ),
+                        ),
+                        TextButton.icon(
+                          onPressed: _busy ? null : _fontsDialog,
+                          icon: const Icon(Icons.font_download_outlined),
+                          label: const Text('导入 / 预览 / 管理 TTF、OTF'),
                         ),
                         _section(
                           '主题切换',
@@ -465,8 +505,13 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                               ReaderThemeMode.scheduled: '定时夜间',
                             },
                             _settings.themeMode,
-                            (value) =>
-                                _change(_settings.copyWith(themeMode: value)),
+                            (value) => _change(
+                              _settings.copyWith(
+                                themeMode: value,
+                                clearCustomColors:
+                                    value != ReaderThemeMode.manual,
+                              ),
+                            ),
                           ),
                         ),
                         if (_settings.themeMode == ReaderThemeMode.scheduled)
@@ -505,12 +550,23 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                                 ChoiceChip(
                                   label: Text(ReaderTheme.presets[index].name),
                                   selected:
-                                      palette == ReaderTheme.presets[index],
+                                      _settings.customBackground == null &&
+                                      _settings.customText == null &&
+                                      _settings.effectiveTheme(
+                                            systemDark:
+                                                MediaQuery.platformBrightnessOf(
+                                                  context,
+                                                ) ==
+                                                Brightness.dark,
+                                            now: DateTime.now(),
+                                          ) ==
+                                          index,
                                   onSelected: _busy
                                       ? null
                                       : (_) => _change(
                                           _settings.copyWith(
                                             themeIndex: index,
+                                            clearCustomColors: true,
                                             themeMode: ReaderThemeMode.manual,
                                             dayThemeIndex: index < 3
                                                 ? index
@@ -523,6 +579,44 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                                 ),
                             ],
                           ),
+                        ),
+                        Wrap(
+                          spacing: 8,
+                          children: [
+                            TextButton.icon(
+                              icon: const Icon(Icons.palette_outlined),
+                              label: const Text('自定义配色'),
+                              onPressed: _busy
+                                  ? null
+                                  : () async {
+                                      final colors = await _dialog<(int, int)>(
+                                        (_) =>
+                                            ReaderColorsDialog(theme: palette),
+                                      );
+                                      if (colors != null && mounted) {
+                                        await _change(
+                                          _settings.copyWith(
+                                            customBackground: colors.$1,
+                                            customText: colors.$2,
+                                            themeMode: ReaderThemeMode.manual,
+                                          ),
+                                        );
+                                      }
+                                    },
+                            ),
+                            if (_settings.customBackground != null ||
+                                _settings.customText != null)
+                              TextButton(
+                                onPressed: _busy
+                                    ? null
+                                    : () => _change(
+                                        _settings.copyWith(
+                                          clearCustomColors: true,
+                                        ),
+                                      ),
+                                child: const Text('恢复预设配色'),
+                              ),
+                          ],
                         ),
                         if (ReaderPlatform.capabilities.windowBrightness)
                           SwitchListTile(
@@ -590,12 +684,129 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                             ),
                           ),
                         ),
+                        if (ReaderPlatform.isMacOS)
+                          _section(
+                            '桌面阅读栏数',
+                            Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                _choices(
+                                  {
+                                    'auto': '自动',
+                                    'single': '单栏',
+                                    'double': '双栏',
+                                  },
+                                  _settings.desktopColumns,
+                                  (value) => _change(
+                                    _settings.copyWith(
+                                      desktopColumns: value,
+                                      pageMode: value == 'double'
+                                          ? true
+                                          : _settings.pageMode,
+                                    ),
+                                  ),
+                                ),
+                                const Text('双栏用于左右翻页；窗口过窄或文字过大时自动使用单栏。'),
+                                const SizedBox(height: 8),
+                                _section(
+                                  '栏间距',
+                                  _choices(
+                                    {
+                                      16.0: '窄 16',
+                                      24.0: '标准 24',
+                                      40.0: '宽 40',
+                                      64.0: '宽松 64',
+                                    },
+                                    _settings.columnGap,
+                                    (value) => _change(
+                                      _settings.copyWith(columnGap: value),
+                                    ),
+                                  ),
+                                ),
+                                _section(
+                                  '每行目标字数（随字号缩放）',
+                                  _choices(
+                                    {
+                                      0: '充满可用宽度',
+                                      24: '24 字',
+                                      32: '32 字',
+                                      40: '40 字',
+                                    },
+                                    _settings.lineCharacters,
+                                    (value) => _change(
+                                      _settings.copyWith(lineCharacters: value),
+                                    ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
                         ExpansionTile(
                           tilePadding: EdgeInsets.zero,
                           title: const Text('高级排版与操作'),
                           initiallyExpanded: _advanced,
                           onExpansionChanged: (value) => _advanced = value,
                           children: [
+                            SwitchListTile(
+                              contentPadding: EdgeInsets.zero,
+                              title: const Text('中文分页优化'),
+                              subtitle: const Text('尽量避免页尾开标点、续页闭标点和段落孤行'),
+                              value: _settings.smartTypography,
+                              onChanged: _busy
+                                  ? null
+                                  : (value) => _change(
+                                      _settings.copyWith(
+                                        smartTypography: value,
+                                      ),
+                                    ),
+                            ),
+                            _section(
+                              '简繁显示（不改写原文）',
+                              _choices(
+                                {
+                                  'original': '原文',
+                                  'simplified': '简体',
+                                  'traditional': '繁体',
+                                },
+                                _settings.displayScript,
+                                (value) => _change(
+                                  _settings.copyWith(displayScript: value),
+                                ),
+                              ),
+                            ),
+                            const Text(
+                              '简繁为离线逐字显示转换，复制、搜索、批注和听书仍使用原文；多义字可能需要人工判断。',
+                            ),
+                            if (ReaderPlatform.isMacOS)
+                              _section(
+                                '动画速度',
+                                _choices(
+                                  {.7: '舒缓', 1.0: '标准', 1.4: '快捷'},
+                                  _settings.animationSpeed,
+                                  (value) => _change(
+                                    _settings.copyWith(animationSpeed: value),
+                                  ),
+                                ),
+                              ),
+                            SwitchListTile(
+                              title: const Text('正文点击翻页'),
+                              subtitle: const Text('关闭后单击只打开菜单，键盘与滚轮仍可翻页'),
+                              contentPadding: EdgeInsets.zero,
+                              value: _settings.tapToTurn,
+                              onChanged: _busy
+                                  ? null
+                                  : (value) => _change(
+                                      _settings.copyWith(tapToTurn: value),
+                                    ),
+                            ),
+                            if (ReaderPlatform.isMacOS)
+                              TextButton.icon(
+                                onPressed: () => _dialog(
+                                  (_) => const ReaderShortcutsDialog(),
+                                ),
+                                icon: const Icon(Icons.keyboard_outlined),
+                                label: const Text('自定义阅读快捷键'),
+                              ),
                             _section(
                               '行间距',
                               _choices(

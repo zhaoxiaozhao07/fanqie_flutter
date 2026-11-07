@@ -5,6 +5,12 @@ import FlutterMacOS
 class AppDelegate: FlutterAppDelegate {
   private var quitPending = false
 
+  override func application(_ application: NSApplication, open urls: [URL]) {
+    guard !ReaderNativeTestHost.isRunning else { return }
+    ReaderExternalFileInbox.shared.enqueue(urls)
+    mainReaderWindow?.showReaderWindow()
+  }
+
   override func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
     return false
   }

@@ -13,6 +13,7 @@ import '../services/reader_content.dart';
 import 'package:flutter/rendering.dart';
 import 'package:flutter/scheduler.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter/gestures.dart';
 import '../models/book.dart';
 import '../models/chapter.dart';
 import '../models/comment.dart';
@@ -42,8 +43,11 @@ import '../services/reader_system_service.dart';
 import '../services/reader_pagination.dart';
 import '../services/reader_position_service.dart';
 import '../services/reader_font_service.dart';
+import '../services/reader_display_text.dart';
 import '../services/reader_cache_service.dart';
 import '../services/reader_platform.dart';
+import '../services/desktop_reader_layout.dart';
+import '../services/desktop_reader_preferences.dart';
 import '../services/desktop_commands.dart';
 import '../services/reader_text.dart';
 import '../services/tts_service.dart';
@@ -52,6 +56,14 @@ import '../widgets/paragraph_comment_sheet.dart';
 import '../widgets/reader_page_view.dart';
 import '../widgets/reader_comment_bubble.dart';
 import '../widgets/reader_cache_sheet.dart';
+import '../widgets/desktop_reader_directory.dart';
+import '../widgets/reader_chapter_jump_dialog.dart';
+import '../widgets/reader_modal.dart';
+import '../widgets/desktop_reader_selection.dart';
+import '../services/desktop_shortcut_preferences.dart';
+import '../services/reader_library_service.dart';
+import '../models/reading_selection.dart';
+import '../widgets/reader_undo.dart';
 
 class ReaderScreen extends StatefulWidget {
   final Book book;
@@ -59,11 +71,14 @@ class ReaderScreen extends StatefulWidget {
   final int initialChapterIndex;
   final bool resumeSavedPosition;
   final ReaderSettingsRecord? initialSettings;
+  final ReadingPosition? initialPosition;
   final Future<Directory> Function()? bookDocuments;
   final ApiService? apiService;
   final Future<String?> Function(Chapter chapter)? chapterContentLoader;
   final Future<ChapterCommentStats?> Function(Chapter chapter)?
   chapterCommentStatsLoader;
+  final bool offlineOnly;
+  final TtsService? ttsService;
 
   const ReaderScreen({
     super.key,
@@ -72,10 +87,13 @@ class ReaderScreen extends StatefulWidget {
     this.initialChapterIndex = 0,
     this.resumeSavedPosition = true,
     this.initialSettings,
+    this.initialPosition,
     this.bookDocuments,
     this.apiService,
     this.chapterContentLoader,
     this.chapterCommentStatsLoader,
+    this.offlineOnly = false,
+    this.ttsService,
   });
 
   @override
@@ -92,13 +110,58 @@ class _ReaderScreenState extends State<ReaderScreen>
   bool _readerRouteActive = true;
   bool _dependenciesReady = false;
   Size? _desktopViewport;
+  int _desktopColumns = 1;
+  bool _readingFullScreen = false;
+  bool _immersiveToolbarVisible = false;
+  bool _desktopDirectoryOpen = false;
+  bool _desktopDirectoryBuilt = false;
+  bool _desktopDirectoryDocked = false;
+  double _desktopDirectoryWidth = DesktopReaderPreferences.defaultWidth;
+  double? _desktopSidebarDragWidth;
+  bool _desktopSearchOpen = false;
+  bool _desktopSearchBuilt = false;
+  final _desktopSearchController = ReaderSearchController();
+  final _desktopSelectionController = DesktopReaderSelectionController();
+  static const _desktopToolbarHeight = 42.0;
   double? _desktopRestoredScrollOffset;
+  double? _desktopScrollTarget;
+  int _desktopScrollGeneration = 0;
   final _desktopFocus = FocusNode(debugLabel: 'desktop-reader');
+  Timer? _desktopTextTapTimer;
+  Offset? _desktopTextPointerStart;
+  bool _desktopPointerHadSelection = false;
   final ReadingActivityService _activity = ReadingActivityService();
   final ReaderNavigationHistory _jumpHistory = ReaderNavigationHistory();
   bool _navigationLoading = false;
   int _navigationGeneration = 0;
   ReaderSearchHit? _searchHighlight;
+  final _searchMarks = <(String, int), List<ReaderSearchHit>>{};
+  final _searchMarksVersion = ValueNotifier<int>(0);
+  void _updateSearchHighlights(
+    List<ReaderSearchHit> hits,
+    ReaderSearchHit? active,
+    bool showAll,
+  ) {
+    if (!mounted) return;
+    _searchMarks.clear();
+    if (showAll) {
+      for (final hit in hits) {
+        _searchMarks
+            .putIfAbsent((
+              hit.position.chapterId,
+              hit.position.paragraphIndex,
+            ), () => [])
+            .add(hit);
+      }
+    }
+    if (active != null) {
+      _searchHighlight = active;
+    } else if (hits.isEmpty) {
+      _searchHighlight = null;
+    }
+    _searchMarksVersion.value++;
+  }
+
   Timer? _restTimer;
   int _restSeconds = 0;
   late final ApiService _apiService = widget.apiService ?? ApiService();
@@ -130,6 +193,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   late final Listenable _paragraphSignals = Listenable.merge([
     _commentStatsVersionNotifier,
     _ttsHighlightNotifier,
+    _searchMarksVersion,
   ]);
   ReaderLayout? _pageLayout;
   Object? _preparedLayoutKey;
@@ -149,6 +213,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<void> _preferencesWrites = Future.value();
   Future<void>? _notesRequest;
   Object? _ttsPaintKey;
+  bool _ttsLayoutActive = false;
+  bool _ttsAttached = false;
   DateTime _manualScrollUntil = DateTime.fromMillisecondsSinceEpoch(0);
   Duration _lastAutoElapsed = Duration.zero;
   bool _resumeAutoAfterLifecycle = false;
@@ -209,13 +275,17 @@ class _ReaderScreenState extends State<ReaderScreen>
   late int _currentActiveIndex;
   late final ValueNotifier<int> _activeChapterNotifier;
   double _lastDetectPixels = 0.0;
-  final TtsService _ttsService = TtsService();
+  late final TtsService _ttsService = widget.ttsService ?? TtsService();
   bool _isLoadingHead = true;
   bool _isLoadingPrev = false;
   bool _isLoadingMore = false;
   String? _errorMessage;
   bool get _showControls => _controlsNotifier.value;
-  set _showControls(bool value) => _controlsNotifier.value = value;
+  set _showControls(bool value) {
+    if (value) _immersiveToolbarVisible = false;
+    _controlsNotifier.value = value;
+  }
+
   bool _isInBookshelf = false;
   bool _isCurrentChapterBookmarked = false;
 
@@ -237,9 +307,13 @@ class _ReaderScreenState extends State<ReaderScreen>
       !_ttsService.isActive &&
       _readerPanels == 0;
   bool get _showReaderHeader =>
-      !_readerPreferences.pureMode && _readerPreferences.showHeader;
+      !_readingFullScreen &&
+      !_readerPreferences.pureMode &&
+      _readerPreferences.showHeader;
   bool get _showReaderStatus =>
-      !_readerPreferences.pureMode && _readerPreferences.showStatus;
+      !_readingFullScreen &&
+      !_readerPreferences.pureMode &&
+      _readerPreferences.showStatus;
   bool _showCommentBubbles = true; // 是否显示段评气泡
   bool _indentTwoChars = true; // 首行缩进两字符
   double _letterSpacing = 0.5; // 字间距
@@ -263,19 +337,21 @@ class _ReaderScreenState extends State<ReaderScreen>
   Ticker? _autoScrollTicker;
 
   String? _resolveFontFamily(String font) {
-    switch (font) {
-      case 'kaiti':
-        return 'ReaderKaiTi';
-      case 'serif':
-        return 'ReaderSongTi';
-      case 'sans-serif':
-        return 'sans-serif';
-      default:
-        return null;
-    }
+    return ReaderFontService.familyFor(font);
   }
 
-  static const List<ReaderTheme> _themes = ReaderTheme.presets;
+  List<ReaderTheme> get _themes =>
+      _readerPreferences.customBackground == null &&
+          _readerPreferences.customText == null
+      ? ReaderTheme.presets
+      : ReaderTheme.presets
+            .map(
+              (theme) => theme.withColors(
+                background: _readerPreferences.customBackground,
+                text: _readerPreferences.customText,
+              ),
+            )
+            .toList();
 
   bool get _systemDark => _dependenciesReady
       ? MediaQuery.platformBrightnessOf(context) == Brightness.dark
@@ -298,6 +374,10 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void didPush() {
+    if (!_ttsAttached) {
+      _ttsService.attachReader(widget.book.bookId);
+      _ttsAttached = true;
+    }
     _readerRouteActive = true;
     _updateDesktopCommands();
     _attachActivity();
@@ -315,6 +395,10 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void didPushNext() {
+    if (_ttsAttached) {
+      _ttsService.detachReader(widget.book.bookId);
+      _ttsAttached = false;
+    }
     _activity.detach(this);
     _restTimer?.cancel();
     _readerRouteActive = false;
@@ -338,6 +422,10 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void didPop() {
+    if (_ttsAttached) {
+      _ttsService.detachReader(widget.book.bookId);
+      _ttsAttached = false;
+    }
     _activity.detach(this);
     _readerRouteActive = false;
     _updateDesktopCommands();
@@ -349,6 +437,15 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void didChangePlatformBrightness() => _refreshAutomaticTheme();
+
+  @override
+  void didChangeMetrics() {
+    // Metrics arrive before the next layout frame. Cancel a delayed single
+    // click now: its double-click timer can expire before LayoutBuilder sees
+    // the resized window, otherwise old coordinates can turn the wrong page.
+    _desktopTextTapTimer?.cancel();
+    _desktopTextPointerStart = null;
+  }
 
   void _applyWindowBrightness() {
     if (!mounted || !_readerRouteActive) return;
@@ -417,13 +514,23 @@ class _ReaderScreenState extends State<ReaderScreen>
     _loadNotes();
     _bookmarkService.changeNotifier.addListener(_loadNotes);
     _activeSelectableParaNotifier.addListener(_onReaderSelectionChanged);
+    _desktopSelectionController.addListener(_onDesktopSelectionChanged);
     _loadPreferences().then((_) async {
       final saved = widget.resumeSavedPosition
           ? await _positionService.loadSnapshot(widget.book.bookId)
           : null;
       if (!mounted) return;
       final target = saved?.resolve(widget.chapters);
-      if (target != null) {
+      final explicit = widget.initialPosition;
+      final explicitIndex = explicit == null
+          ? null
+          : _chapterIndexById[explicit.chapterId];
+      if (explicit != null && explicitIndex != null) {
+        _currentActiveIndex = explicitIndex;
+        _activeChapterNotifier.value = explicitIndex;
+        _anchorChapterIndex = explicitIndex;
+        _readingPosition = explicit;
+      } else if (target != null) {
         _currentActiveIndex = target.chapterIndex;
         _activeChapterNotifier.value = target.chapterIndex;
         _anchorChapterIndex = target.chapterIndex;
@@ -444,6 +551,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     });
     _scrollController.addListener(_onScroll);
     _ttsService.attachReader(widget.book.bookId);
+    _ttsAttached = true;
     _ttsService.addListener(_onTtsStateChanged);
 
     // 启用阅读屏幕常亮与定时电量/时间更新
@@ -461,6 +569,8 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   void dispose() {
+    _desktopTextTapTimer?.cancel();
+    _desktopSelectionController.dispose();
     DesktopCommands.register(this, null);
     ReaderSystemService.registerSaveParticipant(this, null);
     _desktopFocus.dispose();
@@ -488,7 +598,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _savePositionNow(notify: false);
     _flushPreferences();
     _ttsService.removeListener(_onTtsStateChanged);
-    _ttsService.detachReader(widget.book.bookId);
+    if (_ttsAttached) _ttsService.detachReader(widget.book.bookId);
     _ttsStartGeneration++;
     // The service owns the playlist; leaving this route must not stop audio.
     _bookmarkService.changeNotifier.removeListener(_checkBookmarkStatus);
@@ -505,6 +615,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _autoRunningNotifier.dispose();
     _autoControlsVersion.dispose();
     _ttsHighlightNotifier.dispose();
+    _searchMarksVersion.dispose();
     _positionVersion.dispose();
     _chapterWaitingNotifier.dispose();
     _restorationImage?.dispose();
@@ -532,6 +643,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     if (key == _ttsPaintKey) return;
     _ttsPaintKey = key;
+    if (ReaderPlatform.isMacOS && _ttsLayoutActive != _ttsService.isActive) {
+      _applyReaderSetting(
+        () => _ttsLayoutActive = _ttsService.isActive,
+        layoutChanged: true,
+        persist: false,
+      );
+    }
     ReaderSystemService.setVolumeKeyScrollEnabled(
       _canUseVolumeKeys,
       owner: this,
@@ -695,13 +813,15 @@ class _ReaderScreenState extends State<ReaderScreen>
             : note.chapterIndex != chapterIndex) {
           continue;
         }
-        final resolved = NoteAnchorResolver.resolve(
+        final resolved = NoteAnchorResolver.resolveAll(
           note,
           paragraphs,
           chapterHash: hash,
         );
         if (resolved != null) {
-          grouped.putIfAbsent(resolved.paragraphIndex, () => []).add(resolved);
+          for (final range in resolved) {
+            grouped.putIfAbsent(range.paragraphIndex, () => []).add(range);
+          }
         }
       }
       cached = _ResolvedChapterNotes(paragraphs, _notesVersion, grouped);
@@ -760,6 +880,15 @@ class _ReaderScreenState extends State<ReaderScreen>
         colorIndex: edit?.colorIndex ?? 0,
         tags: edit?.tags ?? const [],
       );
+      try {
+        await _bookmarkService.rememberBook(widget.book);
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('笔记已保存，但书籍名称索引未保存。原笔记未改变。')),
+          );
+        }
+      }
       return true;
     } catch (_) {
       if (mounted) {
@@ -823,20 +952,31 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<void> _showNotesManagement() async {
+    if (_readerPanels > 0) return;
     _beginReaderPanel();
-    final note = await showModalBottomSheet<ReadingNote>(
+    final note = await showReaderModal<ReadingNote>(
       context: context,
-      isScrollControlled: true,
       backgroundColor: _themes[_themeIndex].backgroundColor,
-      builder: (_) => FractionallySizedBox(
-        heightFactor: .9,
-        child: ReaderNotesSheet(book: widget.book, theme: _themes[_themeIndex]),
-      ),
+      heightFactor: .9,
+      builder: (_) =>
+          ReaderNotesSheet(book: widget.book, theme: _themes[_themeIndex]),
     ).whenComplete(_endReaderPanel);
     if (mounted && note != null) await _openReadingNote(note);
   }
 
   Future<void> _toggleBookmark() async {
+    try {
+      await _toggleBookmarkUnsafe();
+    } catch (_) {
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('书签操作未保存，原记录保留；请检查存储后重试')));
+      }
+    }
+  }
+
+  Future<void> _toggleBookmarkUnsafe() async {
     final current =
         _captureReadingPosition() ??
         _readingPosition ??
@@ -849,14 +989,11 @@ class _ReaderScreenState extends State<ReaderScreen>
       current.characterOffset,
     );
     if (bookmarked != null) {
-      await _bookmarkService.removeBookmark(bookmarked.id, widget.book.bookId);
+      final undo = await _bookmarkService.deleteBookmarks(widget.book.bookId, {
+        bookmarked.id,
+      });
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('已移除书签'),
-            duration: Duration(seconds: 1),
-          ),
-        );
+        if (undo != null) showReaderUndo(context, '书签已移入回收站', [undo]);
       }
     } else {
       final chapter = widget.chapters[_currentActiveIndex];
@@ -918,7 +1055,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     _indentTwoChars = value.indent;
     _isPageMode = value.pageMode;
     _pageTurnAnimation = value.pageAnimation;
-    _showCommentBubbles = value.commentBubbles && !value.pureMode;
+    _showCommentBubbles =
+        value.commentBubbles && !value.pureMode && !widget.offlineOnly;
     _volumeKeyScroll = value.volumeKeys;
     _tapLayout = value.tapLayout;
     _themeIndex = value.effectiveTheme(
@@ -936,6 +1074,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     value.fontFamily,
     value.indent,
     value.pageMode,
+    value.desktopColumns,
+    value.columnGap,
+    value.lineCharacters,
+    value.smartTypography,
+    value.displayScript,
     value.commentBubbles,
     value.pureMode,
     value.showHeader,
@@ -954,6 +1097,10 @@ class _ReaderScreenState extends State<ReaderScreen>
               now: DateTime.now(),
             ) ||
         before.pageAnimation != value.pageAnimation ||
+        before.animationSpeed != value.animationSpeed ||
+        before.tapToTurn != value.tapToTurn ||
+        before.customBackground != value.customBackground ||
+        before.customText != value.customText ||
         before.tapLayout != value.tapLayout;
     void apply() {
       _assignReaderSettings(value);
@@ -993,6 +1140,13 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _loadPreferences() async {
     _cachePolicy = await ReaderCachePolicy.load();
+    if (ReaderPlatform.isMacOS) {
+      final workspace = await DesktopReaderPreferences.load();
+      if (!mounted) return;
+      _desktopDirectoryOpen = workspace.directoryOpen;
+      _desktopDirectoryBuilt = workspace.directoryOpen;
+      _desktopDirectoryWidth = workspace.sidebarWidth;
+    }
     final record =
         widget.initialSettings ??
         await _settingsRepository.load(widget.book.bookId);
@@ -1002,9 +1156,17 @@ class _ReaderScreenState extends State<ReaderScreen>
     _applyWindowBrightness();
     _configureRestReminder();
     try {
+      await ReaderDisplayText.ensureLoaded();
       await ReaderFontService.ensureLoaded(_fontFamily);
     } catch (_) {
-      if (mounted) setState(() => _fontFamily = 'system');
+      if (mounted) {
+        // Preserve the preference and source anchors if a referenced font is
+        // missing. Rendering falls back; a read must not rewrite this setting.
+        setState(() {});
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('所选字体丢失或损坏，暂用系统字体；可在设置中重新导入')),
+        );
+      }
     }
   }
 
@@ -1047,6 +1209,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       await _writeReadingSnapshot(position, updateSummary: true);
     }
     await _flushPreferences();
+    await DesktopReaderPreferences.flush();
     if (_preferencesDirty) throw StateError('阅读设置尚未保存');
   }
 
@@ -1067,15 +1230,64 @@ class _ReaderScreenState extends State<ReaderScreen>
       case 'find':
         unawaited(_showReaderSearch());
         return true;
+      case 'findNext':
+      case 'findPrevious':
+        if (_desktopSearchBuilt &&
+            (!_desktopTextHasFocus || _desktopSearchController.hasQueryFocus)) {
+          unawaited(
+            _desktopSearchController.next(backwards: command == 'findPrevious'),
+          );
+        }
+        return true;
+      case 'back':
+      case 'forward':
+        if (!_desktopTextHasFocus && !_navigationLoading) {
+          unawaited(_traverseHistory(forward: command == 'forward'));
+        }
+        return true;
       case 'bookmark':
         unawaited(_toggleBookmark());
         return true;
       case 'settings':
         unawaited(_showSettingsModal());
         return true;
+      case 'directory':
+        _toggleDesktopDirectory();
+        return true;
+      case 'jump':
+        unawaited(_showChapterJump());
+        return true;
+      case 'fontIncrease':
+      case 'fontDecrease':
+      case 'fontReset':
+        if (_desktopTextHasFocus) return true;
+        _applyReaderSetting(() {
+          final size = switch (command) {
+            'fontIncrease' => _fontSize + 1,
+            'fontDecrease' => _fontSize - 1,
+            _ => const ReaderSettings().fontSize,
+          };
+          _assignReaderSettings(
+            _captureReaderSettings().copyWith(fontSize: size),
+          );
+        });
+        return true;
+      case 'shortcuts':
+        unawaited(_showDesktopShortcutHelp());
+        return true;
+      case 'immersion':
+        if (!_desktopTextHasFocus) _setReadingFullScreen(!_readingFullScreen);
+        return true;
       default:
         return false;
     }
+  }
+
+  bool get _desktopTextHasFocus {
+    final focus = FocusManager.instance.primaryFocus?.context;
+    return _activeSelectableParaNotifier.value != null ||
+        focus?.widget is EditableText ||
+        focus?.findAncestorWidgetOfExactType<EditableText>() != null;
   }
 
   KeyEventResult _desktopKey(FocusNode node, KeyEvent event) {
@@ -1083,36 +1295,267 @@ class _ReaderScreenState extends State<ReaderScreen>
       return KeyEventResult.ignored;
     }
     final keyboard = HardwareKeyboard.instance;
-    final focus = FocusManager.instance.primaryFocus?.context;
-    if (_readerPanels > 0 ||
-        _activeSelectableParaNotifier.value != null ||
-        !(ModalRoute.of(context)?.isCurrent ?? false) ||
-        focus?.findAncestorWidgetOfExactType<EditableText>() != null ||
-        keyboard.isMetaPressed ||
-        keyboard.isControlPressed ||
-        keyboard.isAltPressed ||
-        keyboard.isShiftPressed) {
+    if (_readerPanels > 0 || !(ModalRoute.of(context)?.isCurrent ?? false)) {
       return KeyEventResult.ignored;
     }
     final key = event.logicalKey;
+    final remapped = DesktopShortcutPreferences().match(event);
+    if (remapped != null &&
+        !_desktopTextHasFocus &&
+        _desktopCommand(remapped)) {
+      return KeyEventResult.handled;
+    }
+    if (event is KeyDownEvent &&
+        keyboard.isMetaPressed &&
+        !keyboard.isControlPressed &&
+        !keyboard.isAltPressed) {
+      final command = switch (key) {
+        LogicalKeyboardKey.bracketLeft when !keyboard.isShiftPressed => 'back',
+        LogicalKeyboardKey.bracketRight when !keyboard.isShiftPressed =>
+          'forward',
+        LogicalKeyboardKey.keyG =>
+          keyboard.isShiftPressed ? 'findPrevious' : 'findNext',
+        LogicalKeyboardKey.keyJ when !keyboard.isShiftPressed => 'jump',
+        LogicalKeyboardKey.keyD when keyboard.isShiftPressed => 'directory',
+        LogicalKeyboardKey.equal || LogicalKeyboardKey.add => 'fontIncrease',
+        LogicalKeyboardKey.minus when !keyboard.isShiftPressed =>
+          'fontDecrease',
+        LogicalKeyboardKey.digit0 when !keyboard.isShiftPressed => 'fontReset',
+        _ => null,
+      };
+      if (command != null &&
+          !DesktopShortcutPreferences().overridden(command) &&
+          _desktopCommand(command)) {
+        return KeyEventResult.handled;
+      }
+    }
+    if (_desktopTextHasFocus ||
+        keyboard.isMetaPressed ||
+        keyboard.isControlPressed ||
+        keyboard.isAltPressed) {
+      return KeyEventResult.ignored;
+    }
+    if (event is KeyDownEvent && key == LogicalKeyboardKey.escape) {
+      if (_navigationLoading) {
+        _cancelNavigation();
+      } else if (_readingFullScreen) {
+        _setReadingFullScreen(false);
+      } else if (_showControls) {
+        _showControls = false;
+      } else if (_desktopDirectoryOpen) {
+        _toggleDesktopDirectory();
+      } else if (_desktopSearchOpen) {
+        _closeDesktopSearch();
+      } else {
+        return KeyEventResult.ignored;
+      }
+      return KeyEventResult.handled;
+    }
+    if (event is KeyDownEvent &&
+        !keyboard.isShiftPressed &&
+        key == LogicalKeyboardKey.f11 &&
+        !DesktopShortcutPreferences().overridden('immersion')) {
+      _setReadingFullScreen(!_readingFullScreen);
+      return KeyEventResult.handled;
+    }
+    if (event is KeyDownEvent && key == LogicalKeyboardKey.f1) {
+      unawaited(_showDesktopShortcutHelp());
+      return KeyEventResult.handled;
+    }
+    if (event is KeyDownEvent && key == LogicalKeyboardKey.f3) {
+      _desktopCommand(keyboard.isShiftPressed ? 'findPrevious' : 'findNext');
+      return KeyEventResult.handled;
+    }
+    if (keyboard.isShiftPressed && key != LogicalKeyboardKey.space) {
+      return KeyEventResult.ignored;
+    }
+    if (key == LogicalKeyboardKey.home || key == LogicalKeyboardKey.end) {
+      if (event is KeyDownEvent) {
+        unawaited(_goToChapterEdge(end: key == LogicalKeyboardKey.end));
+      }
+      return KeyEventResult.handled;
+    }
     final forward =
         key == LogicalKeyboardKey.pageDown ||
+        (key == LogicalKeyboardKey.space && !keyboard.isShiftPressed) ||
         (_isPageMode && key == LogicalKeyboardKey.arrowRight);
     final backward =
         key == LogicalKeyboardKey.pageUp ||
+        (key == LogicalKeyboardKey.space && keyboard.isShiftPressed) ||
         (_isPageMode && key == LogicalKeyboardKey.arrowLeft);
+    if (!_isPageMode &&
+        (key == LogicalKeyboardKey.arrowDown ||
+            key == LogicalKeyboardKey.arrowUp)) {
+      _onUserPageTurn();
+      _scrollDesktop(
+        (MediaQuery.textScalerOf(context).scale(_fontSize) * _lineHeight).clamp(
+              24.0,
+              160.0,
+            ) *
+            (key == LogicalKeyboardKey.arrowDown ? 1 : -1),
+      );
+      return KeyEventResult.handled;
+    }
     if (!forward && !backward) return KeyEventResult.ignored;
     if (_navigationLoading) _cancelNavigation();
-    _pauseAutoScroll();
+    _onUserPageTurn();
     if (_isPageMode) {
-      _onUserPageTurn();
       forward
           ? _pageViewKey.currentState?.turnToNextPage()
           : _pageViewKey.currentState?.turnToPreviousPage();
-    } else if (!_volumeAnimating) {
-      unawaited(_animateVolumeScroll(forward ? 'down' : 'up'));
+    } else if (_scrollController.hasClients) {
+      _scrollDesktop(
+        _scrollController.position.viewportDimension * .85 * (forward ? 1 : -1),
+      );
     }
     return KeyEventResult.handled;
+  }
+
+  void _cancelDesktopScroll({bool stop = false}) {
+    final running = _desktopScrollTarget != null;
+    _desktopScrollTarget = null;
+    _desktopScrollGeneration++;
+    if (stop && running && _scrollController.hasClients) {
+      _scrollController.jumpTo(_scrollController.offset);
+    }
+  }
+
+  /// Retarget repeated keys instead of dropping them while animateTo is busy.
+  /// Native wheel/trackpad input remains native and can interrupt this motion.
+  void _scrollDesktop(double delta) {
+    if (!_scrollController.hasClients || _restoringPosition) return;
+    final position = _scrollController.position;
+    final pending = _desktopScrollTarget;
+    final reversing =
+        pending != null && (pending - position.pixels) * delta < 0;
+    final target =
+        ((reversing ? position.pixels : pending ?? position.pixels) + delta)
+            .clamp(position.minScrollExtent, position.maxScrollExtent);
+    final generation = ++_desktopScrollGeneration;
+    if (MediaQuery.disableAnimationsOf(context)) {
+      _desktopScrollTarget = null;
+      _scrollController.jumpTo(target);
+      _schedulePositionSave();
+      return;
+    }
+    _desktopScrollTarget = target;
+    unawaited(
+      _scrollController
+          .animateTo(
+            target,
+            duration: const Duration(milliseconds: 180),
+            curve: Curves.easeOutCubic,
+          )
+          .whenComplete(() {
+            if (!mounted || generation != _desktopScrollGeneration) return;
+            _desktopScrollTarget = null;
+            _schedulePositionSave();
+          }),
+    );
+  }
+
+  Future<void> _goToChapterEdge({required bool end}) async {
+    if (_isLoadingHead || !_chapterCache.containsKey(_currentActiveIndex)) {
+      return;
+    }
+    final paragraphs = _getChapterParagraphs(_currentActiveIndex);
+    await _navigateTo(
+      ReadingPosition(
+        chapterId: widget.chapters[_currentActiveIndex].itemId,
+        paragraphIndex: end ? math.max(0, paragraphs.length - 1) : 0,
+        characterOffset: end && paragraphs.isNotEmpty
+            ? math.max(0, paragraphs.last.trim().length - 1)
+            : 0,
+      ),
+    );
+  }
+
+  Future<void> _showChapterJump() async {
+    if (_readerPanels > 0 || widget.chapters.isEmpty) return;
+    _beginReaderPanel();
+    int? index;
+    try {
+      index = await showDialog<int>(
+        context: context,
+        builder: (_) => _themes[_themeIndex].wrap(
+          ReaderChapterJumpDialog(
+            chapters: widget.chapters,
+            currentIndex: _currentActiveIndex,
+          ),
+        ),
+      );
+    } finally {
+      _endReaderPanel();
+    }
+    if (mounted && index != null) {
+      await _navigateTo(
+        ReadingPosition(chapterId: widget.chapters[index].itemId),
+      );
+    }
+  }
+
+  Future<void> _showDesktopShortcutHelp() async {
+    if (_readerPanels > 0) return;
+    _beginReaderPanel();
+    try {
+      await showDialog<void>(
+        context: context,
+        builder: (context) => _themes[_themeIndex].wrap(
+          AlertDialog(
+            title: const Text('阅读快捷键'),
+            content: SizedBox(
+              width: 440,
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    for (final entry in const {
+                      'Space / ⇧Space': '下一屏 / 上一屏',
+                      'Page Down / Page Up': '下一屏 / 上一屏',
+                      '← / →': '分页模式：上一页 / 下一页',
+                      '↑ / ↓': '滚动模式：逐行滚动',
+                      'Home / End': '本章开头 / 结尾',
+                      '⌘J': '按序号跳转章节',
+                      '⌘⇧D': '显示 / 隐藏目录',
+                      '⌘F': '正文搜索',
+                      '⌘G / ⌘⇧G / F3': '下一处 / 上一处正文匹配',
+                      '⌘[ / ⌘]': '后退 / 前进到阅读位置',
+                      '⌘D': '添加 / 移除书签',
+                      '⌘+ / ⌘− / ⌘0': '增大 / 缩小 / 重置字号',
+                      '⌘,': '阅读设置',
+                      'F11 / Esc': '切换 / 退出沉浸阅读',
+                    }.entries)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Row(
+                          children: [
+                            Expanded(child: Text(entry.key)),
+                            const SizedBox(width: 12),
+                            Expanded(child: Text(entry.value)),
+                          ],
+                        ),
+                      ),
+                    const SizedBox(height: 12),
+                    const Text(
+                      '输入框、中文输入法和正文选区优先，不会触发误翻页。',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('关闭'),
+              ),
+            ],
+          ),
+        ),
+      );
+    } finally {
+      _endReaderPanel();
+    }
   }
 
   void _onVolumeScroll(String direction) {
@@ -1181,6 +1624,7 @@ class _ReaderScreenState extends State<ReaderScreen>
             : ReadingPosition(chapterId: chapter.itemId),
         updateSummary: true,
       );
+      await ReaderLibraryService().markReading(widget.book.bookId);
     } catch (_) {}
   }
 
@@ -1240,9 +1684,12 @@ class _ReaderScreenState extends State<ReaderScreen>
       final id = _pageViewKey.currentState?.currentPageId;
       if (id is _ReaderPageAddress) {
         final anchor = _readingPosition;
-        if (anchor?.chapterId == id.layout.chapterId &&
-            id.layout.pageFor(anchor!) == id.pageIndex) {
-          return anchor;
+        if (anchor?.chapterId == id.layout.chapterId) {
+          final anchorPage = id.layout.pageFor(anchor!);
+          if (anchorPage >= id.pageIndex &&
+              anchorPage < id.pageIndex + _desktopColumns) {
+            return anchor;
+          }
         }
         return id.page.position(id.layout.chapterId);
       }
@@ -1328,11 +1775,17 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
   }
 
+  double get _textWidthInset =>
+      ReaderPlatform.isMacOS ? ReaderLayout.selectableTextInset : 0;
+
   TextPainter _paragraphPainter(String text, double width) => TextPainter(
-    text: TextSpan(text: text, style: _readerBodyStyle()),
+    text: TextSpan(
+      text: ReaderDisplayText.convert(text, _readerPreferences.displayScript),
+      style: _readerBodyStyle(),
+    ),
     textDirection: TextDirection.ltr,
     textScaler: MediaQuery.textScalerOf(context),
-  )..layout(maxWidth: math.max(1, width).toDouble());
+  )..layout(maxWidth: math.max(1, width - _textWidthInset).toDouble());
 
   TextStyle _readerBodyStyle({Color? color}) => TextStyle(
     inherit: false,
@@ -1345,6 +1798,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     letterSpacing: _letterSpacing,
     wordSpacing: 0,
     fontFamily: _resolveFontFamily(_fontFamily) ?? 'Roboto',
+    fontFamilyFallback: const ['sans-serif', 'Roboto'],
+    locale: _readerPreferences.displayScript == 'traditional'
+        ? const Locale('zh', 'TW')
+        : const Locale('zh', 'CN'),
   );
 
   double _estimatedParagraphHeight(int chapterIndex, int paragraphIndex) {
@@ -1566,6 +2023,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     bool persist = true,
   }) {
     if (!mounted) return;
+    _cancelDesktopScroll(stop: true);
+    _desktopTextTapTimer?.cancel();
+    _desktopTextPointerStart = null;
     if (_pageViewKey.currentState?.isBusy == true) {
       _pendingSettings.add(
         () => _applyReaderSetting(
@@ -1681,6 +2141,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _onUserPageTurn() {
+    _desktopTextTapTimer?.cancel();
     _activity.interact(this);
     _manualScrollUntil = DateTime.now().add(const Duration(seconds: 3));
     _pauseAutoScroll();
@@ -1755,6 +2216,10 @@ class _ReaderScreenState extends State<ReaderScreen>
     ReadingNote? readingNote,
   }) async {
     if (!mounted) return false;
+    _cancelDesktopScroll(stop: true);
+    _desktopTextTapTimer?.cancel();
+    _desktopSelectionController.clear();
+    _activeSelectableParaNotifier.value = null;
     _activity.breakSequence();
     _activity.interact(this);
     final index = _chapterIndexById[target.chapterId];
@@ -1842,11 +2307,21 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<void> _returnFromJump() async {
-    final target = _jumpHistory.previous;
-    if (target == null) return;
+    await _traverseHistory();
+  }
+
+  Future<void> _traverseHistory({bool forward = false}) async {
+    if (_navigationLoading) return;
+    final target = forward ? _jumpHistory.next : _jumpHistory.previous;
+    final origin = _captureReadingPosition() ?? _readingPosition;
+    if (target == null || origin == null) return;
     if (await _navigateTo(target, remember: false) && mounted) {
       setState(() {
-        _jumpHistory.returnedTo(target);
+        if (forward) {
+          _jumpHistory.advancedTo(target, origin: origin);
+        } else {
+          _jumpHistory.returnedTo(target, origin: origin);
+        }
         _readingPosition = target;
         _positionNeedsReflow = true;
       });
@@ -1887,8 +2362,10 @@ class _ReaderScreenState extends State<ReaderScreen>
                     ),
                   )
                 : TextButton.icon(
-                    key: const ValueKey('reader_jump_back'),
-                    onPressed: _returnFromJump,
+                    key: _jumpHistory.canGoBack
+                        ? const ValueKey('reader_jump_back')
+                        : null,
+                    onPressed: _jumpHistory.canGoBack ? _returnFromJump : null,
                     icon: Icon(Icons.undo, color: theme.textColor),
                     label: Text(
                       '返回原阅读位置',
@@ -1897,6 +2374,14 @@ class _ReaderScreenState extends State<ReaderScreen>
                       style: TextStyle(color: theme.textColor, fontSize: 13),
                     ),
                   ),
+          ),
+          IconButton(
+            key: const ValueKey('reader_jump_forward'),
+            tooltip: '前进到阅读位置',
+            onPressed: !_navigationLoading && _jumpHistory.canGoForward
+                ? () => _traverseHistory(forward: true)
+                : null,
+            icon: Icon(Icons.redo, color: theme.secondaryColor),
           ),
           IconButton(
             tooltip: _navigationLoading ? '取消跳转' : '清空跳转记录',
@@ -1919,32 +2404,47 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _showReaderSearch() async {
     if (_readerPanels > 0) return;
+    if (ReaderPlatform.isMacOS) {
+      if (!_desktopSearchOpen || _readingFullScreen) {
+        _pauseAutoScroll();
+        _applyReaderSetting(() {
+          _desktopSearchBuilt = true;
+          _desktopSearchOpen = true;
+          _desktopDirectoryOpen = false;
+          _readingFullScreen = false;
+          _showControls = false;
+          _saveDesktopWorkspace();
+          // The action can be queued behind an animation. Focus only after the
+          // panel is actually mounted, rather than just after the key event.
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted && _desktopSearchOpen) _desktopSearchController.focus();
+          });
+        }, persist: false);
+      }
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted && _desktopSearchOpen) _desktopSearchController.focus();
+      });
+      return;
+    }
     _beginReaderPanel();
     ReaderSearchHit? hit;
     try {
       final position = _captureReadingPosition();
-      hit = await showModalBottomSheet<ReaderSearchHit>(
+      hit = await showReaderModal<ReaderSearchHit>(
         context: context,
-        isScrollControlled: true,
         backgroundColor: _themes[_themeIndex].backgroundColor,
-        builder: (context) => Padding(
-          padding: EdgeInsets.only(
-            bottom: MediaQuery.viewInsetsOf(context).bottom,
-          ),
-          child: FractionallySizedBox(
-            heightFactor: .9,
-            child: ReaderSearchSheet(
-              bookId: widget.book.bookId,
-              chapters: widget.chapters,
-              chapterIndex:
-                  _chapterIndexById[position?.chapterId] ?? _currentActiveIndex,
-              canonicalMemory: {
-                for (final entry in _chapterCache.entries)
-                  widget.chapters[entry.key].itemId: entry.value,
-              },
-              theme: _themes[_themeIndex],
-            ),
-          ),
+        heightFactor: .9,
+        builder: (context) => ReaderSearchSheet(
+          bookId: widget.book.bookId,
+          chapters: widget.chapters,
+          chapterIndex:
+              _chapterIndexById[position?.chapterId] ?? _currentActiveIndex,
+          canonicalMemory: {
+            for (final entry in _chapterCache.entries)
+              widget.chapters[entry.key].itemId: entry.value,
+          },
+          theme: _themes[_themeIndex],
+          onHighlightsChanged: _updateSearchHighlights,
         ),
       );
     } finally {
@@ -2279,6 +2779,14 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   /// 自动向上拉伸追加上一章（实现双向无缝连续阅读）
   Future<bool> _mayAutoLoad(int index) async {
+    if (widget.offlineOnly) {
+      return widget.chapters[index].content != null ||
+          await _apiService.engine.readerCache.read(
+                widget.book.bookId,
+                widget.chapters[index].itemId,
+              ) !=
+              null;
+    }
     if (_chapterCache.containsKey(index) ||
         widget.chapters[index].content != null) {
       return true;
@@ -2409,6 +2917,11 @@ class _ReaderScreenState extends State<ReaderScreen>
         content = await widget.chapterContentLoader!(chapter).timeout(
           const Duration(seconds: 30),
         );
+      } else if (content == null && widget.offlineOnly) {
+        content = await _apiService.engine.readerCache.read(
+          widget.book.bookId,
+          chapter.itemId,
+        );
       } else if (content == null) {
         _chapterIsOffline[index] = await _apiService.isChapterOffline(
           widget.book.bookId,
@@ -2423,6 +2936,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         throw const FormatException('章节为空、未完整提供或本地文件已缺失');
       }
       final online =
+          !widget.offlineOnly &&
           !widget.book.bookId.startsWith('local_') &&
           widget.chapterContentLoader == null &&
           chapter.content == null;
@@ -2445,6 +2959,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       _chapterCache[index] = formatted;
       _chapterParagraphsCache[index] = formatted.split('\n\n');
       _chapterIsOffline[index] =
+          widget.offlineOnly ||
           chapter.content != null ||
           (widget.chapterContentLoader == null &&
               await _apiService.isChapterOffline(
@@ -2533,6 +3048,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _fetchCommentStats(String itemId) {
+    if (widget.offlineOnly) return;
     if (!_showCommentBubbles || widget.book.bookId.startsWith('local_')) return;
     final key = 'stats:$itemId';
     if (_chapterCommentStats.containsKey(itemId) ||
@@ -2560,6 +3076,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _fetchChapterCommentsCount(String itemId) {
+    if (widget.offlineOnly) return;
     if (_readerPreferences.pureMode) return;
     if (widget.book.bookId.startsWith('local_')) return;
     final key = 'count:$itemId';
@@ -2703,6 +3220,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _beginReaderPanel() {
+    _cancelDesktopScroll(stop: true);
+    _desktopTextTapTimer?.cancel();
     _pageViewKey.currentState?.clearQueuedTurns();
     if (_readerPanels++ == 0) _panelsClosed = Completer<void>();
     _updateDesktopCommands();
@@ -2717,6 +3236,15 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (_readerPanels > 0) _readerPanels--;
     _updateDesktopCommands();
     if (_readerPanels == 0) {
+      if (ReaderPlatform.isMacOS) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted &&
+              _readerPanels == 0 &&
+              (ModalRoute.of(context)?.isCurrent ?? false)) {
+            _desktopFocus.requestFocus();
+          }
+        });
+      }
       if (_panelsClosed != null && !_panelsClosed!.isCompleted) {
         _panelsClosed!.complete();
       }
@@ -2740,9 +3268,260 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _onReaderSelectionChanged() {
     if (_activeSelectableParaNotifier.value != null) {
+      _desktopTextTapTimer?.cancel();
       _manualScrollUntil = DateTime.now().add(const Duration(seconds: 3));
       _pauseAutoScroll();
     }
+  }
+
+  void _onDesktopSelectionChanged() {
+    _activeSelectableParaNotifier.value =
+        _desktopSelectionController.hasSelection ? 'desktop-selection' : null;
+  }
+
+  void _dismissReaderSelection() {
+    if (ReaderPlatform.isMacOS) _desktopSelectionController.clear();
+    _activeSelectableParaNotifier.value = null;
+  }
+
+  Widget _desktopSelection(Widget child, {Key? key}) {
+    if (!ReaderPlatform.isMacOS) return child;
+    return DesktopReaderSelection(
+      key: key,
+      controller: _desktopSelectionController,
+      onBlankTap: (position) {
+        if (_desktopSelectionController.hasSelection) return;
+        _desktopFocus.requestFocus();
+        if (_isPageMode) {
+          _pageViewKey.currentState?.handleContentTap(position);
+        } else {
+          _toggleControls();
+        }
+      },
+      singleSelectionMenu: (context, anchors, range, dismiss) =>
+          _buildDarkBubbleMenu(
+            context: context,
+            anchors: anchors,
+            selectedText: range.text,
+            sourceParagraph: range.source,
+            selectionStart: range.start,
+            selectionEnd: range.end,
+            onDismiss: dismiss,
+            chapterIndex: range.chapterIndex,
+            paraIndex: range.paragraphIndex,
+          ),
+      multipleSelectionMenu: _desktopMultipleSelectionMenu,
+      child: child,
+    );
+  }
+
+  Widget _nonSelectable(Widget child) => ReaderPlatform.isMacOS
+      ? SelectionContainer.disabled(child: child)
+      : child;
+
+  Widget _desktopMultipleSelectionMenu(
+    BuildContext context,
+    TextSelectionToolbarAnchors anchors,
+    List<DesktopReaderSelectionSegment> ranges,
+    VoidCallback dismiss,
+  ) {
+    ReadingSelection? captured;
+    String? error;
+    try {
+      captured = ReadingSelection.capture(
+        ranges
+            .map(
+              (e) => ReaderSelectionPart(
+                e.chapterIndex,
+                e.paragraphIndex,
+                e.start,
+                e.end,
+                e.source,
+              ),
+            )
+            .toList(),
+        _getChapterParagraphs(ranges.first.chapterIndex),
+      );
+    } on FormatException catch (e) {
+      error = e.message;
+    }
+    return TextSelectionToolbar(
+      anchorAbove: anchors.primaryAnchor,
+      anchorBelow: anchors.secondaryAnchor ?? anchors.primaryAnchor,
+      children: [
+        Container(
+          constraints: BoxConstraints(
+            maxWidth: math.max(160, MediaQuery.sizeOf(context).width - 24),
+          ),
+          decoration: BoxDecoration(
+            color: const Color(0xFF232326),
+            borderRadius: BorderRadius.circular(20),
+          ),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          child: Wrap(
+            crossAxisAlignment: WrapCrossAlignment.center,
+            spacing: 8,
+            children: [
+              TextButton.icon(
+                key: const ValueKey('desktop-copy-paragraphs'),
+                style: TextButton.styleFrom(foregroundColor: Colors.white),
+                onPressed: () async {
+                  await _desktopSelectionController.copy();
+                  dismiss();
+                },
+                icon: const Icon(Icons.copy, size: 16),
+                label: const Text('复制'),
+              ),
+              if (captured != null) ...[
+                TextButton.icon(
+                  key: const ValueKey('desktop-highlight-range'),
+                  style: TextButton.styleFrom(foregroundColor: Colors.white),
+                  onPressed: () {
+                    dismiss();
+                    unawaited(_saveReadingSelection(captured!));
+                  },
+                  icon: const Icon(Icons.format_underlined, size: 16),
+                  label: const Text('跨段划线'),
+                ),
+                TextButton.icon(
+                  key: const ValueKey('desktop-note-range'),
+                  style: TextButton.styleFrom(foregroundColor: Colors.white),
+                  onPressed: () async {
+                    final snapshot = captured!;
+                    _beginReaderPanel();
+                    dismiss();
+                    try {
+                      final edit = await showDialog<NoteEditData>(
+                        context: context,
+                        builder: (_) => _themes[_themeIndex].wrap(
+                          NoteEditorDialog(quote: snapshot.text),
+                        ),
+                      );
+                      if (edit != null && mounted) {
+                        await _saveReadingSelection(snapshot, edit: edit);
+                      }
+                    } finally {
+                      if (mounted) _endReaderPanel();
+                    }
+                  },
+                  icon: const Icon(Icons.note_add_outlined, size: 16),
+                  label: const Text('跨段笔记'),
+                ),
+              ],
+              Text(
+                error ?? '同章跨段选区 · 原文坐标保持',
+                style: const TextStyle(color: Colors.white70, fontSize: 12),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _saveReadingSelection(
+    ReadingSelection selection, {
+    NoteEditData? edit,
+  }) async {
+    try {
+      final paragraphs = _getChapterParagraphs(selection.chapter);
+      if (NoteAnchorResolver.digest(paragraphs) != selection.chapterHash ||
+          NoteAnchorResolver.quotation(
+                paragraphs,
+                selection.firstParagraph,
+                selection.start,
+                selection.lastParagraph,
+                selection.end,
+              ) !=
+              selection.text) {
+        throw const FormatException('原文已变化，请重新选择；笔记未保存');
+      }
+      final chapter = widget.chapters[selection.chapter];
+      await _bookmarkService.addNote(
+        bookId: widget.book.bookId,
+        chapterId: chapter.itemId,
+        chapterIndex: selection.chapter,
+        chapterTitle: chapter.title,
+        paragraphIndex: selection.firstParagraph,
+        endParagraphIndex: selection.lastParagraph,
+        startOffset: selection.start,
+        endOffset: selection.end,
+        text: selection.text,
+        prefix: selection.prefix,
+        suffix: selection.suffix,
+        chapterHash: selection.chapterHash,
+        note: edit?.note ?? '',
+        colorIndex: edit?.colorIndex ?? 0,
+        tags: edit?.tags ?? [],
+      );
+      try {
+        await _bookmarkService.rememberBook(widget.book);
+      } catch (_) {}
+      if (mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(const SnackBar(content: Text('跨段批注已保存，跨页与双栏仍保留原文坐标')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text(
+              e is FormatException ? e.message : '批注未保存，请检查存储或备份后重试',
+            ),
+          ),
+        );
+      }
+    }
+  }
+
+  void _desktopTextTap() {
+    final position = _desktopTextPointerStart;
+    _desktopTextPointerStart = null;
+    if (position == null || _activeSelectableParaNotifier.value != null) return;
+    _desktopTextTapTimer?.cancel();
+    _desktopFocus.requestFocus();
+    // The click that collapses an existing selection is only a dismissal,
+    // never a page turn. Subsequent clicks regain the reader's shortcuts.
+    if (_desktopPointerHadSelection) return;
+    // Preserve double-click word selection. A genuine drag/selection or a
+    // second mouse-down cancels this single-click page/control action.
+    _desktopTextTapTimer = Timer(kDoubleTapTimeout, () {
+      if (!mounted ||
+          _readerPanels > 0 ||
+          !(ModalRoute.of(context)?.isCurrent ?? false) ||
+          _activeSelectableParaNotifier.value != null) {
+        return;
+      }
+      if (_isPageMode) {
+        _pageViewKey.currentState?.handleContentTap(position);
+      } else {
+        _toggleControls();
+      }
+    });
+  }
+
+  void _desktopTextPointerDown(PointerDownEvent event) {
+    _desktopTextTapTimer?.cancel();
+    _desktopPointerHadSelection = _activeSelectableParaNotifier.value != null;
+    _desktopTextPointerStart =
+        event.kind == PointerDeviceKind.mouse &&
+            event.buttons == kPrimaryMouseButton
+        ? event.position
+        : null;
+  }
+
+  void _desktopTextPointerMove(PointerMoveEvent event) {
+    final start = _desktopTextPointerStart;
+    if (start != null && (event.position - start).distance > kTouchSlop) {
+      _desktopTextPointerStart = null;
+      _desktopTextTapTimer?.cancel();
+    }
+  }
+
+  void _desktopTextPointerCancel() {
+    _desktopTextPointerStart = null;
+    _desktopTextTapTimer?.cancel();
   }
 
   void _toggleAutoScroll() =>
@@ -2815,7 +3594,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  void _showDirectoryDrawer() {
+  void _showDirectoryDrawer({int initialTab = 0}) {
+    if (_readerPanels > 0) return;
+    if (ReaderPlatform.isMacOS && initialTab == 0) {
+      _toggleDesktopDirectory();
+      return;
+    }
     _activeSelectableParaNotifier.value = null;
     _beginReaderPanel();
     final theme = _themes[_themeIndex];
@@ -2823,337 +3607,341 @@ class _ReaderScreenState extends State<ReaderScreen>
     Timer? searchTimer;
     var reverse = false;
     var volumeMode = false;
-    var activeTab = 0;
+    var activeTab = initialTab;
     var located = false;
     final expanded = <String>{
       for (final entry in _volumeGroups.entries)
         if (entry.value.contains(widget.chapters[_currentActiveIndex]))
           entry.key,
     };
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: theme.backgroundColor,
-      shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
-      ),
-      builder: (sheetContext) => theme.wrap(
-        _ReaderSheetLifetime(
-          onDispose: () {
-            searchTimer?.cancel();
-            search.dispose();
-            _endReaderPanel();
-          },
-          child: StatefulBuilder(
-            builder: (context, update) {
-              final filter = search.text.trim();
-              final all = reverse
-                  ? widget.chapters.reversed.toList()
-                  : widget.chapters;
-              final filtered = filter.isEmpty
-                  ? all
-                  : all
-                        .where((chapter) => chapter.title.contains(filter))
-                        .toList();
-              final rows = <Object>[];
-              if (volumeMode && filter.isEmpty) {
-                final groups = reverse
-                    ? _volumeGroups.entries.toList().reversed
-                    : _volumeGroups.entries;
-                for (final group in groups) {
-                  rows.add(group.key);
-                  if (expanded.contains(group.key)) {
-                    rows.addAll(reverse ? group.value.reversed : group.value);
-                  }
+    Widget buildDirectory(BuildContext sheetContext) => theme.wrap(
+      _ReaderSheetLifetime(
+        onDispose: () {
+          searchTimer?.cancel();
+          search.dispose();
+          _endReaderPanel();
+        },
+        child: StatefulBuilder(
+          builder: (context, update) {
+            final filter = search.text.trim();
+            final all = reverse
+                ? widget.chapters.reversed.toList()
+                : widget.chapters;
+            final filtered = filter.isEmpty
+                ? all
+                : all
+                      .where((chapter) => chapter.title.contains(filter))
+                      .toList();
+            final rows = <Object>[];
+            if (volumeMode && filter.isEmpty) {
+              final groups = reverse
+                  ? _volumeGroups.entries.toList().reversed
+                  : _volumeGroups.entries;
+              for (final group in groups) {
+                rows.add(group.key);
+                if (expanded.contains(group.key)) {
+                  rows.addAll(reverse ? group.value.reversed : group.value);
                 }
               }
-              final rowHeight =
-                  48.0 *
-                  math.max(
-                    1.0,
-                    MediaQuery.textScalerOf(context).scale(14) / 14,
-                  );
-              Widget chapterTile(Chapter chapter) {
-                final index = _chapterIndices[chapter]!;
-                return ListTile(
-                  dense: true,
-                  contentPadding: EdgeInsets.symmetric(
-                    horizontal: volumeMode ? 28 : 16,
+            }
+            final rowHeight =
+                48.0 *
+                math.max(1.0, MediaQuery.textScalerOf(context).scale(14) / 14);
+            Widget chapterTile(Chapter chapter) {
+              final index = _chapterIndices[chapter]!;
+              return ListTile(
+                dense: true,
+                contentPadding: EdgeInsets.symmetric(
+                  horizontal: volumeMode ? 28 : 16,
+                ),
+                title: Text(
+                  chapter.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: index == _currentActiveIndex
+                        ? Theme.of(context).primaryColor
+                        : theme.textColor,
+                    fontWeight: index == _currentActiveIndex
+                        ? FontWeight.w600
+                        : FontWeight.normal,
                   ),
-                  title: Text(
-                    chapter.title,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 14,
-                      color: index == _currentActiveIndex
-                          ? Theme.of(context).primaryColor
-                          : theme.textColor,
-                      fontWeight: index == _currentActiveIndex
-                          ? FontWeight.w600
-                          : FontWeight.normal,
-                    ),
-                  ),
-                  trailing: index == _currentActiveIndex
-                      ? Icon(
-                          Icons.bookmark,
-                          size: 16,
-                          color: theme.secondaryColor,
-                        )
-                      : null,
-                  onTap: () {
-                    _showControls = false;
-                    Navigator.pop(sheetContext);
-                    _navigateTo(ReadingPosition(chapterId: chapter.itemId));
-                  },
-                );
-              }
+                ),
+                trailing: index == _currentActiveIndex
+                    ? Icon(
+                        Icons.bookmark,
+                        size: 16,
+                        color: theme.secondaryColor,
+                      )
+                    : null,
+                onTap: () {
+                  _showControls = false;
+                  Navigator.pop(sheetContext);
+                  _navigateTo(ReadingPosition(chapterId: chapter.itemId));
+                },
+              );
+            }
 
-              return DraggableScrollableSheet(
-                initialChildSize: 0.75,
-                minChildSize: 0.4,
-                maxChildSize: 0.95,
-                expand: false,
-                builder: (context, controller) {
-                  if (!located &&
-                      activeTab == 0 &&
-                      filter.isEmpty &&
-                      !volumeMode) {
-                    located = true;
-                    WidgetsBinding.instance.addPostFrameCallback((_) {
-                      if (!controller.hasClients) return;
-                      final index = reverse
-                          ? widget.chapters.length - 1 - _currentActiveIndex
-                          : _currentActiveIndex;
-                      controller.jumpTo(
-                        (index * rowHeight - rowHeight * 2).clamp(
-                          0.0,
-                          controller.position.maxScrollExtent,
-                        ),
-                      );
-                    });
-                  }
-                  return Column(
-                    children: [
-                      Padding(
-                        padding: const EdgeInsets.all(12),
-                        child: _settingChoices<int>(
-                          {0: '目录', 1: '书签', 2: '笔记'},
-                          activeTab,
-                          (value) => update(() => activeTab = value),
-                        ),
+            return _ReaderDirectoryViewport(
+              builder: (context, controller) {
+                if (!located &&
+                    activeTab == 0 &&
+                    filter.isEmpty &&
+                    !volumeMode) {
+                  located = true;
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (!controller.hasClients) return;
+                    final index = reverse
+                        ? widget.chapters.length - 1 - _currentActiveIndex
+                        : _currentActiveIndex;
+                    controller.jumpTo(
+                      (index * rowHeight - rowHeight * 2).clamp(
+                        0.0,
+                        controller.position.maxScrollExtent,
                       ),
-                      if (activeTab == 0) ...[
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 16),
-                          child: Row(
-                            children: [
-                              Expanded(
-                                child: Text(
-                                  '目录（${widget.chapters.length}章）',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: theme.textColor,
-                                    fontWeight: FontWeight.w600,
-                                  ),
+                    );
+                  });
+                }
+                return Column(
+                  children: [
+                    Padding(
+                      padding: const EdgeInsets.all(12),
+                      child: _settingChoices<int>(
+                        {0: '目录', 1: '书签', 2: '笔记'},
+                        activeTab,
+                        (value) => update(() => activeTab = value),
+                      ),
+                    ),
+                    if (activeTab == 0) ...[
+                      Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                '目录（${widget.chapters.length}章）',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: theme.textColor,
+                                  fontWeight: FontWeight.w600,
                                 ),
                               ),
-                              IconButton(
-                                tooltip: volumeMode ? '列表平铺' : '按卷折叠',
-                                icon: Icon(
-                                  volumeMode
-                                      ? Icons.view_headline
-                                      : Icons.folder_outlined,
-                                  color: theme.secondaryColor,
-                                ),
-                                onPressed: () => update(() {
-                                  volumeMode = !volumeMode;
-                                  located = false;
-                                }),
-                              ),
-                              IconButton(
-                                tooltip: reverse ? '正序' : '倒序',
-                                icon: Icon(
-                                  reverse
-                                      ? Icons.vertical_align_top
-                                      : Icons.vertical_align_bottom,
-                                  color: theme.secondaryColor,
-                                ),
-                                onPressed: () => update(() {
-                                  reverse = !reverse;
-                                  located = false;
-                                }),
-                              ),
-                            ],
-                          ),
-                        ),
-                        Padding(
-                          padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
-                          child: TextField(
-                            controller: search,
-                            style: TextStyle(
-                              color: theme.textColor,
-                              fontSize: 14,
                             ),
-                            decoration: InputDecoration(
-                              hintText: '搜索章节名称...',
-                              hintStyle: TextStyle(color: theme.secondaryColor),
-                              prefixIcon: Icon(
-                                Icons.search,
+                            IconButton(
+                              tooltip: volumeMode ? '列表平铺' : '按卷折叠',
+                              icon: Icon(
+                                volumeMode
+                                    ? Icons.view_headline
+                                    : Icons.folder_outlined,
                                 color: theme.secondaryColor,
                               ),
-                              isDense: true,
+                              onPressed: () => update(() {
+                                volumeMode = !volumeMode;
+                                located = false;
+                              }),
                             ),
-                            onChanged: (_) {
-                              searchTimer?.cancel();
-                              searchTimer = Timer(
-                                const Duration(milliseconds: 120),
-                                () {
-                                  if (sheetContext.mounted) update(() {});
-                                },
-                              );
-                            },
-                          ),
+                            IconButton(
+                              tooltip: reverse ? '正序' : '倒序',
+                              icon: Icon(
+                                reverse
+                                    ? Icons.vertical_align_top
+                                    : Icons.vertical_align_bottom,
+                                color: theme.secondaryColor,
+                              ),
+                              onPressed: () => update(() {
+                                reverse = !reverse;
+                                located = false;
+                              }),
+                            ),
+                          ],
                         ),
-                        Expanded(
-                          child: ListView.builder(
-                            key: ValueKey((volumeMode, reverse, filter)),
-                            controller: controller,
-                            itemExtent: rowHeight,
-                            itemCount: volumeMode && filter.isEmpty
-                                ? rows.length
-                                : filtered.length,
-                            itemBuilder: (context, index) {
-                              if (!volumeMode || filter.isNotEmpty) {
-                                return chapterTile(filtered[index]);
-                              }
-                              final row = rows[index];
-                              if (row is Chapter) return chapterTile(row);
-                              final title = row as String;
-                              return ListTile(
-                                title: Text(
-                                  '$title（${_volumeGroups[title]!.length}章）',
-                                  maxLines: 1,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(
-                                    color: theme.textColor,
-                                    fontWeight: FontWeight.w600,
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(16, 4, 16, 10),
+                        child: TextField(
+                          controller: search,
+                          style: TextStyle(
+                            color: theme.textColor,
+                            fontSize: 14,
+                          ),
+                          decoration: InputDecoration(
+                            hintText: '搜索章节名称...',
+                            hintStyle: TextStyle(color: theme.secondaryColor),
+                            prefixIcon: Icon(
+                              Icons.search,
+                              color: theme.secondaryColor,
+                            ),
+                            isDense: true,
+                          ),
+                          onChanged: (_) {
+                            searchTimer?.cancel();
+                            searchTimer = Timer(
+                              const Duration(milliseconds: 120),
+                              () {
+                                if (sheetContext.mounted) update(() {});
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                      Expanded(
+                        child: ListView.builder(
+                          key: ValueKey((volumeMode, reverse, filter)),
+                          controller: controller,
+                          itemExtent: rowHeight,
+                          itemCount: volumeMode && filter.isEmpty
+                              ? rows.length
+                              : filtered.length,
+                          itemBuilder: (context, index) {
+                            if (!volumeMode || filter.isNotEmpty) {
+                              return chapterTile(filtered[index]);
+                            }
+                            final row = rows[index];
+                            if (row is Chapter) return chapterTile(row);
+                            final title = row as String;
+                            return ListTile(
+                              title: Text(
+                                '$title（${_volumeGroups[title]!.length}章）',
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(
+                                  color: theme.textColor,
+                                  fontWeight: FontWeight.w600,
+                                ),
+                              ),
+                              trailing: Icon(
+                                expanded.contains(title)
+                                    ? Icons.expand_less
+                                    : Icons.expand_more,
+                                color: theme.secondaryColor,
+                              ),
+                              onTap: () => update(() {
+                                expanded.contains(title)
+                                    ? expanded.remove(title)
+                                    : expanded.add(title);
+                              }),
+                            );
+                          },
+                        ),
+                      ),
+                    ] else if (activeTab == 1)
+                      Expanded(
+                        child: FutureBuilder<List<Bookmark>>(
+                          future: _bookmarkService.getBookmarks(
+                            widget.book.bookId,
+                          ),
+                          builder: (context, snapshot) {
+                            final bookmarks = snapshot.data ?? [];
+                            if (bookmarks.isEmpty) {
+                              return Center(
+                                child: Text(
+                                  '暂无书签',
+                                  style: TextStyle(color: theme.secondaryColor),
+                                ),
+                              );
+                            }
+                            return ListView.builder(
+                              key: const ValueKey('bookmarks'),
+                              controller: controller,
+                              itemCount: bookmarks.length,
+                              itemBuilder: (context, index) {
+                                final bookmark = bookmarks[index];
+                                return ListTile(
+                                  title: Text(
+                                    bookmark.chapterTitle,
+                                    style: TextStyle(color: theme.textColor),
                                   ),
-                                ),
-                                trailing: Icon(
-                                  expanded.contains(title)
-                                      ? Icons.expand_less
-                                      : Icons.expand_more,
-                                  color: theme.secondaryColor,
-                                ),
-                                onTap: () => update(() {
-                                  expanded.contains(title)
-                                      ? expanded.remove(title)
-                                      : expanded.add(title);
-                                }),
-                              );
-                            },
-                          ),
-                        ),
-                      ] else if (activeTab == 1)
-                        Expanded(
-                          child: FutureBuilder<List<Bookmark>>(
-                            future: _bookmarkService.getBookmarks(
-                              widget.book.bookId,
-                            ),
-                            builder: (context, snapshot) {
-                              final bookmarks = snapshot.data ?? [];
-                              if (bookmarks.isEmpty) {
-                                return Center(
-                                  child: Text(
-                                    '暂无书签',
+                                  subtitle: Text(
+                                    bookmark.contentPreview,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
                                     style: TextStyle(
                                       color: theme.secondaryColor,
                                     ),
                                   ),
-                                );
-                              }
-                              return ListView.builder(
-                                key: const ValueKey('bookmarks'),
-                                controller: controller,
-                                itemCount: bookmarks.length,
-                                itemBuilder: (context, index) {
-                                  final bookmark = bookmarks[index];
-                                  return ListTile(
-                                    title: Text(
-                                      bookmark.chapterTitle,
-                                      style: TextStyle(color: theme.textColor),
+                                  trailing: IconButton(
+                                    icon: Icon(
+                                      Icons.delete_outline,
+                                      color: theme.secondaryColor,
                                     ),
-                                    subtitle: Text(
-                                      bookmark.contentPreview,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: TextStyle(
-                                        color: theme.secondaryColor,
-                                      ),
-                                    ),
-                                    trailing: IconButton(
-                                      icon: Icon(
-                                        Icons.delete_outline,
-                                        color: theme.secondaryColor,
-                                      ),
-                                      onPressed: () async {
-                                        await _bookmarkService.removeBookmark(
-                                          bookmark.id,
-                                          widget.book.bookId,
-                                        );
-                                        if (sheetContext.mounted) update(() {});
-                                      },
-                                    ),
-                                    onTap: () {
-                                      _showControls = false;
-                                      Navigator.pop(sheetContext);
-                                      _openBookmark(bookmark);
+                                    onPressed: () async {
+                                      await _bookmarkService.removeBookmark(
+                                        bookmark.id,
+                                        widget.book.bookId,
+                                      );
+                                      if (sheetContext.mounted) update(() {});
                                     },
-                                  );
-                                },
-                              );
-                            },
-                          ),
-                        )
-                      else
-                        Expanded(
-                          child: ListView.builder(
-                            key: const ValueKey('reading_notes'),
-                            controller: controller,
-                            itemCount: _cachedNotes.length,
-                            itemBuilder: (context, index) {
-                              final note = _cachedNotes[index];
-                              return ListTile(
-                                title: Text(
-                                  note.chapterTitle,
-                                  style: TextStyle(color: theme.textColor),
-                                ),
-                                subtitle: Text(
-                                  note.text,
-                                  maxLines: 2,
-                                  overflow: TextOverflow.ellipsis,
-                                  style: TextStyle(color: theme.secondaryColor),
-                                ),
-                                onTap: () {
-                                  _showControls = false;
-                                  Navigator.pop(sheetContext);
-                                  _openReadingNote(note);
-                                },
-                              );
-                            },
-                          ),
+                                  ),
+                                  onTap: () {
+                                    _showControls = false;
+                                    Navigator.pop(sheetContext);
+                                    _openBookmark(bookmark);
+                                  },
+                                );
+                              },
+                            );
+                          },
                         ),
-                    ],
-                  );
-                },
-              );
-            },
-          ),
+                      )
+                    else
+                      Expanded(
+                        child: ListView.builder(
+                          key: const ValueKey('reading_notes'),
+                          controller: controller,
+                          itemCount: _cachedNotes.length,
+                          itemBuilder: (context, index) {
+                            final note = _cachedNotes[index];
+                            return ListTile(
+                              title: Text(
+                                note.chapterTitle,
+                                style: TextStyle(color: theme.textColor),
+                              ),
+                              subtitle: Text(
+                                note.text,
+                                maxLines: 2,
+                                overflow: TextOverflow.ellipsis,
+                                style: TextStyle(color: theme.secondaryColor),
+                              ),
+                              onTap: () {
+                                _showControls = false;
+                                Navigator.pop(sheetContext);
+                                _openReadingNote(note);
+                              },
+                            );
+                          },
+                        ),
+                      ),
+                  ],
+                );
+              },
+            );
+          },
         ),
       ),
     );
+    if (ReaderPlatform.isMacOS) {
+      unawaited(
+        showReaderModal<void>(
+          context: context,
+          backgroundColor: theme.backgroundColor,
+          builder: buildDirectory,
+        ),
+      );
+    } else {
+      unawaited(
+        showModalBottomSheet<void>(
+          context: context,
+          isScrollControlled: true,
+          backgroundColor: theme.backgroundColor,
+          shape: const RoundedRectangleBorder(
+            borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+          ),
+          builder: buildDirectory,
+        ),
+      );
+    }
   }
 
   Widget _settingChoices<T>(
@@ -3190,19 +3978,14 @@ class _ReaderScreenState extends State<ReaderScreen>
     try {
       await _flushPreferences();
       if (!mounted) return;
-      await showModalBottomSheet<void>(
+      await showReaderModal<void>(
         context: context,
-        isScrollControlled: true,
-        barrierColor: Colors.black.withValues(alpha: .12),
         backgroundColor: _themes[_themeIndex].backgroundColor,
-        builder: (context) => FractionallySizedBox(
-          heightFactor: .85,
-          child: ReaderSettingsSheet(
-            bookId: widget.book.bookId,
-            settings: _captureReaderSettings(),
-            bookOverride: _bookSettingsOverride,
-            onChanged: _receiveSettings,
-          ),
+        builder: (context) => ReaderSettingsSheet(
+          bookId: widget.book.bookId,
+          settings: _captureReaderSettings(),
+          bookOverride: _bookSettingsOverride,
+          onChanged: _receiveSettings,
         ),
       );
       if (mounted) {
@@ -3219,12 +4002,33 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (!ReaderPlatform.isMacOS) return _buildReaderScaffold(context);
     return LayoutBuilder(
       builder: (context, constraints) {
+        final directoryVisible = _desktopDirectoryOpen && !_readingFullScreen;
+        final searchVisible = _desktopSearchOpen && !_readingFullScreen;
+        final sidebarVisible = directoryVisible || searchVisible;
+        final sidebarWidth = math.min(
+          _desktopDirectoryWidth,
+          constraints.maxWidth - 320,
+        );
+        final previewWidth = _desktopSidebarDragWidth ?? sidebarWidth;
+        _desktopDirectoryDocked =
+            sidebarVisible && constraints.maxWidth >= 1060;
+        final directorySpace = _desktopDirectoryDocked ? sidebarWidth : 0.0;
+        final desktopLayout = DesktopReaderLayout.resolve(
+          constraints.maxWidth - directorySpace,
+          _captureReaderSettings(),
+          MediaQuery.textScalerOf(context),
+          immersive: _readingFullScreen,
+        );
         final size = Size(
-          math.min(840, constraints.maxWidth),
-          constraints.maxHeight,
+          desktopLayout.width,
+          constraints.maxHeight -
+              (_readingFullScreen ? 0 : _desktopToolbarHeight),
         );
         final previous = _desktopViewport;
         if (previous != null && previous != size && !_isLoadingHead) {
+          _cancelDesktopScroll();
+          _desktopTextTapTimer?.cancel();
+          _desktopTextPointerStart = null;
           // Capture against the old render tree, before laying out the new width.
           _readingPosition = _captureReadingPosition() ?? _readingPosition;
           _paragraphHeights.clear();
@@ -3239,23 +4043,513 @@ class _ReaderScreenState extends State<ReaderScreen>
           }
         }
         _desktopViewport = size;
-        return ColoredBox(
-          color: _themes[_themeIndex].backgroundColor,
-          child: Center(
-            child: SizedBox(
-              key: const ValueKey('desktop-reader-viewport'),
-              width: size.width,
-              height: size.height,
-              child: Focus(
-                focusNode: _desktopFocus,
-                autofocus: true,
-                onKeyEvent: _desktopKey,
-                child: _buildReaderScaffold(context),
-              ),
+        _desktopColumns = desktopLayout.columns;
+        return Listener(
+          onPointerDown: (event) {
+            if (event.kind != PointerDeviceKind.mouse ||
+                _readerPanels > 0 ||
+                _desktopTextHasFocus ||
+                !(ModalRoute.of(context)?.isCurrent ?? false)) {
+              return;
+            }
+            if (event.buttons == kBackMouseButton ||
+                event.buttons == kForwardMouseButton) {
+              unawaited(
+                _traverseHistory(forward: event.buttons == kForwardMouseButton),
+              );
+            }
+          },
+          child: ColoredBox(
+            color: _themes[_themeIndex].backgroundColor,
+            child: Stack(
+              children: [
+                Row(
+                  children: [
+                    SizedBox(width: directorySpace),
+                    Expanded(
+                      child: Center(
+                        child: SizedBox(
+                          key: const ValueKey('desktop-reader-viewport'),
+                          width: size.width,
+                          height: constraints.maxHeight,
+                          child: Focus(
+                            focusNode: _desktopFocus,
+                            autofocus: true,
+                            onKeyEvent: _desktopKey,
+                            child: Stack(
+                              children: [
+                                Column(
+                                  children: [
+                                    // Keep the reader subtree mounted while
+                                    // reclaiming the toolbar's space.
+                                    Offstage(
+                                      offstage: _readingFullScreen,
+                                      child: _desktopToolbar(),
+                                    ),
+                                    Expanded(
+                                      child: _buildReaderScaffold(context),
+                                    ),
+                                  ],
+                                ),
+                                if (_readingFullScreen) _immersiveEdgeToolbar(),
+                              ],
+                            ),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                if (sidebarVisible && !_desktopDirectoryDocked)
+                  Positioned.fill(
+                    child: GestureDetector(
+                      key: const ValueKey('desktop-directory-scrim'),
+                      onTap: directoryVisible
+                          ? _toggleDesktopDirectory
+                          : _closeDesktopSearch,
+                      child: ColoredBox(
+                        color: Colors.black.withValues(alpha: .12),
+                      ),
+                    ),
+                  ),
+                if (_desktopDirectoryBuilt)
+                  Positioned(
+                    key: const ValueKey('desktop-directory-panel'),
+                    top: 0,
+                    bottom: 0,
+                    left: 0,
+                    width: previewWidth,
+                    child: Offstage(
+                      offstage: !directoryVisible,
+                      child: ExcludeFocus(
+                        excluding: !directoryVisible,
+                        child: DesktopReaderDirectory(
+                          key: const ValueKey('desktop-reader-directory'),
+                          chapters: widget.chapters,
+                          activeIndex: _activeChapterNotifier,
+                          visible: directoryVisible,
+                          theme: _themes[_themeIndex],
+                          onClose: _toggleDesktopDirectory,
+                          onJump: _showChapterJump,
+                          onAnnotations: () =>
+                              _showDirectoryDrawer(initialTab: 1),
+                          onOpenChapter: (index) {
+                            if (!_desktopDirectoryDocked) {
+                              _toggleDesktopDirectory();
+                            }
+                            _desktopFocus.requestFocus();
+                            unawaited(
+                              _navigateTo(
+                                ReadingPosition(
+                                  chapterId: widget.chapters[index].itemId,
+                                ),
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                if (_desktopSearchBuilt)
+                  Positioned(
+                    key: const ValueKey('desktop-search-panel'),
+                    top: 0,
+                    bottom: 0,
+                    left: 0,
+                    width: previewWidth,
+                    child: Offstage(
+                      offstage: !searchVisible,
+                      child: ExcludeFocus(
+                        excluding: !searchVisible,
+                        child: ReaderSearchSheet(
+                          controller: _desktopSearchController,
+                          bookId: widget.book.bookId,
+                          chapters: widget.chapters,
+                          chapterIndex: _currentActiveIndex,
+                          canonicalMemory: {
+                            for (final entry in _chapterCache.entries)
+                              widget.chapters[entry.key].itemId: entry.value,
+                          },
+                          theme: _themes[_themeIndex],
+                          onClose: _closeDesktopSearch,
+                          onCancelOpen: _cancelNavigation,
+                          onHighlightsChanged: _updateSearchHighlights,
+                          onOpenHit: (hit) async {
+                            final opened = await _navigateTo(
+                              hit.position,
+                              searchHit: hit,
+                            );
+                            if (mounted && opened) {
+                              if (!_desktopDirectoryDocked) {
+                                _closeDesktopSearch(cancelJump: false);
+                              }
+                              _desktopFocus.requestFocus();
+                            }
+                            return opened;
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+                if (sidebarVisible)
+                  Positioned(
+                    left: previewWidth - 3,
+                    top: 0,
+                    bottom: 0,
+                    width: 6,
+                    child: _desktopSidebarResizeHandle(constraints.maxWidth),
+                  ),
+              ],
             ),
           ),
         );
       },
+    );
+  }
+
+  void _toggleDesktopDirectory() {
+    if (_readerPanels > 0) return;
+    _pageViewKey.currentState?.clearQueuedTurns();
+    _pauseAutoScroll();
+    _applyReaderSetting(() {
+      if (_readingFullScreen) {
+        _readingFullScreen = false;
+        _desktopDirectoryOpen = true;
+      } else {
+        _desktopDirectoryOpen = !_desktopDirectoryOpen;
+      }
+      _desktopDirectoryBuilt = true;
+      _desktopSearchOpen = false;
+      _showControls = false;
+      _immersiveToolbarVisible = false;
+      _activeSelectableParaNotifier.value = null;
+      if (!_desktopDirectoryOpen) _desktopFocus.requestFocus();
+      _saveDesktopWorkspace();
+    }, persist: false);
+  }
+
+  void _closeDesktopSearch({bool cancelJump = true}) {
+    if (!_desktopSearchOpen) return;
+    if (cancelJump) _desktopSearchController.cancelOpen();
+    _applyReaderSetting(() {
+      _desktopSearchOpen = false;
+      _desktopFocus.requestFocus();
+    }, persist: false);
+  }
+
+  void _saveDesktopWorkspace() {
+    unawaited(
+      DesktopReaderPreferences(
+        directoryOpen: _desktopDirectoryOpen,
+        sidebarWidth: _desktopDirectoryWidth,
+      ).save().catchError((Object error) {
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(SnackBar(content: Text('侧栏偏好未保存：$error')));
+        }
+      }),
+    );
+  }
+
+  void _commitSidebarWidth(double width) {
+    _applyReaderSetting(() {
+      _desktopDirectoryWidth = DesktopReaderPreferences.boundedWidth(width);
+      _desktopSidebarDragWidth = null;
+      _saveDesktopWorkspace();
+    }, persist: false);
+  }
+
+  Widget _desktopSidebarResizeHandle(double availableWidth) => Semantics(
+    label: '调整阅读侧栏宽度',
+    value: '${_desktopDirectoryWidth.round()}',
+    increasedValue:
+        '${DesktopReaderPreferences.boundedWidth(_desktopDirectoryWidth + 16).round()}',
+    decreasedValue:
+        '${DesktopReaderPreferences.boundedWidth(_desktopDirectoryWidth - 16).round()}',
+    onIncrease: () => _commitSidebarWidth(_desktopDirectoryWidth + 16),
+    onDecrease: () => _commitSidebarWidth(_desktopDirectoryWidth - 16),
+    child: Focus(
+      onKeyEvent: (_, event) {
+        if (event is! KeyDownEvent && event is! KeyRepeatEvent) {
+          return KeyEventResult.ignored;
+        }
+        if (event.logicalKey == LogicalKeyboardKey.arrowLeft ||
+            event.logicalKey == LogicalKeyboardKey.arrowRight) {
+          _commitSidebarWidth(
+            _desktopDirectoryWidth +
+                (event.logicalKey == LogicalKeyboardKey.arrowRight ? 16 : -16),
+          );
+          return KeyEventResult.handled;
+        }
+        return KeyEventResult.ignored;
+      },
+      child: MouseRegion(
+        cursor: SystemMouseCursors.resizeColumn,
+        child: GestureDetector(
+          key: const ValueKey('desktop-sidebar-resize'),
+          dragStartBehavior: DragStartBehavior.down,
+          behavior: HitTestBehavior.opaque,
+          onDoubleTap: () =>
+              _commitSidebarWidth(DesktopReaderPreferences.defaultWidth),
+          onHorizontalDragStart: (_) {
+            _pauseAutoScroll();
+            _cancelDesktopScroll(stop: true);
+            _pageViewKey.currentState?.clearQueuedTurns();
+            setState(() => _desktopSidebarDragWidth = _desktopDirectoryWidth);
+          },
+          onHorizontalDragUpdate: (details) {
+            setState(() {
+              _desktopSidebarDragWidth = DesktopReaderPreferences.boundedWidth(
+                (_desktopSidebarDragWidth ?? _desktopDirectoryWidth) +
+                    details.delta.dx,
+              ).clamp(240.0, math.min(480.0, availableWidth - 320));
+            });
+          },
+          // Only the preview moves during dragging. Repaginate once on commit,
+          // using the old render tree's canonical anchor.
+          onHorizontalDragEnd: (_) => _commitSidebarWidth(
+            _desktopSidebarDragWidth ?? _desktopDirectoryWidth,
+          ),
+          onHorizontalDragCancel: () =>
+              setState(() => _desktopSidebarDragWidth = null),
+          child: ColoredBox(
+            color: _themes[_themeIndex].secondaryColor.withValues(
+              alpha: _desktopSidebarDragWidth == null ? .12 : .5,
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+  void _setReadingFullScreen(bool enabled) {
+    if (_readingFullScreen == enabled) return;
+    _applyReaderSetting(() {
+      _readingFullScreen = enabled;
+      _immersiveToolbarVisible = false;
+      _showControls = false;
+      _activeSelectableParaNotifier.value = null;
+      _desktopFocus.requestFocus();
+    }, persist: false);
+  }
+
+  Widget _immersiveEdgeToolbar() => Positioned(
+    top: 0,
+    left: 0,
+    right: 0,
+    child: ValueListenableBuilder<bool>(
+      valueListenable: _controlsNotifier,
+      builder: (context, controlsVisible, _) {
+        if (controlsVisible) return const SizedBox.shrink();
+        return MouseRegion(
+          key: const ValueKey('reader-immersive-toolbar-edge'),
+          opaque: false,
+          hitTestBehavior: HitTestBehavior.translucent,
+          onEnter: (_) {
+            if (!_immersiveToolbarVisible) {
+              setState(() => _immersiveToolbarVisible = true);
+            }
+          },
+          onExit: (_) {
+            if (_immersiveToolbarVisible) {
+              setState(() => _immersiveToolbarVisible = false);
+            }
+          },
+          child: _immersiveToolbarVisible
+              ? _desktopToolbar()
+              : const SizedBox(height: 12, width: double.infinity),
+        );
+      },
+    ),
+  );
+
+  Widget _desktopToolbar() {
+    final theme = _themes[_themeIndex];
+    return Material(
+      key: const ValueKey('desktop-reader-toolbar'),
+      color: theme.backgroundColor,
+      child: SizedBox(
+        height: _desktopToolbarHeight,
+        child: Row(
+          children: [
+            IconButton(
+              tooltip: '返回书架',
+              visualDensity: VisualDensity.compact,
+              icon: Icon(Icons.arrow_back, color: theme.textColor, size: 18),
+              onPressed: () => Navigator.maybePop(context),
+            ),
+            IconButton(
+              key: const ValueKey('desktop-history-back'),
+              tooltip: '后退（⌘[）',
+              visualDensity: VisualDensity.compact,
+              onPressed: _jumpHistory.canGoBack && !_navigationLoading
+                  ? _returnFromJump
+                  : null,
+              icon: const Icon(Icons.chevron_left, size: 20),
+            ),
+            IconButton(
+              key: const ValueKey('desktop-history-forward'),
+              tooltip: '前进（⌘]）',
+              visualDensity: VisualDensity.compact,
+              onPressed: _jumpHistory.canGoForward && !_navigationLoading
+                  ? () => _traverseHistory(forward: true)
+                  : null,
+              icon: const Icon(Icons.chevron_right, size: 20),
+            ),
+            IconButton(
+              tooltip: '目录（⌘⇧D）',
+              isSelected: _desktopDirectoryOpen && !_readingFullScreen,
+              visualDensity: VisualDensity.compact,
+              icon: Icon(
+                Icons.view_sidebar_outlined,
+                color: theme.textColor,
+                size: 20,
+              ),
+              onPressed: _toggleDesktopDirectory,
+            ),
+            Expanded(
+              child: Text(
+                widget.book.bookName,
+                style: TextStyle(color: theme.secondaryColor, fontSize: 12),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            IconButton(
+              tooltip: '正文搜索（⌘F）',
+              icon: Icon(Icons.search, color: theme.textColor, size: 20),
+              onPressed: _showReaderSearch,
+            ),
+            IconButton(
+              tooltip: '跳转章节（⌘J）',
+              icon: Icon(Icons.last_page, color: theme.textColor, size: 20),
+              onPressed: _showChapterJump,
+            ),
+            IconButton(
+              tooltip: _desktopColumns == 2 ? '切换单栏阅读' : '切换双栏阅读',
+              icon: Icon(
+                _desktopColumns == 2
+                    ? Icons.view_agenda_outlined
+                    : Icons.view_column_outlined,
+                color: theme.textColor,
+                size: 20,
+              ),
+              onPressed: () {
+                final value = _captureReaderSettings().copyWith(
+                  pageMode: true,
+                  desktopColumns: _desktopColumns == 2 ? 'single' : 'double',
+                );
+                _applyReaderSetting(() => _assignReaderSettings(value));
+              },
+            ),
+            IconButton(
+              tooltip: '阅读设置',
+              icon: Icon(Icons.tune, color: theme.textColor, size: 20),
+              onPressed: _showSettingsModal,
+            ),
+            PopupMenuButton<String>(
+              tooltip: '阅读操作',
+              icon: Icon(Icons.more_horiz, color: theme.textColor, size: 20),
+              color: theme.backgroundColor,
+              onSelected: (command) {
+                switch (command) {
+                  case 'previousChapter':
+                  case 'nextChapter':
+                    final index =
+                        _currentActiveIndex +
+                        (command == 'nextChapter' ? 1 : -1);
+                    if (index >= 0 && index < widget.chapters.length) {
+                      unawaited(
+                        _navigateTo(
+                          ReadingPosition(
+                            chapterId: widget.chapters[index].itemId,
+                          ),
+                        ),
+                      );
+                    }
+                    break;
+                  case 'notes':
+                    unawaited(_showNotesManagement());
+                    break;
+                  case 'listen':
+                    unawaited(_startTtsReading());
+                    break;
+                  case 'ttsSettings':
+                    TtsPlayerPanel.showSettings(
+                      context,
+                      backgroundColor: theme.backgroundColor,
+                      textColor: theme.textColor,
+                      secondaryColor: theme.secondaryColor,
+                      onModalChanged: (opened) =>
+                          opened ? _beginReaderPanel() : _endReaderPanel(),
+                    );
+                    break;
+                  default:
+                    _desktopCommand(command);
+                }
+              },
+              itemBuilder: (context) => [
+                PopupMenuItem(
+                  value: 'previousChapter',
+                  enabled: _currentActiveIndex > 0,
+                  child: Text('上一章', style: TextStyle(color: theme.textColor)),
+                ),
+                PopupMenuItem(
+                  value: 'nextChapter',
+                  enabled: _currentActiveIndex < widget.chapters.length - 1,
+                  child: Text('下一章', style: TextStyle(color: theme.textColor)),
+                ),
+                const PopupMenuDivider(),
+                if (_ttsService.isAvailable) ...[
+                  PopupMenuItem(
+                    value: 'listen',
+                    child: Text(
+                      '听书 / 暂停',
+                      style: TextStyle(color: theme.textColor),
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'ttsSettings',
+                    child: Text(
+                      '系统语音与兼容 TTS 接口',
+                      style: TextStyle(color: theme.textColor),
+                    ),
+                  ),
+                ],
+                PopupMenuItem(
+                  value: 'bookmark',
+                  child: Text(
+                    '添加 / 移除书签（⌘D）',
+                    style: TextStyle(color: theme.textColor),
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'notes',
+                  child: Text(
+                    '笔记管理与导出',
+                    style: TextStyle(color: theme.textColor),
+                  ),
+                ),
+                PopupMenuItem(
+                  value: 'shortcuts',
+                  child: Text(
+                    '阅读快捷键（F1）',
+                    style: TextStyle(color: theme.textColor),
+                  ),
+                ),
+              ],
+            ),
+            IconButton(
+              tooltip: _readingFullScreen ? '退出阅读全屏' : '阅读全屏',
+              icon: Icon(
+                _readingFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                color: theme.textColor,
+              ),
+              onPressed: () => _setReadingFullScreen(!_readingFullScreen),
+            ),
+          ],
+        ),
+      ),
     );
   }
 
@@ -3283,6 +4577,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                       // 顶部微型信息栏（局部响应式刷新，跨章滑动无需全屏 setState）
                       if (_showReaderHeader)
                         Padding(
+                          key: const ValueKey('reader-chapter-header'),
                           padding: const EdgeInsets.symmetric(
                             horizontal: 20,
                             vertical: 6,
@@ -3369,10 +4664,15 @@ class _ReaderScreenState extends State<ReaderScreen>
                           ],
                         ),
                       ),
-                      if (_navigationLoading || _jumpHistory.canGoBack)
+                      if (_navigationLoading ||
+                          ((_jumpHistory.canGoBack ||
+                                  _jumpHistory.canGoForward) &&
+                              !_readingFullScreen))
                         _buildJumpBar(theme),
                       // 底部常驻微型状态栏（时间、电量、总进度）
                       if (_showReaderStatus) _buildBottomStatusBar(theme),
+                      if (ReaderPlatform.isMacOS && _ttsLayoutActive)
+                        const SizedBox(height: TtsPlayerPanel.desktopHeight),
                     ],
                   ),
                 ),
@@ -3423,6 +4723,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 left: 0,
                 right: 0,
                 child: TtsPlayerPanel(
+                  service: _ttsService,
                   backgroundColor: theme.backgroundColor,
                   textColor: theme.textColor,
                   secondaryColor: theme.secondaryColor,
@@ -3433,7 +4734,14 @@ class _ReaderScreenState extends State<ReaderScreen>
               ),
 
               // 沉浸式自动阅读浮动控制条
-              if (_isAutoScrolling) _buildAutoScrollControlBar(theme),
+              if (_isAutoScrolling)
+                ValueListenableBuilder<bool>(
+                  valueListenable: _controlsNotifier,
+                  builder: (context, visible, _) =>
+                      !_readingFullScreen || visible
+                      ? _buildAutoScrollControlBar(theme)
+                      : const SizedBox.shrink(),
+                ),
             ],
           ),
         ),
@@ -3496,7 +4804,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
 
     // 双向虚拟化段落级懒加载滚动容器（CustomScrollView + center 锚点 + SliverList）
-    // 仅挂载视口及 cacheExtent 内的 15~25 个段落，每个段落独立小型 RepaintBoundary，120fps 满帧丝滑
+    // 只挂载视口及缓存范围附近的段落，避免长章节同时布局和绘制。
     final hasCenterChapter = _displayedChapters.contains(_anchorChapterIndex);
     final effectiveAnchor = hasCenterChapter
         ? _anchorChapterIndex
@@ -3517,49 +4825,78 @@ class _ReaderScreenState extends State<ReaderScreen>
             opacity: _initialRestorePending ? 0 : 1,
             child: RepaintBoundary(
               key: _verticalPaintKey,
-              child: NotificationListener<ScrollNotification>(
-                onNotification: _onVerticalScrollNotification,
-                child: Scrollbar(
-                  controller: _scrollController,
-                  child: CustomScrollView(
-                    controller: _scrollController,
-                    center: afterAndCenterChapters.isNotEmpty
-                        ? _centerSliverKey
-                        : null,
-                    // ignore: deprecated_member_use
-                    cacheExtent: 650.0,
-                    physics: const BouncingScrollPhysics(
-                      parent: AlwaysScrollableScrollPhysics(),
+              child: _desktopSelection(
+                NotificationListener<ScrollNotification>(
+                  onNotification: _onVerticalScrollNotification,
+                  child: Listener(
+                    onPointerSignal: (event) {
+                      if (ReaderPlatform.isMacOS &&
+                          event is PointerScrollEvent &&
+                          event.scrollDelta.dy != 0) {
+                        _cancelDesktopScroll();
+                        _onUserPageTurn();
+                      }
+                    },
+                    onPointerPanZoomStart: (_) {
+                      if (ReaderPlatform.isMacOS) {
+                        _cancelDesktopScroll();
+                        _onUserPageTurn();
+                      }
+                    },
+                    child: ScrollConfiguration(
+                      behavior: ScrollConfiguration.of(
+                        context,
+                      ).copyWith(scrollbars: false),
+                      child: Scrollbar(
+                        controller: _scrollController,
+                        thumbVisibility: ReaderPlatform.isMacOS,
+                        child: CustomScrollView(
+                          controller: _scrollController,
+                          center: afterAndCenterChapters.isNotEmpty
+                              ? _centerSliverKey
+                              : null,
+                          // ignore: deprecated_member_use
+                          cacheExtent: 650.0,
+                          physics: const BouncingScrollPhysics(
+                            parent: AlwaysScrollableScrollPhysics(),
+                          ),
+                          slivers: [
+                            // 顶部上一章指示器/触发器（位于反向增长区最顶端）
+                            if (beforeChapters.isNotEmpty)
+                              _buildTopPrevIndicatorSliver(theme),
+
+                            // 锚点之前的章节（向上无缝生长，零位移跳动）
+                            for (int i = 0; i < beforeChapters.length; i++)
+                              _buildChapterSliver(
+                                beforeChapters[i],
+                                theme,
+                                isFirst: i == 0,
+                                isCenter: false,
+                                isBeforeCenter: true,
+                              ),
+
+                            // 锚点章节及之后的章节（向下无限延伸）
+                            for (
+                              int i = 0;
+                              i < afterAndCenterChapters.length;
+                              i++
+                            )
+                              _buildChapterSliver(
+                                afterAndCenterChapters[i],
+                                theme,
+                                isFirst: beforeChapters.isEmpty && i == 0,
+                                isCenter: i == 0,
+                                isBeforeCenter: false,
+                                includeTopIndicator:
+                                    beforeChapters.isEmpty && i == 0,
+                              ),
+
+                            // 底部下拉预加载指示器
+                            _buildBottomNextIndicatorSliver(theme),
+                          ],
+                        ),
+                      ),
                     ),
-                    slivers: [
-                      // 顶部上一章指示器/触发器（位于反向增长区最顶端）
-                      if (beforeChapters.isNotEmpty)
-                        _buildTopPrevIndicatorSliver(theme),
-
-                      // 锚点之前的章节（向上无缝生长，零位移跳动）
-                      for (int i = 0; i < beforeChapters.length; i++)
-                        _buildChapterSliver(
-                          beforeChapters[i],
-                          theme,
-                          isFirst: i == 0,
-                          isCenter: false,
-                          isBeforeCenter: true,
-                        ),
-
-                      // 锚点章节及之后的章节（向下无限延伸）
-                      for (int i = 0; i < afterAndCenterChapters.length; i++)
-                        _buildChapterSliver(
-                          afterAndCenterChapters[i],
-                          theme,
-                          isFirst: beforeChapters.isEmpty && i == 0,
-                          isCenter: i == 0,
-                          isBeforeCenter: false,
-                          includeTopIndicator: beforeChapters.isEmpty && i == 0,
-                        ),
-
-                      // 底部下拉预加载指示器
-                      _buildBottomNextIndicatorSliver(theme),
-                    ],
                   ),
                 ),
               ),
@@ -3788,14 +5125,19 @@ class _ReaderScreenState extends State<ReaderScreen>
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     if (includeTopIndicator) _buildTopPrevIndicatorBox(theme),
-                    Text(
-                      chapter.title,
-                      style: TextStyle(
-                        fontSize: _fontSize + 4,
-                        fontWeight: FontWeight.bold,
-                        color: theme.textColor,
-                        height: 1.4,
-                        fontFamily: _resolveFontFamily(_fontFamily),
+                    _nonSelectable(
+                      Text(
+                        ReaderDisplayText.convert(
+                          chapter.title,
+                          _readerPreferences.displayScript,
+                        ),
+                        style: TextStyle(
+                          fontSize: _fontSize + 4,
+                          fontWeight: FontWeight.bold,
+                          color: theme.textColor,
+                          height: 1.4,
+                          fontFamily: _resolveFontFamily(_fontFamily),
+                        ),
                       ),
                     ),
                   ],
@@ -3809,7 +5151,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 child: ValueListenableBuilder<int>(
                   valueListenable: _commentStatsVersionNotifier,
                   builder: (context, _, _) =>
-                      _buildChapterEndComments(chapter, theme),
+                      _nonSelectable(_buildChapterEndComments(chapter, theme)),
                 ),
               );
             }
@@ -3886,12 +5228,14 @@ class _ReaderScreenState extends State<ReaderScreen>
     style: _readerBodyStyle(),
     scaler: MediaQuery.textScalerOf(context),
     width: width,
+    textWidthInset: _textWidthInset,
     indent: _indentTwoChars,
     spacing: _paragraphSpacing,
     imageHeight: MediaQuery.sizeOf(context).height * .75,
     inlineCommentSize: _showCommentBubbles
         ? ReaderCommentBubble.sizeFor(MediaQuery.textScalerOf(context))
         : Size.zero,
+    displayScript: _readerPreferences.displayScript,
   );
 
   Widget _illustrationView(
@@ -3899,20 +5243,22 @@ class _ReaderScreenState extends State<ReaderScreen>
     double height,
     ReaderTheme theme,
     int chapterIndex,
-  ) => ReaderIllustrationView(
-    key: ValueKey(
-      'picture-$chapterIndex-${image.id}-${_imageRefreshVersions[chapterIndex] ?? 0}',
+  ) => _nonSelectable(
+    ReaderIllustrationView(
+      key: ValueKey(
+        'picture-$chapterIndex-${image.id}-${_imageRefreshVersions[chapterIndex] ?? 0}',
+      ),
+      bookId: widget.book.bookId,
+      image: image,
+      height: height,
+      textColor: theme.secondaryColor,
+      documents: widget.bookDocuments,
+      onTapDown: () => _lastBubbleTapTime = DateTime.now(),
+      onViewerChanged: (open) => open ? _beginReaderPanel() : _endReaderPanel(),
+      onRetry: _imageTexts.containsKey(chapterIndex)
+          ? () => _repairImages(chapterIndex)
+          : null,
     ),
-    bookId: widget.book.bookId,
-    image: image,
-    height: height,
-    textColor: theme.secondaryColor,
-    documents: widget.bookDocuments,
-    onTapDown: () => _lastBubbleTapTime = DateTime.now(),
-    onViewerChanged: (open) => open ? _beginReaderPanel() : _endReaderPanel(),
-    onRetry: _imageTexts.containsKey(chapterIndex)
-        ? () => _repairImages(chapterIndex)
-        : null,
   );
 
   Widget _buildSingleParagraph(
@@ -4052,6 +5398,12 @@ class _ReaderScreenState extends State<ReaderScreen>
     Widget? commentBubble,
     Size? commentBubbleSize,
   }) {
+    inlineSpans = inlineSpans
+        .map(
+          (span) =>
+              ReaderDisplayText.span(span, _readerPreferences.displayScript),
+        )
+        .toList();
     final baseStyle = _readerBodyStyle(color: theme.textColor);
     final commentChild = commentBubble == null
         ? null
@@ -4073,54 +5425,104 @@ class _ReaderScreenState extends State<ReaderScreen>
       children: [...inlineSpans, if (commentSpan != null) commentSpan],
     );
 
+    if (ReaderPlatform.isMacOS) {
+      final selectable = DesktopSelectableParagraph(
+        key: ValueKey('desktop-paragraph-$paraKeyStr'),
+        span: TextSpan(children: inlineSpans),
+        style: baseStyle,
+        chapterIndex: chapterIndex,
+        paragraphIndex: paraIndex,
+        sourceParagraph: sourceParagraph,
+        sourceStart: sourceStart,
+        sourceEnd: sourceEnd,
+        textWidthInset: _textWidthInset,
+        onPointerDown: _desktopTextPointerDown,
+        onPointerMove: _desktopTextPointerMove,
+        onPointerUp: _desktopTextTap,
+        onPointerCancel: _desktopTextPointerCancel,
+      );
+      if (commentSpan == null) return selectable;
+      return LayoutBuilder(
+        builder: (context, constraints) {
+          final painter =
+              TextPainter(
+                text: TextSpan(style: baseStyle, children: textSpan.children),
+                textDirection: TextDirection.ltr,
+                textScaler: MediaQuery.textScalerOf(context),
+              )..setPlaceholderDimensions([
+                PlaceholderDimensions(
+                  size: commentBubbleSize!,
+                  alignment: PlaceholderAlignment.middle,
+                ),
+              ]);
+          painter.layout(
+            maxWidth: math.max(1, constraints.maxWidth - _textWidthInset),
+          );
+          final height = painter.height;
+          final rect = painter.inlinePlaceholderBoxes!.single.toRect();
+          painter.dispose();
+          return SizedBox(
+            width: constraints.maxWidth,
+            height: height,
+            child: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                selectable,
+                Positioned.fromRect(
+                  rect: rect,
+                  child: _nonSelectable(commentChild!),
+                ),
+              ],
+            ),
+          );
+        },
+      );
+    }
+
     return ValueListenableBuilder<String?>(
       valueListenable: _activeSelectableParaNotifier,
       builder: (context, activeParaKey, _) {
         final isSelectedPara = activeParaKey == paraKeyStr;
-        if (isSelectedPara || ReaderPlatform.isMacOS) {
-          final selectable = SelectableText.rich(
-            key: ReaderPlatform.isMacOS
-                ? ValueKey('desktop-paragraph-$paraKeyStr')
-                : _activeSelectableTextKey,
+        if (isSelectedPara) {
+          Widget selectable = SelectableText.rich(
+            key: _activeSelectableTextKey,
             TextSpan(children: inlineSpans),
             style: baseStyle,
+            cursorWidth: ReaderLayout.selectableCursorWidth,
             onTap: () {
-              if (ReaderPlatform.isMacOS) return;
               _activeSelectableParaNotifier.value = null;
               onTap?.call();
             },
-            onSelectionChanged: ReaderPlatform.isMacOS
-                ? (selection, cause) {
-                    if (!selection.isCollapsed) {
-                      _activeSelectableParaNotifier.value = paraKeyStr;
-                    } else if (_activeSelectableParaNotifier.value ==
-                        paraKeyStr) {
-                      _activeSelectableParaNotifier.value = null;
-                    }
-                  }
-                : null,
             contextMenuBuilder: (context, editableTextState) {
               final textVal = editableTextState.textEditingValue;
               final selected = textVal.selection.textInside(textVal.text);
               if (selected.trim().isEmpty) return const SizedBox.shrink();
+              final prefixLength =
+                  textVal.text.length - (sourceEnd - sourceStart);
+              final start = ReaderText.safeOffset(
+                sourceParagraph,
+                (textVal.selection.start +
+                        selected.length -
+                        selected.trimLeft().length -
+                        prefixLength +
+                        sourceStart)
+                    .clamp(0, sourceParagraph.length),
+              );
+              final end = ReaderText.safeOffset(
+                sourceParagraph,
+                (textVal.selection.end -
+                        (selected.length - selected.trimRight().length) -
+                        prefixLength +
+                        sourceStart)
+                    .clamp(start, sourceParagraph.length),
+              );
               return _buildDarkBubbleMenu(
                 context: context,
                 anchors: editableTextState.contextMenuAnchors,
-                selectedText: selected,
+                selectedText: sourceParagraph.substring(start, end),
                 sourceParagraph: sourceParagraph,
-                selectionStart:
-                    (textVal.selection.start +
-                            selected.length -
-                            selected.trimLeft().length -
-                            (textVal.text.length - (sourceEnd - sourceStart)) +
-                            sourceStart)
-                        .clamp(0, sourceParagraph.length),
-                selectionEnd:
-                    (textVal.selection.end -
-                            (selected.length - selected.trimRight().length) -
-                            (textVal.text.length - (sourceEnd - sourceStart)) +
-                            sourceStart)
-                        .clamp(0, sourceParagraph.length),
+                selectionStart: start,
+                selectionEnd: end,
                 onDismiss: () {
                   editableTextState.hideToolbar();
                   _activeSelectableParaNotifier.value = null;
@@ -4149,7 +5551,9 @@ class _ReaderScreenState extends State<ReaderScreen>
                       alignment: PlaceholderAlignment.middle,
                     ),
                   ]);
-              painter.layout(maxWidth: constraints.maxWidth);
+              painter.layout(
+                maxWidth: math.max(1, constraints.maxWidth - _textWidthInset),
+              );
               final height = painter.height;
               final rect = painter.inlinePlaceholderBoxes!.single.toRect();
               painter.dispose();
@@ -4549,6 +5953,12 @@ class _ReaderScreenState extends State<ReaderScreen>
                   tooltip: '听书',
                   onPressed: _startTtsReading,
                 ),
+              if (ReaderPlatform.isMacOS && _readingFullScreen)
+                IconButton(
+                  tooltip: '退出阅读全屏',
+                  icon: Icon(Icons.fullscreen_exit, color: theme.textColor),
+                  onPressed: () => _setReadingFullScreen(false),
+                ),
               // 右上角折叠更多选项 (PopupMenuButton)
               PopupMenuButton<String>(
                 icon: Icon(
@@ -4695,6 +6105,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   Future<void> _startTtsReading({int? chapterIndex}) async {
+    _pauseAutoScroll();
     final tts = _ttsService;
     if (chapterIndex == null &&
         tts.isActive &&
@@ -4712,32 +6123,30 @@ class _ReaderScreenState extends State<ReaderScreen>
       widget.chapters,
       index,
       position: position,
+      contentLoader: widget.chapterContentLoader,
+      offlineOnly: widget.offlineOnly,
     );
   }
 
   void _showQuickCacheModal() {
     final currentTheme = _themes[_themeIndex];
     _beginReaderPanel();
-    showModalBottomSheet<void>(
+    showReaderModal<void>(
       context: context,
-      isScrollControlled: true,
       backgroundColor: currentTheme.backgroundColor,
       builder: (context) => currentTheme.wrap(
-        FractionallySizedBox(
-          heightFactor: .85,
-          child: ReaderCacheSheet(
-            bookId: widget.book.bookId,
-            chapters: widget.chapters,
-            currentIndex: _currentActiveIndex,
-            warning: _apiService.engine.cacheWarning.value,
-            onDownload: _triggerBatchDownload,
-            onPolicyChanged: (policy) {
-              _cachePolicy = policy;
-              _prefetchedIndices.removeAll(_prefetchQueue);
-              _prefetchQueue.clear();
-              _triggerSilentPrefetch(_currentActiveIndex);
-            },
-          ),
+        ReaderCacheSheet(
+          bookId: widget.book.bookId,
+          chapters: widget.chapters,
+          currentIndex: _currentActiveIndex,
+          warning: _apiService.engine.cacheWarning.value,
+          onDownload: _triggerBatchDownload,
+          onPolicyChanged: (policy) {
+            _cachePolicy = policy;
+            _prefetchedIndices.removeAll(_prefetchQueue);
+            _prefetchQueue.clear();
+            _triggerSilentPrefetch(_currentActiveIndex);
+          },
         ),
       ),
     ).whenComplete(_endReaderPanel);
@@ -4826,12 +6235,17 @@ class _ReaderScreenState extends State<ReaderScreen>
     textScaler: MediaQuery.textScalerOf(context),
     horizontalPadding: _horizontalPadding,
     paragraphSpacing: _paragraphSpacing,
+    textWidthInset: _textWidthInset,
+    smartTypography: _readerPreferences.smartTypography,
+    displayScript: _readerPreferences.displayScript,
     showPageNumber: _showReaderStatus,
     inlineCommentSize: _showCommentBubbles
         ? ReaderCommentBubble.sizeFor(MediaQuery.textScalerOf(context))
         : Size.zero,
     chapterEndHeight:
-        _readerPreferences.pureMode || widget.book.bookId.startsWith('local_')
+        widget.offlineOnly ||
+            _readerPreferences.pureMode ||
+            widget.book.bookId.startsWith('local_')
         ? 0
         : _chapterEndHeight(),
   );
@@ -4914,8 +6328,13 @@ class _ReaderScreenState extends State<ReaderScreen>
   Widget _buildPageModeBody(ReaderTheme theme) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final layout = _layoutFor(constraints.biggest);
-        final layoutKey = (layout.key, _indentTwoChars);
+        final columns = ReaderPlatform.isMacOS ? _desktopColumns : 1;
+        final columnWidth = columns == 2
+            ? (constraints.maxWidth - _readerPreferences.columnGap) / 2
+            : constraints.maxWidth;
+        final layout = _layoutFor(Size(columnWidth, constraints.maxHeight));
+        final layoutKey = (layout.key, _indentTwoChars, columns);
+        int firstPage(int index) => index ~/ columns * columns;
         if (_preparedLayoutKey != layoutKey) {
           _preparedLayoutKey = layoutKey;
           _pageLayout = layout;
@@ -4940,6 +6359,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           0,
           current.pages.length - 1,
         );
+        _currentHorizontalPageIndex = firstPage(_currentHorizontalPageIndex);
         final source = _ReaderPageAddress(
           _currentActiveIndex,
           _currentHorizontalPageIndex,
@@ -4949,12 +6369,15 @@ class _ReaderScreenState extends State<ReaderScreen>
         var transition = _chapterTransition;
         if (transition != null) {
           final ready = _preparePages(transition.chapterIndex, layout);
-          if (ready.key != transition.layout.key) {
+          if (ready.key != transition.layout.key ||
+              transition.pageIndex != firstPage(transition.pageIndex)) {
             transition = _ReaderPageAddress(
               transition.chapterIndex,
-              transition.anchor == null
-                  ? ready.pages.length - 1
-                  : ready.pageFor(transition.anchor!),
+              firstPage(
+                transition.anchor == null
+                    ? ready.pages.length - 1
+                    : ready.pageFor(transition.anchor!),
+              ),
               ready,
               anchor: transition.anchor,
             );
@@ -4977,12 +6400,12 @@ class _ReaderScreenState extends State<ReaderScreen>
             addresses.add(
               _ReaderPageAddress(
                 _currentActiveIndex - 1,
-                previous.pages.length - 1,
+                firstPage(previous.pages.length - 1),
                 previous,
               ),
             );
           }
-          for (var index = 0; index < current.pages.length; index++) {
+          for (var index = 0; index < current.pages.length; index += columns) {
             addresses.add(
               _ReaderPageAddress(_currentActiveIndex, index, current),
             );
@@ -5004,8 +6427,12 @@ class _ReaderScreenState extends State<ReaderScreen>
                   for (final address in addresses)
                     ReaderPageItem(
                       id: address,
-                      builder: (context) =>
-                          _buildSinglePageCard(address, theme, constraints),
+                      builder: (context) => _buildPageSpread(
+                        address,
+                        theme,
+                        constraints,
+                        columns,
+                      ),
                     ),
                 ],
                 currentPageId: source,
@@ -5024,8 +6451,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                 isDark: theme.systemBrightness == Brightness.dark,
                 selection: _activeSelectableParaNotifier,
                 pageContentChanges: _paragraphSignals,
-                onDismissSelection: () =>
-                    _activeSelectableParaNotifier.value = null,
+                onDismissSelection: _dismissReaderSelection,
                 lastBubbleTap: () => _lastBubbleTapTime,
                 previousTapFraction: _tapLayout == 'left_hand'
                     ? .45
@@ -5040,8 +6466,10 @@ class _ReaderScreenState extends State<ReaderScreen>
                 reverseTapSides: _tapLayout == 'left_hand',
                 onUserPageTurn: _onUserPageTurn,
                 semanticLabel:
-                    '${widget.book.bookName}，${widget.chapters[_currentActiveIndex].title}，第 ${_currentHorizontalPageIndex + 1} 页',
+                    '${widget.book.bookName}，${widget.chapters[_currentActiveIndex].title}，第 ${_currentHorizontalPageIndex + 1}${columns == 2 && _currentHorizontalPageIndex + 1 < current.pages.length ? '–${_currentHorizontalPageIndex + 2}' : ''} 页',
                 onCenterTap: _toggleControls,
+                animationSpeed: _readerPreferences.animationSpeed,
+                tapToTurn: _readerPreferences.tapToTurn,
                 onPreviousBoundary: () => _startFromChapter(
                   _currentActiveIndex - 1,
                   toLastPage: true,
@@ -5073,6 +6501,64 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
+  Widget _buildPageSpread(
+    _ReaderPageAddress address,
+    ReaderTheme theme,
+    BoxConstraints constraints,
+    int columns,
+  ) => _desktopSelection(
+    _buildPageColumns(address, theme, constraints, columns),
+    key: ValueKey(('desktop-page-selection', address)),
+  );
+
+  Widget _buildPageColumns(
+    _ReaderPageAddress address,
+    ReaderTheme theme,
+    BoxConstraints constraints,
+    int columns,
+  ) {
+    if (columns == 1) return _buildSinglePageCard(address, theme, constraints);
+    final width = (constraints.maxWidth - _readerPreferences.columnGap) / 2;
+    final columnConstraints = BoxConstraints.tight(
+      Size(width, constraints.maxHeight),
+    );
+    final rightIndex = address.pageIndex + 1;
+    return Row(
+      key: const ValueKey('reader-double-column-spread'),
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Expanded(
+          child: _buildSinglePageCard(address, theme, columnConstraints),
+        ),
+        SizedBox(
+          width: _readerPreferences.columnGap,
+          child: Center(
+            child: VerticalDivider(
+              width: 1,
+              color: theme.secondaryColor.withValues(alpha: .15),
+            ),
+          ),
+        ),
+        Expanded(
+          child: rightIndex < address.layout.pages.length
+              ? _buildSinglePageCard(
+                  _ReaderPageAddress(
+                    address.chapterIndex,
+                    rightIndex,
+                    address.layout,
+                  ),
+                  theme,
+                  columnConstraints,
+                )
+              : ColoredBox(
+                  key: const ValueKey('reader-empty-right-column'),
+                  color: theme.backgroundColor,
+                ),
+        ),
+      ],
+    );
+  }
+
   void _onPageSettled(ReaderPageItem item) {
     final address = item.id as _ReaderPageAddress;
     final changedChapter = address.chapterIndex != _currentActiveIndex;
@@ -5082,7 +6568,10 @@ class _ReaderScreenState extends State<ReaderScreen>
       _activeChapterNotifier.value = address.chapterIndex;
       _readingPosition =
           address.anchor ?? address.page.position(address.layout.chapterId);
-      _positionNeedsReflow = false;
+      // A window/full-screen resize may have prepared a newer layout while
+      // this turn was finishing. Never reuse an old page number in that layout.
+      _positionNeedsReflow =
+          _preparedPages[address.chapterIndex]?.key != address.layout.key;
       _chapterTransition = null;
       _activeSelectableParaNotifier.value = null;
       if (changedChapter) {
@@ -5113,7 +6602,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     final chapter = widget.chapters[address.chapterIndex];
     final page = address.page;
     final paragraphs = address.layout.sourceParagraphs;
-    return ColoredBox(
+    final content = ColoredBox(
+      key: ValueKey('reader-column-${chapter.itemId}-${address.pageIndex}'),
       color: theme.backgroundColor,
       child: Padding(
         padding: EdgeInsets.symmetric(
@@ -5123,40 +6613,51 @@ class _ReaderScreenState extends State<ReaderScreen>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (address.pageIndex == 0) ...[
-              SizedBox(
-                height: page.titleHeight,
-                child: FittedBox(
-                  fit: BoxFit.scaleDown,
-                  alignment: Alignment.centerLeft,
-                  child: SizedBox(
-                    width: constraints.maxWidth - _horizontalPadding * 2,
-                    child: Text(
-                      chapter.title,
-                      style: TextStyle(
-                        fontSize: _fontSize + 4,
-                        height: 1.4,
-                        fontWeight: FontWeight.bold,
-                        color: theme.textColor,
-                        fontFamily: _resolveFontFamily(_fontFamily),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-              const SizedBox(height: 10),
-            ],
             Expanded(
               child: ClipRect(
-                child: SingleChildScrollView(
-                  physics: page.oversized
-                      ? const ClampingScrollPhysics()
-                      : const NeverScrollableScrollPhysics(),
+                child: DesktopPageSelectionViewport(
+                  oversized: page.oversized,
                   child: AnimatedBuilder(
                     animation: _paragraphSignals,
                     builder: (context, _) => Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        // Keep both column scrollable selection viewports at
+                        // the same y-origin. A title outside the left viewport
+                        // makes native drag edges near the top of the right
+                        // page look "before" the left one and get rejected.
+                        if (address.pageIndex == 0) ...[
+                          SizedBox(
+                            height: page.titleHeight,
+                            child: FittedBox(
+                              fit: BoxFit.scaleDown,
+                              alignment: Alignment.centerLeft,
+                              child: SizedBox(
+                                width:
+                                    constraints.maxWidth -
+                                    _horizontalPadding * 2,
+                                child: _nonSelectable(
+                                  Text(
+                                    ReaderDisplayText.convert(
+                                      chapter.title,
+                                      _readerPreferences.displayScript,
+                                    ),
+                                    style: TextStyle(
+                                      fontSize: _fontSize + 4,
+                                      height: 1.4,
+                                      fontWeight: FontWeight.bold,
+                                      color: theme.textColor,
+                                      fontFamily: _resolveFontFamily(
+                                        _fontFamily,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                        ],
                         for (
                           var index = 0;
                           index < page.fragments.length;
@@ -5190,7 +6691,9 @@ class _ReaderScreenState extends State<ReaderScreen>
                         ],
                         if (page.chapterEndHeight > 0) ...[
                           const SizedBox(height: 28),
-                          _buildChapterEndComments(chapter, theme),
+                          _nonSelectable(
+                            _buildChapterEndComments(chapter, theme),
+                          ),
                         ],
                       ],
                     ),
@@ -5204,13 +6707,15 @@ class _ReaderScreenState extends State<ReaderScreen>
                 child: Center(
                   child: FittedBox(
                     fit: BoxFit.scaleDown,
-                    child: Text(
-                      '第 ${address.pageIndex + 1} / ${address.layout.pages.length} 页',
-                      style: TextStyle(
-                        fontSize: 11,
-                        height: 1,
-                        letterSpacing: 1,
-                        color: theme.secondaryColor,
+                    child: _nonSelectable(
+                      Text(
+                        '第 ${address.pageIndex + 1} / ${address.layout.pages.length} 页',
+                        style: TextStyle(
+                          fontSize: 11,
+                          height: 1,
+                          letterSpacing: 1,
+                          color: theme.secondaryColor,
+                        ),
                       ),
                     ),
                   ),
@@ -5220,6 +6725,8 @@ class _ReaderScreenState extends State<ReaderScreen>
         ),
       ),
     );
+    // Each aligned SingleChildScrollView groups its column's native selection.
+    return content;
   }
 
   Widget _buildCommentBubble(
@@ -5337,6 +6844,34 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     var result = spans;
     final prefix = math.max(0, text.length - (sourceEnd - sourceStart));
+    for (final match
+        in _searchMarks[(chapterId, paragraphIndex)] ?? <ReaderSearchHit>[]) {
+      final start = math.max(sourceStart, match.position.characterOffset);
+      final end = math.min(sourceEnd, match.endOffset);
+      if (start >= end ||
+          text.substring(
+                start - sourceStart + prefix,
+                end - sourceStart + prefix,
+              ) !=
+              match.quote.substring(
+                start - match.position.characterOffset,
+                end - match.position.characterOffset,
+              )) {
+        continue;
+      }
+      result = _paintSpanRange(
+        result,
+        start - sourceStart + prefix,
+        end - sourceStart + prefix,
+        TextStyle(
+          backgroundColor: Color.lerp(
+            theme.backgroundColor,
+            theme.textColor,
+            .14,
+          ),
+        ),
+      );
+    }
     if (spoken != null) {
       result = _paintSpanRange(
         result,
@@ -5542,13 +7077,25 @@ class _ReaderScreenState extends State<ReaderScreen>
                   ).whenComplete(_endReaderPanel);
                   if (edit == null) return;
                   if (existing != null) {
-                    await _bookmarkService.updateNote(
-                      existing.note.edited(
-                        note: edit.note,
-                        colorIndex: edit.colorIndex,
-                        tags: edit.tags,
-                      ),
-                    );
+                    try {
+                      final undo = await _bookmarkService.updateNoteWithUndo(
+                        existing.note.edited(
+                          note: edit.note,
+                          colorIndex: edit.colorIndex,
+                          tags: edit.tags,
+                        ),
+                        expectedUpdatedAt: existing.note.updatedAt,
+                      );
+                      if (mounted && undo != null) {
+                        showReaderUndo(this.context, '笔记已更新', [undo]);
+                      }
+                    } catch (_) {
+                      if (mounted) {
+                        messenger.showSnackBar(
+                          const SnackBar(content: Text('笔记未保存，较新的记录与旧版本都保留')),
+                        );
+                      }
+                    }
                   } else {
                     await _saveSelectedNote(
                       chapterIndex,
@@ -5610,18 +7157,20 @@ class _ReaderScreenState extends State<ReaderScreen>
                   ),
                   onPressed: () async {
                     onDismiss();
-                    await _bookmarkService.removeNote(
-                      existing.note.id,
-                      widget.book.bookId,
-                    );
-                    await _loadNotes();
-                    if (mounted) {
-                      messenger.showSnackBar(
-                        const SnackBar(
-                          content: Text('已取消划线'),
-                          duration: Duration(seconds: 1),
-                        ),
+                    try {
+                      final undo = await _bookmarkService.deleteNotes(
+                        widget.book.bookId,
+                        {existing.note.id},
                       );
+                      if (mounted && undo != null) {
+                        showReaderUndo(this.context, '划线已移入回收站', [undo]);
+                      }
+                    } catch (_) {
+                      if (mounted) {
+                        messenger.showSnackBar(
+                          const SnackBar(content: Text('删除未完成，原批注保留')),
+                        );
+                      }
                     }
                   },
                   icon: const Icon(
@@ -5923,6 +7472,36 @@ class _ReaderSheetLifetimeState extends State<_ReaderSheetLifetime> {
 
   @override
   Widget build(BuildContext context) => widget.child;
+}
+
+class _ReaderDirectoryViewport extends StatefulWidget {
+  final Widget Function(BuildContext, ScrollController) builder;
+  const _ReaderDirectoryViewport({required this.builder});
+
+  @override
+  State<_ReaderDirectoryViewport> createState() =>
+      _ReaderDirectoryViewportState();
+}
+
+class _ReaderDirectoryViewportState extends State<_ReaderDirectoryViewport> {
+  final _controller = ScrollController();
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => ReaderPlatform.isMacOS
+      ? widget.builder(context, _controller)
+      : DraggableScrollableSheet(
+          initialChildSize: .75,
+          minChildSize: .4,
+          maxChildSize: .95,
+          expand: false,
+          builder: widget.builder,
+        );
 }
 
 class _ResolvedChapterNotes {

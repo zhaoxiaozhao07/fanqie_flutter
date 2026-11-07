@@ -8,6 +8,8 @@ import 'package:flutter/rendering.dart';
 
 /// 四角纸张翻折。正文与纸背快照独立缓存，拖拽只更新裁剪、变换和窄幅光影。
 class SimulationPageTurn extends StatefulWidget {
+  static const desktopAnimationDuration = Duration(milliseconds: 360);
+  final Duration animationDuration;
   final int totalPages;
   final int currentPageIndex;
   final Widget Function(BuildContext context, int pageIndex) pageBuilder;
@@ -32,9 +34,11 @@ class SimulationPageTurn extends StatefulWidget {
   final double nextTapFraction;
   final bool reverseTapSides;
   final Set<PointerDeviceKind>? supportedDevices;
+  final bool tapToTurn;
 
   const SimulationPageTurn({
     super.key,
+    this.animationDuration = const Duration(milliseconds: 300),
     required this.totalPages,
     required this.currentPageIndex,
     required this.pageBuilder,
@@ -59,6 +63,7 @@ class SimulationPageTurn extends StatefulWidget {
     this.nextTapFraction = 0.72,
     this.reverseTapSides = false,
     this.supportedDevices,
+    this.tapToTurn = true,
   });
 
   @override
@@ -70,12 +75,13 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   late final AnimationController _animController;
   Animation<Offset>? _dragAnimation;
   final ValueNotifier<_CurlGeometry?> _geometry = ValueNotifier(null);
-  final GlobalKey _frontPageKey = GlobalKey();
+  final Map<int, GlobalKey> _pageKeys = {};
   final Map<int, Widget> _pageWidgets = {};
   ui.Image? _backImage;
   ui.Image? _preparedBackImage;
   bool _snapshotDirty = true;
   bool _snapshotPending = false;
+  int _snapshotGeneration = 0;
   bool _snapshotSelectionActive = false;
 
   bool _isDragging = false;
@@ -106,7 +112,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     super.initState();
     _animController = AnimationController(
       vsync: this,
-      duration: const Duration(milliseconds: 300),
+      duration: widget.animationDuration,
     )..addListener(_onAnimationTick);
     widget.pageContentChanges?.addListener(_invalidateSnapshot);
   }
@@ -121,9 +127,12 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     final selectionActive = widget.isSelectionActive?.call() == true;
     if (oldWidget.pageSetKey != widget.pageSetKey ||
         oldWidget.contentVersion != widget.contentVersion ||
-        oldWidget.backgroundColor != widget.backgroundColor ||
-        oldWidget.currentPageIndex != widget.currentPageIndex) {
+        oldWidget.backgroundColor != widget.backgroundColor) {
       _pageWidgets.clear();
+      _pageKeys.clear();
+      _invalidateSnapshot();
+    }
+    if (oldWidget.currentPageIndex != widget.currentPageIndex) {
       _invalidateSnapshot();
     }
     if (_snapshotSelectionActive != selectionActive) _invalidateSnapshot();
@@ -145,6 +154,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   void didChangeDependencies() {
     super.didChangeDependencies();
     _pageWidgets.clear();
+    _pageKeys.clear();
     _invalidateSnapshot();
   }
 
@@ -217,6 +227,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   );
 
   void _invalidateSnapshot() {
+    _snapshotGeneration++;
     _snapshotDirty = true;
     _scheduleBackImage();
   }
@@ -224,20 +235,36 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   void _scheduleBackImage() {
     if (!mounted || !_snapshotDirty || _snapshotPending || _isTurning) return;
     _snapshotPending = true;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
       _snapshotPending = false;
       if (!mounted || _isTurning || !_snapshotDirty) return;
-      final boundary = _frontPageKey.currentContext?.findRenderObject();
+      final boundary = _pageKeys[widget.currentPageIndex]?.currentContext
+          ?.findRenderObject();
       if (boundary is! RenderRepaintBoundary ||
           !boundary.attached ||
           !boundary.hasSize ||
           (kDebugMode && boundary.debugNeedsPaint)) {
         return;
       }
+      final generation = _snapshotGeneration;
+      _snapshotPending = true;
+      ui.Image image;
+      try {
+        image = await boundary.toImage(
+          pixelRatio: MediaQuery.devicePixelRatioOf(context).clamp(1.0, 1.5),
+        );
+      } catch (_) {
+        _snapshotPending = false;
+        return;
+      }
+      _snapshotPending = false;
+      if (!mounted || _isTurning || generation != _snapshotGeneration) {
+        image.dispose();
+        if (mounted) _scheduleBackImage();
+        return;
+      }
       final oldImage = _preparedBackImage;
-      _preparedBackImage = boundary.toImageSync(
-        pixelRatio: MediaQuery.devicePixelRatioOf(context).clamp(1.0, 1.5),
-      );
+      _preparedBackImage = image;
       _snapshotDirty = false;
       if (oldImage != null) {
         WidgetsBinding.instance.addPostFrameCallback((_) => oldImage.dispose());
@@ -267,7 +294,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     final distance = (to - from).distance;
     final remaining = (distance / (_viewSize.width * 2)).clamp(0.0, 1.0);
     if (releaseVelocity == null) {
-      _animController.duration = const Duration(milliseconds: 300);
+      _animController.duration = widget.animationDuration;
       _dragAnimation = Tween<Offset>(
         begin: from,
         end: to,
@@ -276,11 +303,18 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
       final direction = distance < 0.01 ? Offset.zero : (to - from) / distance;
       final speed =
           releaseVelocity.dx * direction.dx + releaseVelocity.dy * direction.dy;
+      final releaseScale =
+          widget.animationDuration.inMicroseconds /
+          const Duration(milliseconds: 300).inMicroseconds;
       final milliseconds = distance < 1
           ? 1
           : speed > 350
-          ? (distance / speed * 1100).clamp(70.0, 260.0).round()
-          : (260 * math.sqrt(remaining)).clamp(90.0, 260.0).round();
+          ? (distance / speed * 1100 * releaseScale)
+                .clamp(70 * releaseScale, 260 * releaseScale)
+                .round()
+          : (260 * releaseScale * math.sqrt(remaining))
+                .clamp(90 * releaseScale, 260 * releaseScale)
+                .round();
       _animController.duration = Duration(milliseconds: milliseconds);
       _dragAnimation = _ReleaseTween(
         begin: from,
@@ -506,6 +540,10 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
       widget.onDismissSelection?.call();
       return;
     }
+    if (!widget.tapToTurn) {
+      widget.onCenterTap?.call();
+      return;
+    }
     final w = _viewSize.width;
     if (position.dx < w * widget.previousTapFraction ||
         position.dx > w * widget.nextTapFraction) {
@@ -539,6 +577,9 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
         ColoredBox(color: widget.backgroundColor);
   }
 
+  GlobalKey _keyForPage(int index) =>
+      _pageKeys.putIfAbsent(index, GlobalKey.new);
+
   @override
   Widget build(BuildContext context) {
     return LayoutBuilder(
@@ -547,13 +588,15 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
           if (_isTurning) _resetTurn();
           _viewSize = constraints.biggest;
           _pageWidgets.clear();
+          _pageKeys.clear();
           _invalidateSnapshot();
         }
         _scheduleBackImage();
         final sourceIndex = _turnSourceIndex ?? widget.currentPageIndex;
         _pageWidgets.removeWhere((index, _) => (index - sourceIndex).abs() > 1);
+        _pageKeys.removeWhere((index, _) => (index - sourceIndex).abs() > 1);
         final frontPage = RepaintBoundary(
-          key: _frontPageKey,
+          key: _keyForPage(sourceIndex),
           child: _buildCachedPage(context, sourceIndex),
         );
         final backPage = RepaintBoundary(
@@ -569,103 +612,107 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
         return Listener(
           onPointerCancel: (_) => _pointerCancelled = true,
           child: GestureDetector(
-            supportedDevices: widget.supportedDevices,
             behavior: HitTestBehavior.translucent,
-            dragStartBehavior: DragStartBehavior.down,
-            onHorizontalDragDown: _onDragDown,
-            onHorizontalDragStart: (_) {},
-            onHorizontalDragUpdate: _onDragUpdate,
-            onHorizontalDragEnd: _onDragEnd,
-            onHorizontalDragCancel: _onDragCancel,
             onTapUp: (details) => _handleTapAt(details.localPosition),
-            child: ClipRect(
-              child: Stack(
-                fit: StackFit.expand,
-                children: [
-                  ExcludeSemantics(
-                    child: IgnorePointer(
-                      child: Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          // 只预排版相邻两页；静止时不绘制，不增加整屏 GPU 开销。
-                          for (final index in [
-                            sourceIndex - 1,
-                            sourceIndex + 1,
-                          ])
-                            Offstage(
-                              key: ValueKey(index),
-                              offstage: index != _turnTargetIndex,
-                              child: RepaintBoundary(
-                                child: _buildCachedPage(context, index),
+            child: GestureDetector(
+              supportedDevices: widget.supportedDevices,
+              behavior: HitTestBehavior.translucent,
+              dragStartBehavior: DragStartBehavior.down,
+              onHorizontalDragDown: _onDragDown,
+              onHorizontalDragStart: (_) {},
+              onHorizontalDragUpdate: _onDragUpdate,
+              onHorizontalDragEnd: _onDragEnd,
+              onHorizontalDragCancel: _onDragCancel,
+              child: ClipRect(
+                child: Stack(
+                  fit: StackFit.expand,
+                  children: [
+                    ExcludeSemantics(
+                      child: IgnorePointer(
+                        child: Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            // 只预排版相邻两页；静止时不绘制，不增加整屏 GPU 开销。
+                            for (final index in [
+                              sourceIndex - 1,
+                              sourceIndex + 1,
+                            ])
+                              Offstage(
+                                key: ValueKey(index),
+                                offstage: index != _turnTargetIndex,
+                                child: RepaintBoundary(
+                                  key: _keyForPage(index),
+                                  child: _buildCachedPage(context, index),
+                                ),
                               ),
-                            ),
-                        ],
+                          ],
+                        ),
                       ),
                     ),
-                  ),
-                  AnimatedBuilder(
-                    animation: _geometry,
-                    child: frontPage,
-                    builder: (context, staticFrontPage) {
-                      final geometry = _geometry.value;
-                      return Stack(
-                        fit: StackFit.expand,
-                        children: [
-                          CustomPaint(
-                            painter: _FoldShadowPainter(
-                              geometry: geometry,
-                              isDark: widget.isDark,
-                              isSpine: false,
+                    AnimatedBuilder(
+                      animation: _geometry,
+                      child: frontPage,
+                      builder: (context, staticFrontPage) {
+                        final geometry = _geometry.value;
+                        return Stack(
+                          fit: StackFit.expand,
+                          children: [
+                            CustomPaint(
+                              painter: _FoldShadowPainter(
+                                geometry: geometry,
+                                isDark: widget.isDark,
+                                isSpine: false,
+                              ),
                             ),
-                          ),
-                          ClipPath(
-                            clipper: _PolygonClipper(geometry?.frontPolygon),
-                            child: IgnorePointer(
-                              ignoring: _isTurning,
-                              child: staticFrontPage,
+                            ClipPath(
+                              clipper: _PolygonClipper(geometry?.frontPolygon),
+                              child: IgnorePointer(
+                                ignoring: _isTurning,
+                                child: staticFrontPage,
+                              ),
                             ),
-                          ),
-                          ExcludeSemantics(
-                            child: IgnorePointer(
-                              child: ClipPath(
-                                clipper: _PolygonClipper(
-                                  geometry?.backPolygon ?? const [],
-                                ),
-                                child: Stack(
-                                  fit: StackFit.expand,
-                                  children: [
-                                    ColoredBox(
-                                      color: Color.lerp(
-                                        widget.backgroundColor,
-                                        widget.isDark
-                                            ? Colors.white
-                                            : const Color(0xFFE8DFC8),
-                                        widget.isDark ? 0.04 : 0.18,
-                                      )!,
-                                    ),
-                                    Transform(
-                                      transform:
-                                          geometry?.reflectionMatrix ??
-                                          Matrix4.identity(),
-                                      child: backPage,
-                                    ),
-                                    CustomPaint(
-                                      painter: _FoldShadowPainter(
-                                        geometry: geometry,
-                                        isDark: widget.isDark,
-                                        isSpine: true,
+                            ExcludeSemantics(
+                              child: IgnorePointer(
+                                child: ClipPath(
+                                  clipper: _PolygonClipper(
+                                    geometry?.backPolygon ?? const [],
+                                  ),
+                                  child: Stack(
+                                    fit: StackFit.expand,
+                                    children: [
+                                      ColoredBox(
+                                        color: Color.lerp(
+                                          widget.backgroundColor,
+                                          widget.isDark
+                                              ? Colors.white
+                                              : const Color(0xFFE8DFC8),
+                                          widget.isDark ? 0.04 : 0.18,
+                                        )!,
                                       ),
-                                    ),
-                                  ],
+                                      Transform(
+                                        transform:
+                                            geometry?.reflectionMatrix ??
+                                            Matrix4.identity(),
+                                        child: backPage,
+                                      ),
+                                      CustomPaint(
+                                        painter: _FoldShadowPainter(
+                                          geometry: geometry,
+                                          isDark: widget.isDark,
+                                          isSpine: true,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
                                 ),
                               ),
                             ),
-                          ),
-                        ],
-                      );
-                    },
-                  ),
-                ],
+                          ],
+                        );
+                      },
+                    ),
+                  ],
+                ),
               ),
             ),
           ),

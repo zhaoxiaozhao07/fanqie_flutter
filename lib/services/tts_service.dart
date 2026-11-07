@@ -18,6 +18,8 @@ import 'reader_system_service.dart';
 import 'reader_platform.dart';
 import 'reader_text.dart';
 import 'reading_history_service.dart';
+import 'compatible_tts_client.dart';
+import 'reader_library_service.dart';
 
 enum TtsEngineType { native, openAi }
 
@@ -55,10 +57,12 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     : _testInvoker = false,
       _invoke = _nativeInvoke,
       _http = http.Client(),
+      _temporary = getTemporaryDirectory,
+      _nativeOverride = null,
       _now = DateTime.now {
     WidgetsBinding.instance.addObserver(this);
     _bindPlatformEvents();
-    _ready = loadSettings();
+    _ready = loadSettings().whenComplete(() => _initialSettingsFinished = true);
   }
 
   @visibleForTesting
@@ -67,15 +71,19 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     http.Client? client,
     DateTime Function()? now,
     bool bindPlatformEvents = false,
+    Future<Directory> Function()? temporary,
+    bool nativeSpeechAvailable = true,
   }) : _testInvoker = true,
        _invoke = invoke,
        _http = client ?? http.Client(),
+       _temporary = temporary ?? getTemporaryDirectory,
+       _nativeOverride = nativeSpeechAvailable,
        _now = now ?? DateTime.now {
     if (bindPlatformEvents) {
       WidgetsBinding.instance.addObserver(this);
       _bindPlatformEvents();
     }
-    _ready = loadSettings();
+    _ready = loadSettings().whenComplete(() => _initialSettingsFinished = true);
   }
 
   static Future<Object?> _nativeInvoke(
@@ -93,6 +101,14 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
       ReaderPlatform.capabilities.tts;
   final TtsInvoker _invoke;
   final http.Client _http;
+  late final _speechClient = CompatibleTtsClient(_http);
+  final Future<Directory> Function() _temporary;
+  final bool? _nativeOverride;
+  bool get nativeSpeechAvailable =>
+      _nativeOverride ?? ReaderPlatform.capabilities.nativeSpeech;
+  bool _settingsLoaded = false, _initialSettingsFinished = false;
+  Future<void>? _settingsWrites;
+  final _ownedAudio = <String>{};
   final DateTime Function() _now;
   final ApiService _api = ApiService();
   late final Future<void> _ready;
@@ -111,6 +127,10 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   String _openAiApiKey = '';
   String _openAiModel = 'tts-1';
   String _openAiVoice = 'alloy';
+  String _nativeVoice = '';
+  String get nativeVoice => _nativeVoice;
+  static const settingsKey = 'tts_settings_v2';
+  String? _lastNetworkError;
   double _speechRate = 1;
   TtsPlayState _state = TtsPlayState.stopped;
   List<TtsChunk> _chunks = [];
@@ -119,6 +139,8 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   String _source = '';
   Book? _book;
   List<Chapter> _chapters = [];
+  Future<String?> Function(Chapter)? _contentLoader;
+  bool _offlineOnly = false;
   int _chapterIndex = 0;
   ReadingPosition? _pendingBookPosition;
   final Map<String, int> _attachedReaders = {};
@@ -258,18 +280,65 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
       _state != TtsPlayState.stopped &&
       _state != TtsPlayState.paused;
 
+  Future<void> _ensureReady() async {
+    if (_settingsLoaded) return;
+    if (!_initialSettingsFinished) await _ready;
+    if (!_settingsLoaded && isAvailable) await loadSettings();
+  }
+
+  Future<List<Map<String, dynamic>>> nativeVoices() async {
+    if (!ReaderPlatform.isMacOS || !nativeSpeechAvailable) return [];
+    final raw = await _safe('getNativeTtsVoices');
+    return raw is List
+        ? raw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
+        : [];
+  }
+
   Future<void> loadSettings() async {
     if (!isAvailable) return;
     final prefs = await SharedPreferences.getInstance();
-    _engineType = prefs.getString('tts_engine_type') == 'openAi'
+    Map data = {};
+    final raw = prefs.getString(settingsKey);
+    if (raw != null) {
+      try {
+        data = jsonDecode(raw) as Map;
+        if (data['version'] != 2) throw const FormatException('语音配置版本不支持');
+      } catch (_) {
+        _notice = '语音配置不可读，原记录已保留，暂用兼容配置';
+        data = {};
+      }
+    }
+    _engineType =
+        (data['engine'] ?? prefs.getString('tts_engine_type')) == 'openAi'
         ? TtsEngineType.openAi
         : TtsEngineType.native;
     _openAiBaseUrl =
-        prefs.getString('tts_openai_base_url') ?? 'https://api.openai.com';
-    _openAiModel = prefs.getString('tts_openai_model') ?? 'tts-1';
-    _openAiVoice = prefs.getString('tts_openai_voice') ?? 'alloy';
-    _speechRate = (prefs.getDouble('tts_speech_rate') ?? 1).clamp(.5, 2);
+        (data['base_url'] ??
+                prefs.getString('tts_openai_base_url') ??
+                'https://api.openai.com')
+            .toString();
+    _openAiModel =
+        (data['model'] ?? prefs.getString('tts_openai_model') ?? 'tts-1')
+            .toString();
+    _openAiVoice =
+        (data['voice'] ?? prefs.getString('tts_openai_voice') ?? 'alloy')
+            .toString();
+    _nativeVoice =
+        (data['native_voice'] ?? prefs.getString('tts_native_voice') ?? '')
+            .toString();
+    final rate = data['rate'] ?? prefs.get('tts_speech_rate');
+    _speechRate = rate is num && rate.isFinite
+        ? rate.toDouble().clamp(.5, 2)
+        : 1;
     final legacy = prefs.getString('tts_openai_api_key');
+    if (raw == null &&
+        legacy == null &&
+        _engineType == TtsEngineType.native &&
+        !prefs.containsKey('tts_openai_base_url')) {
+      _settingsLoaded = true;
+      _notify();
+      return; // Native-only fresh profiles need not read a user's Keychain.
+    }
     try {
       _openAiApiKey = (await _invoke('readTtsSecret', null)) as String? ?? '';
       if (_openAiApiKey.isEmpty && legacy?.isNotEmpty == true) {
@@ -278,10 +347,13 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
         }
         _openAiApiKey = legacy!;
       }
-      if (legacy != null) await prefs.remove('tts_openai_api_key');
+      if (legacy != null && !await prefs.remove('tts_openai_api_key')) {
+        _notice = '密钥已迁移，旧配置尚未清除，请检查存储空间';
+      }
     } catch (_) {
-      if (legacy?.isNotEmpty == true) _notice = '语音密钥迁移未完成，请在设置中重新保存';
+      _notice = '系统安全存储暂不可用；未删除原密钥，请在设置中重新保存';
     }
+    _settingsLoaded = true;
     _notify();
   }
 
@@ -292,77 +364,114 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     String? openAiModel,
     String? openAiVoice,
     double? speechRate,
-  }) async {
-    if (!isAvailable) throw UnsupportedError('macOS 听书将在后续版本提供');
-    await _ready;
-    final previousVoice = (
-      _engineType,
-      _openAiBaseUrl,
-      _openAiApiKey,
-      _openAiModel,
-      _openAiVoice,
-      _speechRate,
-    );
-    if (openAiBaseUrl != null) {
-      final uri = Uri.tryParse(openAiBaseUrl.trim());
-      final local =
-          uri != null &&
-          ['localhost', '127.0.0.1', '::1', '10.0.2.2'].contains(uri.host);
-      if (uri == null ||
-          uri.host.isEmpty ||
-          uri.userInfo.isNotEmpty ||
-          (uri.scheme != 'https' && !(uri.scheme == 'http' && local))) {
-        throw const FormatException('语音接口须使用 HTTPS（本机调试地址除外）');
-      }
-    }
-    // A failed secure write must not silently drop the old key or persist plaintext.
-    if (openAiApiKey != null) {
-      if (await _invoke('writeTtsSecret', {'value': openAiApiKey.trim()}) !=
-          true) {
-        throw StateError('语音密钥未能写入系统安全存储');
-      }
-      _openAiApiKey = openAiApiKey.trim();
-    }
-    final prefs = await SharedPreferences.getInstance();
-    if (engineType != null) _engineType = engineType;
-    if (openAiBaseUrl != null) {
-      _openAiBaseUrl = openAiBaseUrl.trim().replaceAll(RegExp(r'/+$'), '');
-    }
-    if (openAiModel != null) _openAiModel = openAiModel.trim();
-    if (openAiVoice != null) _openAiVoice = openAiVoice.trim();
-    if (speechRate != null) _speechRate = speechRate.clamp(.5, 2);
-    await prefs.setString('tts_engine_type', _engineType.name);
-    await prefs.setString('tts_openai_base_url', _openAiBaseUrl);
-    await prefs.setString('tts_openai_model', _openAiModel);
-    await prefs.setString('tts_openai_voice', _openAiVoice);
-    await prefs.setDouble('tts_speech_rate', _speechRate);
-    await prefs.remove('tts_openai_api_key');
-    final nextVoice = (
-      _engineType,
-      _openAiBaseUrl,
-      _openAiApiKey,
-      _openAiModel,
-      _openAiVoice,
-      _speechRate,
-    );
-    if (isActive && previousVoice != nextVoice) {
-      await pause();
-      ++_session;
-      _playToken = null;
-      _preloads.clear();
-      _actualEngine = null;
-      _audioStarted = false;
-      final stale = <String>[];
-      for (final chunk in _chunks) {
-        if (chunk.audioFilePath != null) stale.add(chunk.audioFilePath!);
-        chunk.audioFilePath = null;
-        chunk.isPreloaded = false;
-      }
-      await _deletePaths(stale);
-      _errorMessage = null;
-      _notice = '语音设置已保存，点击继续应用新设置';
-    }
-    _notify();
+    String? nativeVoice,
+  }) {
+    late final Future<void> pending;
+    pending = (_settingsWrites ?? Future<void>.value())
+        .catchError((_) {})
+        .then((_) async {
+          if (!isAvailable) throw UnsupportedError('当前平台没有可用音频能力');
+          await _ensureReady();
+          final engine = engineType ?? _engineType;
+          final base = (openAiBaseUrl ?? _openAiBaseUrl).trim().replaceAll(
+            RegExp(r'/+$'),
+            '',
+          );
+          final model = (openAiModel ?? _openAiModel).trim();
+          final voice = (openAiVoice ?? _openAiVoice).trim();
+          final native = (nativeVoice ?? _nativeVoice).trim();
+          final key = (openAiApiKey ?? _openAiApiKey).trim();
+          final rate = speechRate ?? _speechRate;
+          CompatibleTtsClient.endpoint(base);
+          if (model.isEmpty ||
+              model.length > 256 ||
+              voice.isEmpty ||
+              voice.length > 256 ||
+              native.length > 512 ||
+              utf8.encode(key).length > 8192 ||
+              key.contains(RegExp(r'[\r\n\x00]')) ||
+              !rate.isFinite) {
+            throw const FormatException('语音参数不能为空、包含非法字符或超过长度限制');
+          }
+          final before = (
+            _engineType,
+            _openAiBaseUrl,
+            _openAiApiKey,
+            _openAiModel,
+            _openAiVoice,
+            _speechRate,
+            _nativeVoice,
+          );
+          if (isActive) await pause();
+          final prefs = await SharedPreferences.getInstance();
+          if (openAiApiKey != null &&
+              await _invoke('writeTtsSecret', {'value': key}) != true) {
+            throw StateError('语音密钥未写入系统安全存储；原配置保留');
+          }
+          final json = jsonEncode({
+            'version': 2,
+            'engine': engine.name,
+            'base_url': base,
+            'model': model,
+            'voice': voice,
+            'rate': rate.clamp(.5, 2),
+            'native_voice': native,
+          });
+          if (!await prefs.setString(settingsKey, json)) {
+            if (openAiApiKey != null) {
+              await _safe('writeTtsSecret', {'value': _openAiApiKey});
+            }
+            throw StateError('语音配置未保存，已尝试恢复原密钥');
+          }
+          _engineType = engine;
+          _openAiBaseUrl = base;
+          _openAiApiKey = key;
+          _openAiModel = model;
+          _openAiVoice = voice;
+          _speechRate = rate.clamp(.5, 2);
+          _nativeVoice = native;
+          // Compatibility mirrors contain no secret; v2 is the atomic authority.
+          await prefs.setString('tts_engine_type', engine.name);
+          await prefs.setString('tts_openai_base_url', base);
+          await prefs.setString('tts_openai_model', model);
+          await prefs.setString('tts_openai_voice', voice);
+          await prefs.setString('tts_native_voice', native);
+          await prefs.setDouble('tts_speech_rate', _speechRate);
+          await prefs.remove('tts_openai_api_key');
+          final after = (
+            _engineType,
+            _openAiBaseUrl,
+            _openAiApiKey,
+            _openAiModel,
+            _openAiVoice,
+            _speechRate,
+            _nativeVoice,
+          );
+          if (isActive && before != after) {
+            ++_session;
+            _playToken = null;
+            _speechClient.cancel();
+            _preloads.clear();
+            _actualEngine = null;
+            _audioStarted = false;
+            final stale = <String>[];
+            for (final chunk in _chunks) {
+              if (chunk.audioFilePath != null) stale.add(chunk.audioFilePath!);
+              chunk.audioFilePath = null;
+              chunk.isPreloaded = false;
+            }
+            await _deletePaths(stale);
+            _errorMessage = null;
+            _notice = '语音设置已保存，点击继续应用新设置';
+          }
+          _settingsLoaded = true;
+          _notify();
+        })
+        .whenComplete(() {
+          if (identical(_settingsWrites, pending)) _settingsWrites = null;
+        });
+    _settingsWrites = pending;
+    return pending;
   }
 
   List<TtsChunk> splitIntoChunks(String content, {int startOffset = 0}) {
@@ -390,6 +499,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
 
     // Grapheme iteration never splits surrogate pairs or combining characters.
     for (final character in content.substring(start).characters) {
+      if (end > start && end - start + character.length > 4096) flush();
       end += character.length;
       count++;
       if (count >= 200 ||
@@ -406,19 +516,23 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     List<Chapter> chapters,
     int chapterIndex, {
     ReadingPosition? position,
+    Future<String?> Function(Chapter)? contentLoader,
+    bool offlineOnly = false,
   }) async {
     if (!isAvailable) {
-      _notice = 'macOS 听书将在后续版本提供';
+      _notice = '当前平台没有可用的音频播放能力';
       _notify();
       return;
     }
     final intent = ++_startIntent;
-    await _ready;
+    await _ensureReady();
     if (intent != _startIntent) return;
     await stop(supersedeStart: false);
     if (intent != _startIntent) return;
     if (chapters.isEmpty || _closed) return;
     _book = book;
+    _contentLoader = contentLoader;
+    _offlineOnly = offlineOnly;
     _chapters = List.unmodifiable(chapters);
     _chapterIndex = chapterIndex.clamp(0, chapters.length - 1);
     await _openBookChapter(_chapterIndex, position: position);
@@ -446,9 +560,13 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     try {
       final raw =
           chapter.content ??
-          await _api
-              .getChapterContent(chapter.itemId, bookId: book.bookId)
-              .timeout(const Duration(seconds: 30));
+          (_contentLoader != null
+              ? await _contentLoader!(chapter)
+              : _offlineOnly
+              ? await _api.engine.readerCache.read(book.bookId, chapter.itemId)
+              : await _api
+                    .getChapterContent(chapter.itemId, bookId: book.bookId)
+                    .timeout(const Duration(seconds: 30)));
       if (session != _session || !isActive || isPaused) return;
       if (raw == null || raw.trim().isEmpty || raw.contains('APP端专享/锁章章节')) {
         throw const FormatException('章节正文不可用');
@@ -477,7 +595,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     int startChunk = 0,
   }) async {
     final intent = ++_startIntent;
-    await _ready;
+    await _ensureReady();
     if (intent != _startIntent) return;
     await stop(supersedeStart: false);
     if (intent != _startIntent) return;
@@ -498,6 +616,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     int startChunk = 0,
   }) async {
     final oldChunks = _chunks;
+    _speechClient.cancel();
     _chunks = [];
     _preloads.clear();
     await _stopPlayers();
@@ -512,6 +631,10 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     );
     if (_chunks.isEmpty) {
       _fail('章节没有可朗读的正文');
+      return;
+    }
+    if (_chunks.any((chunk) => chunk.text.length > 4096)) {
+      _fail('正文含超长字素，不能在不破坏原文的情况下分段朗读');
       return;
     }
     _state = TtsPlayState.buffering;
@@ -537,22 +660,32 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     try {
       String? audio;
       if (_engineType == TtsEngineType.openAi) {
+        _lastNetworkError = null;
         audio = await _fetchAudio(chunk.index, session);
         if (!_current(session, token)) return;
-        if (audio == null) _notice = '网络语音不可用，已切换系统语音；可在设置中检查接口';
+        if (audio == null) {
+          if (!nativeSpeechAvailable) {
+            _fail('${_lastNetworkError ?? '网络语音不可用'}；系统语音也不可用，请检查兼容接口配置');
+            return;
+          }
+          _notice = '${_lastNetworkError ?? '网络语音不可用'}；已切换系统语音，未跳过本段';
+        }
+      }
+      if (audio == null && !nativeSpeechAvailable) {
+        _fail('系统语音不可用，请下载系统声音或配置 OpenAI 兼容 TTS');
+        return;
       }
       _actualEngine = audio == null
           ? TtsEngineType.native
           : TtsEngineType.openAi;
-      final accepted = await _invoke(
-        audio == null ? 'speakNativeTts' : 'playAudioFile',
-        {
-          'id': token,
-          'text': chunk.text,
-          'filePath': audio,
-          'rate': _speechRate,
-        },
-      ).timeout(const Duration(seconds: 30));
+      final accepted =
+          await _invoke(audio == null ? 'speakNativeTts' : 'playAudioFile', {
+            'id': token,
+            'text': chunk.text,
+            'filePath': audio,
+            'rate': audio == null ? _speechRate : 1.0,
+            if (ReaderPlatform.isMacOS) 'voice': _nativeVoice,
+          }).timeout(const Duration(seconds: 30));
       if (!_current(session, token)) return;
       if (accepted != true) {
         _fail('语音播放未启动，请检查系统语音引擎或音频输出');
@@ -607,89 +740,68 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
         await File(chunk.audioFilePath!).exists()) {
       return chunk.audioFilePath;
     }
-    final base = _openAiBaseUrl.replaceAll(RegExp(r'/+$'), '');
-    final uri = Uri.parse(
-      base.endsWith('/v1') ? '$base/audio/speech' : '$base/v1/audio/speech',
-    );
-    final local = [
-      'localhost',
-      '127.0.0.1',
-      '::1',
-      '10.0.2.2',
-    ].contains(uri.host);
-    if (uri.userInfo.isNotEmpty ||
-        uri.host.isEmpty ||
-        (uri.scheme != 'https' && !(uri.scheme == 'http' && local))) {
+    bool cancelled() =>
+        session != _session ||
+        _closed ||
+        isPaused ||
+        chunk.index < _currentIndex - 1 ||
+        chunk.index > _currentIndex + 2;
+    try {
+      if (Uri.tryParse(_openAiBaseUrl)?.host == 'api.openai.com' &&
+          _openAiApiKey.isEmpty) {
+        throw const TtsRequestFailure('请先保存接口密钥');
+      }
+      final audio = await _speechClient.synthesize(
+        baseUrl: _openAiBaseUrl,
+        apiKey: _openAiApiKey,
+        model: _openAiModel,
+        voice: _openAiVoice,
+        text: chunk.text,
+        speed: _speechRate,
+        isCancelled: cancelled,
+      );
+      if (cancelled()) return null;
+      Directory root;
+      try {
+        root = await _temporary();
+      } catch (_) {
+        if (ReaderPlatform.isMacOS && !_testInvoker) rethrow;
+        root = Directory.systemTemp;
+      }
+      final file = File(
+        '${root.path}/tts_$_instanceId-$session-${chunk.index}-${++_audioSerial}.${audio.format}',
+      );
+      await file.writeAsBytes(audio.bytes, flush: true);
+      _ownedAudio.add(file.path);
+      if (cancelled()) {
+        await _deletePaths([file.path]);
+        return null;
+      }
+      chunk.audioFilePath = file.path;
+      chunk.isPreloaded = true;
+      return file.path;
+    } on TtsRequestCancelled {
+      return null;
+    } catch (e) {
+      if (!cancelled() && chunk.index == _currentIndex) {
+        _lastNetworkError = e is TtsRequestFailure
+            ? e.message
+            : e is FormatException
+            ? '接口地址或参数无效'
+            : '语音音频未缓存，请检查存储空间';
+      }
       return null;
     }
-    for (var attempt = 0; attempt < 2; attempt++) {
-      if (session != _session || _closed) return null;
-      try {
-        final response = await _http
-            .post(
-              uri,
-              headers: {
-                'Content-Type': 'application/json',
-                if (_openAiApiKey.isNotEmpty)
-                  'Authorization': 'Bearer $_openAiApiKey',
-              },
-              body: jsonEncode({
-                'model': _openAiModel,
-                'input': chunk.text,
-                'voice': _openAiVoice,
-                'response_format': 'mp3',
-                'speed': _speechRate,
-              }),
-            )
-            .timeout(const Duration(seconds: 15));
-        if (session != _session || _closed) return null;
-        if (response.statusCode == 401 || response.statusCode == 403) {
-          return null;
-        }
-        if (response.statusCode == 200 && response.bodyBytes.isNotEmpty) {
-          Directory root;
-          try {
-            root = await getTemporaryDirectory();
-          } catch (_) {
-            root = Directory.systemTemp;
-          }
-          if (session != _session || _closed) return null;
-          if (chunk.index < _currentIndex - 1 ||
-              chunk.index > _currentIndex + 2) {
-            return null;
-          }
-          final file = File(
-            '${root.path}/tts_$_instanceId-$session-${chunk.index}-${++_audioSerial}.mp3',
-          );
-          await file.writeAsBytes(response.bodyBytes, flush: true);
-          if (session != _session ||
-              _closed ||
-              chunk.index < _currentIndex - 1 ||
-              chunk.index > _currentIndex + 2) {
-            await file.delete();
-            return null;
-          }
-          chunk.audioFilePath = file.path;
-          chunk.isPreloaded = true;
-          return file.path;
-        }
-      } catch (_) {
-        /* bounded retry, never log credentials or source text */
-      }
-      if (attempt == 0) {
-        await Future<void>.delayed(const Duration(milliseconds: 300));
-      }
-    }
-    return null;
   }
 
   void handlePlatformEvent(String method, dynamic args) {
     if (_closed) return;
     final id = args is Map ? args['id']?.toString() : args?.toString();
     if (method == 'onAudioFocusLost' || method == 'onAudioBecomingNoisy') {
-      if (method == 'onAudioFocusLost' && id != null && id != _playToken) {
+      if (id != null && id != _playToken) {
         return;
       }
+      _notice = method == 'onAudioFocusLost' ? '音频焦点变化，已暂停' : '音频输出设备变化，已暂停';
       unawaited(pause());
       return;
     }
@@ -708,6 +820,14 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     if (method == 'onTtsError' || method == 'onAudioError') {
+      if (method == 'onAudioError' && _currentIndex < _chunks.length) {
+        final chunk = _chunks[_currentIndex];
+        if (chunk.audioFilePath != null) {
+          unawaited(_deletePaths([chunk.audioFilePath!]));
+        }
+        chunk.audioFilePath = null;
+        chunk.isPreloaded = false;
+      }
       _fail('当前语音播放失败，已保留本段，点击继续重试');
     } else if (method == 'onTtsComplete' || method == 'onAudioComplete') {
       _playToken =
@@ -752,6 +872,8 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     if (!isActive || isPaused) return;
     _watchdog?.cancel();
     _state = TtsPlayState.paused;
+    _speechClient.cancel();
+    _preloads.clear();
     _notify();
     _syncMediaState();
     if (_actualEngine == TtsEngineType.openAi && _audioStarted) {
@@ -779,6 +901,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
         return;
       }
       _armWatchdog(_chunks[_currentIndex], token);
+      _notice = null;
       _syncMediaState();
       _notify();
     } else {
@@ -827,6 +950,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
 
   Future<void> _deletePaths(List<String> paths) async {
     for (final path in paths) {
+      if (!_ownedAudio.remove(path)) continue;
       try {
         final file = File(path);
         if (await file.exists()) await file.delete();
@@ -835,6 +959,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> stop({bool supersedeStart = true}) async {
+    _speechClient.cancel();
     if (supersedeStart) ++_startIntent;
     final stoppedSession = ++_session;
     _playToken = null;
@@ -851,6 +976,8 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     _preloads.clear();
     _book = null;
     _chapters = [];
+    _contentLoader = null;
+    _offlineOnly = false;
     _pendingBookPosition = null;
     _notify();
     await _stopPlayers();
@@ -941,6 +1068,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
                 ? _chapters[index + 1].itemId
                 : null,
             onCommitted: () async {
+              await ReaderLibraryService().markReading(book.bookId);
               await ReadingHistoryService().recordReading(
                 book: book,
                 chapterIndex: index,

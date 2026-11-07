@@ -24,6 +24,12 @@ import 'book_detail_screen.dart';
 import 'reader_screen.dart';
 import '../services/reader_settings_repository.dart';
 import '../services/reader_platform.dart';
+import '../services/reader_library_service.dart';
+import '../services/reader_trash_service.dart';
+import '../widgets/reader_library_dialog.dart';
+import '../widgets/offline_library_search_dialog.dart';
+import '../widgets/reader_trash_dialog.dart';
+import '../widgets/reader_undo.dart';
 
 enum BookshelfSortType {
   recentRead, // 最近阅读
@@ -80,6 +86,62 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
   final Set<String> _selectedBookIds = {};
   BookshelfSortType _sortType = BookshelfSortType.recentRead;
   BookshelfViewMode _viewMode = BookshelfViewMode.list;
+  final _library = ReaderLibraryService();
+  final _query = TextEditingController();
+  final _queryFocus = FocusNode(debugLabel: 'shelf-search');
+  String _groupFilter = '';
+  ReaderBookStatus? _statusFilter;
+  bool _filtersOpen = false;
+  bool get _composing =>
+      _query.value.composing.isValid && !_query.value.composing.isCollapsed;
+  List<BookshelfBook> get _visibleBooks => _books
+      .where(
+        (b) => _matches(
+          b.bookId,
+          b.bookName,
+          b.author,
+          hasRead: b.lastReadTime != null,
+        ),
+      )
+      .toList();
+  List<DownloadHistory> get _visibleDownloads => _downloadedBooks
+      .where((b) => _matches(b.bookId, b.bookName, b.author))
+      .toList();
+  bool _matches(String id, String name, String author, {bool hasRead = false}) {
+    final query = _query.text.trim().toLowerCase();
+    final group = _library.groupFor(id);
+    return (query.isEmpty || '$name\n$author'.toLowerCase().contains(query)) &&
+        (_groupFilter.isEmpty ||
+            (_groupFilter == '-' ? group.isEmpty : group == _groupFilter)) &&
+        (_statusFilter == null ||
+            _library.statusFor(id, hasRead: hasRead) == _statusFilter);
+  }
+
+  void focusSearch() {
+    _queryFocus.requestFocus();
+  }
+
+  void _libraryChanged() {
+    if (!mounted) return;
+    setState(() {
+      if (_groupFilter != '-' &&
+          !_library.snapshot.groups.containsKey(_groupFilter)) {
+        _groupFilter = '';
+      }
+    });
+  }
+
+  Future<void> _libraryDialog([Set<String> ids = const {}]) async {
+    await showDialog<void>(
+      context: context,
+      builder: (_) => ReaderLibraryDialog(
+        bookIds: ids,
+        hasRead:
+            ids.length == 1 &&
+            _books.any((e) => e.bookId == ids.first && e.lastReadTime != null),
+      ),
+    );
+  }
 
   @override
   void initState() {
@@ -90,6 +152,8 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
     });
     _bookshelfService.changeNotifier.addListener(_onBookshelfChanged);
     _downloadHistoryService.changeNotifier.addListener(_onBookshelfChanged);
+    _library.addListener(_libraryChanged);
+    unawaited(_library.load().catchError((_) {}));
   }
 
   @override
@@ -98,6 +162,9 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
     _downloadHistoryService.changeNotifier.removeListener(_onBookshelfChanged);
     readerRouteObserver.unsubscribe(this);
     _apiService.dispose();
+    _library.removeListener(_libraryChanged);
+    _query.dispose();
+    _queryFocus.dispose();
     super.dispose();
   }
 
@@ -370,7 +437,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
   }
 
   int get _currentTabTotalCount =>
-      _currentSubTab == 0 ? _books.length : _downloadedBooks.length;
+      _currentSubTab == 0 ? _visibleBooks.length : _visibleDownloads.length;
 
   void _selectAll() {
     setState(() {
@@ -378,9 +445,9 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
         _selectedBookIds.clear();
       } else {
         if (_currentSubTab == 0) {
-          _selectedBookIds.addAll(_books.map((b) => b.bookId));
+          _selectedBookIds.addAll(_visibleBooks.map((b) => b.bookId));
         } else {
-          _selectedBookIds.addAll(_downloadedBooks.map((d) => d.bookId));
+          _selectedBookIds.addAll(_visibleDownloads.map((d) => d.bookId));
         }
       }
     });
@@ -414,12 +481,24 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
     );
 
     if (confirmed == true && mounted) {
-      if (isDownloadedTab) {
-        await _downloadHistoryService.deleteHistories(
-          _selectedBookIds.toList(),
-        );
-      } else {
-        await _bookshelfService.removeMultiple(_selectedBookIds.toList());
+      ReaderTrashEntry? undo;
+      try {
+        if (isDownloadedTab) {
+          await _downloadHistoryService.deleteHistories(
+            _selectedBookIds.toList(),
+          );
+        } else {
+          undo = await _bookshelfService.removeMultipleWithUndo(
+            _selectedBookIds.toList(),
+          );
+        }
+      } catch (_) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('操作未保存，原记录和书籍文件保留；请检查存储或回收站容量')),
+          );
+        }
+        return;
       }
 
       setState(() {
@@ -429,6 +508,10 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
       _loadData();
 
       if (mounted) {
+        if (undo != null) {
+          showReaderUndo(context, '已移出书架，原书、进度和笔记保留', [undo]);
+          return;
+        }
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text(isDownloadedTab ? '已删除选中的下载记录' : '已将选中的书籍移出书架'),
@@ -584,6 +667,18 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                     context: context,
                     builder: (_) => const ReadingActivityDialog(),
                   );
+                } else if (value == 'groups') {
+                  await _libraryDialog();
+                } else if (value == 'offlineSearch') {
+                  await showDialog<void>(
+                    context: context,
+                    builder: (_) => const OfflineLibrarySearchDialog(),
+                  );
+                } else if (value == 'trash') {
+                  await showDialog<void>(
+                    context: context,
+                    builder: (_) => const ReaderTrashDialog(),
+                  );
                 } else {
                   await showDialog<void>(
                     context: context,
@@ -597,6 +692,9 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                 PopupMenuItem(value: 'import', child: Text('导入本地小说')),
                 PopupMenuItem(value: 'backup', child: Text('备份与恢复')),
                 PopupMenuItem(value: 'activity', child: Text('阅读统计')),
+                PopupMenuItem(value: 'groups', child: Text('管理分组与阅读状态')),
+                PopupMenuItem(value: 'offlineSearch', child: Text('搜索所有离线正文')),
+                PopupMenuItem(value: 'trash', child: Text('回收站与修改历史')),
               ],
             ),
             // 切换 列表 / 三列 视图按钮
@@ -662,6 +760,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
       body: Column(
         children: [
           _buildSubTabBar(),
+          _buildLibraryFilters(),
           SizedBox(
             height: 2,
             child: _openingBookId == null
@@ -676,6 +775,116 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
   }
 
   /// 顶部快捷子标签：全部收藏 vs 已下载
+  Widget _buildLibraryFilters() => Padding(
+    padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+    child: Column(
+      children: [
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                key: const ValueKey('shelf-query'),
+                controller: _query,
+                focusNode: _queryFocus,
+                maxLength: 128,
+                decoration: const InputDecoration(
+                  hintText: '搜索书架书名 / 作者',
+                  prefixIcon: Icon(Icons.search),
+                  counterText: '',
+                  isDense: true,
+                ),
+                onChanged: (_) {
+                  if (!_composing) setState(() => _selectedBookIds.clear());
+                },
+                onSubmitted: (_) {
+                  if (!_composing) setState(() => _selectedBookIds.clear());
+                },
+              ),
+            ),
+            IconButton(
+              tooltip: '分组与状态筛选',
+              icon: const Icon(Icons.filter_list),
+              onPressed: () => setState(() => _filtersOpen = !_filtersOpen),
+            ),
+            IconButton(
+              tooltip: '搜索所有离线正文',
+              icon: const Icon(Icons.manage_search),
+              onPressed: () => showDialog<void>(
+                context: context,
+                builder: (_) => const OfflineLibrarySearchDialog(),
+              ),
+            ),
+          ],
+        ),
+        if (_filtersOpen)
+          Align(
+            alignment: Alignment.centerLeft,
+            child: Wrap(
+              spacing: 12,
+              children: [
+                SizedBox(
+                  width: 180,
+                  child: DropdownButton<String>(
+                    isExpanded: true,
+                    value: _groupFilter,
+                    items: [
+                      const DropdownMenuItem(value: '', child: Text('全部分组')),
+                      const DropdownMenuItem(value: '-', child: Text('未分组')),
+                      for (final group in _library.snapshot.groups.entries)
+                        DropdownMenuItem(
+                          value: group.key,
+                          child: Text(
+                            group.value['name'],
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                    ],
+                    onChanged: (value) => setState(() {
+                      _groupFilter = value ?? '';
+                      _selectedBookIds.clear();
+                    }),
+                  ),
+                ),
+                SizedBox(
+                  width: 150,
+                  child: DropdownButton<ReaderBookStatus>(
+                    isExpanded: true,
+                    value: _statusFilter,
+                    hint: const Text('全部阅读状态'),
+                    items: [
+                      for (final status in ReaderBookStatus.values)
+                        DropdownMenuItem(
+                          value: status,
+                          child: Text(readerBookStatusLabels[status]!),
+                        ),
+                    ],
+                    onChanged: (value) => setState(() {
+                      _statusFilter = value;
+                      _selectedBookIds.clear();
+                    }),
+                  ),
+                ),
+                TextButton(
+                  onPressed: () => setState(() {
+                    _statusFilter = null;
+                    _groupFilter = '';
+                    _query.clear();
+                    _selectedBookIds.clear();
+                  }),
+                  child: const Text('清除筛选'),
+                ),
+                TextButton(
+                  onPressed: () =>
+                      _libraryDialog(_isSelectionMode ? _selectedBookIds : {}),
+                  child: Text(_isSelectionMode ? '设置所选书籍' : '管理分组'),
+                ),
+              ],
+            ),
+          ),
+      ],
+    ),
+  );
+
   Widget _buildSubTabBar() {
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -764,8 +973,14 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
     }
 
     if (_currentSubTab == 0) {
+      if (_books.isNotEmpty && _visibleBooks.isEmpty) {
+        return const Center(child: Text('暂无匹配书籍，可清除筛选'));
+      }
       return _buildFavoritesView();
     } else {
+      if (_downloadedBooks.isNotEmpty && _visibleDownloads.isEmpty) {
+        return const Center(child: Text('暂无匹配下载，可清除筛选'));
+      }
       return _buildDownloadsView();
     }
   }
@@ -832,16 +1047,17 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
 
   /// 单列列表呈现
   Widget _buildFavoritesList() {
+    final books = _visibleBooks;
     return ListView.builder(
       key: const PageStorageKey('favorites-list'),
       findChildIndexCallback: (key) {
-        final index = _books.indexWhere((b) => ValueKey(b.bookId) == key);
+        final index = books.indexWhere((b) => ValueKey(b.bookId) == key);
         return index < 0 ? null : index;
       },
       padding: const EdgeInsets.symmetric(vertical: 4),
-      itemCount: _books.length,
+      itemCount: books.length,
       itemBuilder: (context, index) {
-        final shelfBook = _books[index];
+        final shelfBook = books[index];
         final isSelected = _selectedBookIds.contains(shelfBook.bookId);
 
         return Container(
@@ -973,6 +1189,18 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                       ),
                       maxLines: 1,
                     ),
+                    Text(
+                      _library.labelFor(
+                        shelfBook.bookId,
+                        hasRead: shelfBook.lastReadTime != null,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AppTheme.textHint,
+                      ),
+                    ),
                     const SizedBox(height: 4),
                     Row(
                       children: [
@@ -1007,28 +1235,43 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                 ),
               ),
               trailing: !_isSelectionMode
-                  ? OutlinedButton(
-                      onPressed: () => _continueReading(shelfBook),
-                      style: OutlinedButton.styleFrom(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 10,
-                          vertical: 4,
+                  ? Wrap(
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        IconButton(
+                          tooltip: '分组与阅读状态',
+                          onPressed: () => _libraryDialog({shelfBook.bookId}),
+                          icon: const Icon(Icons.more_horiz, size: 18),
+                          visualDensity: VisualDensity.compact,
                         ),
-                        minimumSize: const Size(0, 32),
-                        side: BorderSide(
-                          color: AppTheme.primaryColor.withValues(alpha: 0.6),
+                        OutlinedButton(
+                          onPressed: () => _continueReading(shelfBook),
+                          style: OutlinedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(
+                              horizontal: 10,
+                              vertical: 4,
+                            ),
+                            minimumSize: const Size(0, 32),
+                            side: BorderSide(
+                              color: AppTheme.primaryColor.withValues(
+                                alpha: 0.6,
+                              ),
+                            ),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(16),
+                            ),
+                          ),
+                          child: Text(
+                            shelfBook.lastReadChapterIndex != null
+                                ? '续读'
+                                : '开读',
+                            style: const TextStyle(
+                              fontSize: 12,
+                              color: AppTheme.primaryColor,
+                            ),
+                          ),
                         ),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(16),
-                        ),
-                      ),
-                      child: Text(
-                        shelfBook.lastReadChapterIndex != null ? '续读' : '开读',
-                        style: const TextStyle(
-                          fontSize: 12,
-                          color: AppTheme.primaryColor,
-                        ),
-                      ),
+                      ],
                     )
                   : null,
               onTap: () {
@@ -1061,6 +1304,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
 
   /// 三列宫格呈现
   Widget _buildFavoritesGrid() {
+    final books = _visibleBooks;
     final screenWidth = MediaQuery.of(context).size.width;
     final isWide = screenWidth > 900;
     final columns = ReaderPlatform.isMacOS
@@ -1078,7 +1322,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
         child: GridView.builder(
           key: const PageStorageKey('favorites-grid'),
           findChildIndexCallback: (key) {
-            final index = _books.indexWhere((b) => ValueKey(b.bookId) == key);
+            final index = books.indexWhere((b) => ValueKey(b.bookId) == key);
             return index < 0 ? null : index;
           },
           padding: const EdgeInsets.all(16),
@@ -1088,9 +1332,9 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
             crossAxisSpacing: 14,
             mainAxisSpacing: 16,
           ),
-          itemCount: _books.length,
+          itemCount: books.length,
           itemBuilder: (context, index) {
-            final shelfBook = _books[index];
+            final shelfBook = books[index];
             final isSelected = _selectedBookIds.contains(shelfBook.bookId);
 
             return Column(
@@ -1352,18 +1596,17 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
 
   /// 已下载书籍单列列表
   Widget _buildDownloadsList() {
+    final downloads = _visibleDownloads;
     return ListView.builder(
       key: const PageStorageKey('downloads-list'),
       findChildIndexCallback: (key) {
-        final index = _downloadedBooks.indexWhere(
-          (b) => ValueKey(b.bookId) == key,
-        );
+        final index = downloads.indexWhere((b) => ValueKey(b.bookId) == key);
         return index < 0 ? null : index;
       },
       padding: const EdgeInsets.symmetric(vertical: 4),
-      itemCount: _downloadedBooks.length,
+      itemCount: downloads.length,
       itemBuilder: (context, index) {
-        final download = _downloadedBooks[index];
+        final download = downloads[index];
         final isSelected = _selectedBookIds.contains(download.bookId);
 
         return Container(
@@ -1536,6 +1779,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
 
   /// 已下载书籍三列宫格
   Widget _buildDownloadsGrid() {
+    final downloads = _visibleDownloads;
     final screenWidth = MediaQuery.of(context).size.width;
     final isWide = screenWidth > 900;
     final columns = ReaderPlatform.isMacOS
@@ -1553,7 +1797,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
         child: GridView.builder(
           key: const PageStorageKey('downloads-grid'),
           findChildIndexCallback: (key) {
-            final index = _downloadedBooks.indexWhere(
+            final index = downloads.indexWhere(
               (b) => ValueKey(b.bookId) == key,
             );
             return index < 0 ? null : index;
@@ -1565,9 +1809,9 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
             crossAxisSpacing: 14,
             mainAxisSpacing: 16,
           ),
-          itemCount: _downloadedBooks.length,
+          itemCount: downloads.length,
           itemBuilder: (context, index) {
-            final download = _downloadedBooks[index];
+            final download = downloads[index];
             final isSelected = _selectedBookIds.contains(download.bookId);
 
             return Column(

@@ -12,6 +12,7 @@ ReaderLayout layout(
   double width = 400,
   bool comments = true,
   double chapterEndHeight = 0,
+  double textWidthInset = 0,
 }) => ReaderLayout(
   size: Size(width, 760),
   bodyStyle: const TextStyle(fontSize: 18, height: 1.8, letterSpacing: 0.5),
@@ -27,10 +28,54 @@ ReaderLayout layout(
       ? ReaderCommentBubble.sizeFor(TextScaler.linear(scale))
       : Size.zero,
   chapterEndHeight: chapterEndHeight,
+  textWidthInset: textWidthInset,
 );
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  test(
+    'selectable text width participates in pagination and its cache key',
+    () {
+      final cache = ReaderPaginationCache();
+      const content =
+          'Text and 中文，'
+          '👨‍👩‍👧‍👦。';
+      final plainLayout = layout(1, width: 317);
+      final selectableLayout = layout(
+        1,
+        width: 317,
+        textWidthInset: ReaderLayout.selectableTextInset,
+      );
+      expect(selectableLayout.key, isNot(plainLayout.key));
+      ReaderChapterPages prepare(ReaderLayout value) => cache.paginate(
+        chapterId: 'selectable',
+        title: '章节',
+        content: content * 200,
+        layout: value,
+        indent: true,
+      );
+      expect(identical(prepare(plainLayout), prepare(selectableLayout)), false);
+      final pages = prepare(selectableLayout);
+      for (final page in pages.pages) {
+        expect(
+          page.fragments.fold<double>(0, (sum, part) => sum + part.height) +
+              (page.fragments.length - 1) * selectableLayout.paragraphSpacing,
+          lessThanOrEqualTo(page.availableHeight + .01),
+        );
+      }
+      expect(
+        pages.pages
+            .expand((page) => page.fragments)
+            .map(
+              (part) =>
+                  part.startOffset == 0 ? part.text.substring(2) : part.text,
+            )
+            .join(),
+        content * 200,
+      );
+    },
+  );
 
   test('theme colors do not invalidate pagination metrics or cached pages', () {
     final original = layout(1);

@@ -1,3 +1,4 @@
+import 'helpers/desktop_selection.dart';
 import 'dart:io';
 import 'package:flutter/gestures.dart';
 
@@ -318,6 +319,17 @@ void main() {
       );
       expect(DesktopCommands.dispatch('find'), true);
       await tester.pumpAndSettle();
+      expect(FocusManager.instance.primaryFocus!.debugLabel, 'shelf-search');
+      expect(
+        tester.state(find.byType(BookshelfScreen, skipOffstage: false)),
+        same(shelf),
+      );
+      tester
+          .widget<NavigationRail>(find.byType(NavigationRail))
+          .onDestinationSelected!(0);
+      await tester.pumpAndSettle();
+      expect(DesktopCommands.dispatch('find'), true);
+      await tester.pumpAndSettle();
       expect(
         FocusManager.instance.primaryFocus!.debugLabel,
         'desktop-library-search',
@@ -339,6 +351,7 @@ void main() {
           ReaderSettings(
             pageMode: true,
             pageAnimation: mode,
+            desktopColumns: 'single',
             commentBubbles: false,
             pureMode: true,
           ),
@@ -376,12 +389,12 @@ void main() {
         expect(after!.chapterId, before!.chapterId);
         expect(after.paragraphIndex, lessThanOrEqualTo(before.paragraphIndex));
         // A narrower page contains the anchor, even when its visible start moves.
-        final texts = tester.widgetList<SelectableText>(
-          find.byType(SelectableText),
+        final texts = tester.widgetList<DesktopSelectableParagraph>(
+          find.byType(DesktopSelectableParagraph),
         );
         expect(
           texts.any(
-            (t) => t.textSpan!.toPlainText().contains(
+            (t) => t.span.toPlainText().contains(
               '正文第${before.paragraphIndex.toString().padLeft(3, '0')}段',
             ),
           ),
@@ -421,7 +434,7 @@ void main() {
       await ReaderSystemService.flushParticipants();
       final after = await ReaderPositionService().load('local_scroll');
       expect(after!.paragraphIndex, before.paragraphIndex);
-      final text = find.byType(SelectableText).hitTestable().first;
+      final text = find.byType(DesktopSelectableParagraph).hitTestable().first;
       final rect = tester.getRect(text);
       final point = Offset(rect.left + 120, rect.top + 12);
       final gesture = await tester.startGesture(
@@ -431,10 +444,7 @@ void main() {
       await gesture.moveTo(point + const Offset(60, 0));
       await gesture.up();
       await tester.pumpAndSettle();
-      final editable = tester.widgetList<EditableText>(
-        find.byType(EditableText),
-      );
-      expect(editable.any((e) => !e.controller.selection.isCollapsed), true);
+      expect(hasDesktopSelection(tester), true);
       final secondary = await tester.startGesture(
         point,
         kind: PointerDeviceKind.mouse,

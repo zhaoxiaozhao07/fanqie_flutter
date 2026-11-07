@@ -17,6 +17,21 @@ import 'book_directory_cache.dart';
 import 'book_directory_parser.dart';
 import 'reader_platform.dart';
 
+class ChapterDownloadIncomplete extends StateError {
+  final int failures, downloaded;
+  final List<String> failedChapterIds;
+  final bool diskFailure;
+  ChapterDownloadIncomplete(
+    this.failures,
+    this.downloaded,
+    this.failedChapterIds, {
+    this.diskFailure = false,
+  }) : super(
+         '$failures 章正文或插图未完整下载，已保留 $downloaded 章成功内容；'
+         '${diskFailure ? '请检查存储空间' : '请检查访问状态或网络后重试'}',
+       );
+}
+
 /// 番茄小说内置后端引擎
 /// 直接请求已验证的官方接口，不依赖旧第三方代理节点：
 /// - 搜索服务 (novel.snssdk.com 接口对接与字体解密)
@@ -693,7 +708,8 @@ class FanqieBackendEngine {
     final offlineDir = await getOfflineBookDir(bookId);
     int completed = 0;
     int nextIndex = 0;
-    int failures = 0;
+    final failures = <String>{};
+    var diskFailure = false;
 
     Future<void> worker() async {
       while (true) {
@@ -740,10 +756,11 @@ class FanqieBackendEngine {
               await staged.writeAsString(content!, flush: true);
               await staged.rename(offlineFile.path);
             } catch (_) {
-              failures++;
+              failures.add(chapter.itemId);
+              diskFailure = true;
             }
           } else {
-            failures++;
+            failures.add(chapter.itemId);
           }
         }
 
@@ -762,8 +779,9 @@ class FanqieBackendEngine {
               );
             }
           }
-        } catch (_) {
-          failures++;
+        } catch (e) {
+          failures.add(chapter.itemId);
+          if (e is FileSystemException) diskFailure = true;
         }
         completed++;
         onProgress?.call(completed, total, '正在下载: ${chapter.title}');
@@ -773,8 +791,13 @@ class FanqieBackendEngine {
     final workerCount = concurrency.clamp(1, total);
     final workers = List.generate(workerCount, (_) => worker());
     await Future.wait(workers);
-    if (failures > 0 && isCancelled?.call() != true) {
-      throw StateError('$failures 处正文或插图未能完整下载，已保留成功内容，请重试');
+    if (failures.isNotEmpty && isCancelled?.call() != true) {
+      throw ChapterDownloadIncomplete(
+        failures.length,
+        total - failures.length,
+        failures.take(20).toList(),
+        diskFailure: diskFailure,
+      );
     }
   }
 

@@ -12,6 +12,7 @@ import 'package:fanqie_flutter/services/reader_position_service.dart';
 import 'package:fanqie_flutter/services/reader_route_observer.dart';
 import 'package:fanqie_flutter/services/reader_settings_repository.dart';
 import 'package:fanqie_flutter/services/reader_system_service.dart';
+import 'package:fanqie_flutter/widgets/desktop_reader_selection.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -19,9 +20,15 @@ import 'package:integration_test/integration_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 const soakSeconds = int.fromEnvironment('SOAK_SECONDS', defaultValue: 1800);
+const soakTickMs = int.fromEnvironment('SOAK_TICK_MS', defaultValue: 4000);
 
 void main() {
-  IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  final binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  // Desktop accessibility clients can attach mid-run. Fix the test platform's
+  // semantics request before WidgetTester records its handle baseline, rather
+  // than disabling the leak assertion or treating an OS-created handle as ours.
+  setUpAll(() => binding.platformDispatcher.semanticsEnabledTestValue = true);
+  tearDownAll(binding.platformDispatcher.clearSemanticsEnabledTestValue);
   testWidgets(
     'macOS continuous reading, resize, bounded memory and progress ($soakSeconds seconds)',
     (tester) async {
@@ -76,7 +83,25 @@ void main() {
         var samples = 0;
         debugPrint('FANQIE_MACOS_SOAK_READY seconds=$soakSeconds pid=$pid');
         while (DateTime.now().difference(start).inSeconds < soakSeconds) {
-          await Future<void>.delayed(const Duration(seconds: 4));
+          await Future<void>.delayed(Duration(milliseconds: soakTickMs));
+          final controller = tester
+              .widget<CustomScrollView>(find.byType(CustomScrollView))
+              .controller!;
+          final offsetBefore = controller.offset;
+          final beforeInput = await ReaderPositionService().load(
+            'local_macos_soak',
+          );
+          final readerFocus = tester
+              .widget<Focus>(
+                find.byWidgetPredicate(
+                  (widget) =>
+                      widget is Focus &&
+                      widget.focusNode?.debugLabel == 'desktop-reader',
+                ),
+              )
+              .focusNode!;
+          readerFocus.requestFocus();
+          await tester.pump();
           await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
           await tester.pumpAndSettle();
           await ReaderSystemService.flushParticipants();
@@ -84,6 +109,18 @@ void main() {
             'local_macos_soak',
           );
           expect(position, isNotNull);
+          if (beforeInput != null &&
+              position!.chapterId == beforeInput.chapterId &&
+              position.paragraphIndex == beforeInput.paragraphIndex &&
+              position.characterOffset == beforeInput.characterOffset) {
+            final native = await ReaderPlatform.invoke<Map>(
+              'getTestWindowState',
+            );
+            debugPrint(
+              'FANQIE_MACOS_SOAK_STALLED ${{'beforeOffset': offsetBefore, 'afterOffset': controller.offset, 'min': controller.position.minScrollExtent, 'max': controller.position.maxScrollExtent, 'focus': FocusManager.instance.primaryFocus?.debugLabel, 'selected': tester.widget<DesktopReaderSelection>(find.byType(DesktopReaderSelection)).controller.hasSelection, 'restorationImages': find.byType(RawImage).evaluate().length, 'native': native}}',
+            );
+            fail('PageDown must advance the canonical anchor in this workload');
+          }
           if (samples % 15 == 0) {
             final narrow = samples % 30 == 0;
             await ReaderPlatform.invoke('setTestWindowSize', {
@@ -97,12 +134,13 @@ void main() {
             );
             expect(resized!.chapterId, position!.chapterId);
             expect(resized.paragraphIndex, position.paragraphIndex);
+            expect(resized.characterOffset, position.characterOffset);
           }
           memory.add(ProcessInfo.currentRss);
           samples++;
           if (samples % 15 == 0) {
             debugPrint(
-              'FANQIE_MACOS_SOAK_SAMPLE elapsed=${DateTime.now().difference(start).inSeconds} rss=${memory.last} paragraph=${position!.paragraphIndex}',
+              'FANQIE_MACOS_SOAK_SAMPLE elapsed=${DateTime.now().difference(start).inSeconds} rss=${memory.last} paragraph=${position!.paragraphIndex} character=${position.characterOffset}',
             );
           }
           expect(tester.takeException(), isNull);

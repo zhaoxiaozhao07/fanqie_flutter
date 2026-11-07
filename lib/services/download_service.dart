@@ -17,53 +17,13 @@ import 'book_image_fetcher.dart';
 import 'app_storage.dart';
 import 'file_export_service.dart';
 import 'reader_platform.dart';
+import 'download_queue_store.dart';
+import 'reader_cache_service.dart';
+import '../models/download_task.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'fanqie_backend_engine.dart';
 
-/// 下载任务状态
-enum DownloadTaskStatus {
-  pending,
-  downloading,
-  saving,
-  completed,
-  failed,
-  cancelled,
-}
-
-/// 后台下载任务模型
-class DownloadTask {
-  final String id;
-  final Book book;
-  final List<Chapter> chapters;
-  final String format; // 'TXT' / 'EPUB'
-  DownloadTaskStatus status;
-  int current;
-  int total;
-  String message;
-  String? filePath;
-  String? error;
-  final DateTime startTime;
-  bool isCancelled = false;
-
-  DownloadTask({
-    required this.id,
-    required this.book,
-    required this.chapters,
-    required this.format,
-    this.status = DownloadTaskStatus.pending,
-    this.current = 0,
-    required this.total,
-    this.message = '准备中...',
-    this.filePath,
-    this.error,
-    DateTime? startTime,
-  }) : startTime = startTime ?? DateTime.now();
-
-  double get progress => total > 0 ? (current / total).clamp(0.0, 1.0) : 0.0;
-
-  bool get isActive =>
-      status == DownloadTaskStatus.downloading ||
-      status == DownloadTaskStatus.saving ||
-      status == DownloadTaskStatus.pending;
-}
+export '../models/download_task.dart';
 
 /// 下载进度回调
 typedef ProgressCallback =
@@ -82,19 +42,269 @@ class DownloadService extends ChangeNotifier {
   }
   DownloadService._internal()
     : _apiService = ApiService(),
-      _historyService = HistoryService();
+      _historyService = HistoryService(),
+      _store = DownloadQueueStore(),
+      _exportTask = null,
+      _requestPermission = null,
+      _forcePersistence = false,
+      maxConcurrentTasks = 2,
+      chapterConcurrency = 12,
+      retryBase = const Duration(seconds: 2);
+
+  @visibleForTesting
+  DownloadService.forTesting({
+    required ApiService apiService,
+    HistoryService? historyService,
+    required DownloadQueueStore store,
+    Future<String?> Function(DownloadTask)? exportTask,
+    Future<bool> Function()? requestPermission,
+    this.maxConcurrentTasks = 2,
+    this.chapterConcurrency = 12,
+    this.retryBase = const Duration(seconds: 2),
+  }) : _apiService = apiService,
+       _historyService = historyService ?? HistoryService(),
+       _store = store,
+       _exportTask = exportTask,
+       _requestPermission = requestPermission,
+       _forcePersistence = true,
+       assert(maxConcurrentTasks > 0);
 
   ApiService _apiService;
   HistoryService _historyService;
+  final DownloadQueueStore _store;
+  final Future<String?> Function(DownloadTask)? _exportTask;
+  final Future<bool> Function()? _requestPermission;
+  final bool _forcePersistence;
+  int maxConcurrentTasks, chapterConcurrency;
+  final Duration retryBase;
+  static const preferencesKey = 'reader_download_queue_settings_v1';
   static const platform = MethodChannel('com.fanqie.fanqie_flutter/download');
 
   final List<DownloadTask> _tasks = [];
-  final Set<Future<void>> _executions = {};
+  final Map<String, Future<void>> _executions = {};
+  Future<void>? _initializing, _writes;
+  Future<void>? _settingsWrites;
+  Timer? _checkpointTimer;
+  Timer? _retryTimer;
+  bool _initialized = false, _suspended = false, _closed = false;
+  bool _persistenceBlocked = false;
+  int _sequence = 0;
+  String? queueError;
+  bool get _persistent => _forcePersistence || ReaderPlatform.isMacOS;
   List<DownloadTask> get tasks => List.unmodifiable(_tasks);
 
   List<DownloadTask> get activeTasks =>
       _tasks.where((t) => t.isActive).toList();
   bool get hasActiveTasks => _tasks.any((t) => t.isActive);
+  bool isRunning(String id) => _executions.containsKey(id);
+
+  Future<void> initialize() {
+    if (_initialized) return Future.value();
+    return _initializing ??= _loadQueue();
+  }
+
+  Future<void> _loadQueue() async {
+    if (_persistent) {
+      try {
+        final raw = (await SharedPreferences.getInstance()).getString(
+          preferencesKey,
+        );
+        if (raw != null) {
+          final json = jsonDecode(raw) as Map;
+          if (json['version'] != 1 ||
+              ![1, 2, 3, 4].contains(json['books']) ||
+              ![3, 6, 12].contains(json['chapters'])) {
+            throw const FormatException('并行设置无效');
+          }
+          maxConcurrentTasks = json['books'];
+          chapterConcurrency = json['chapters'];
+        }
+      } catch (_) {
+        queueError = '并行设置不可读，暂用默认值；原设置未覆盖';
+      }
+    }
+    try {
+      if (_persistent) {
+        final restored = await _store.load();
+        for (final task in restored) {
+          if (_tasks.any((current) => current.id == task.id)) continue;
+          if (task.isActive) {
+            task.status = DownloadTaskStatus.paused;
+            task.message = '上次下载中断，点击继续；已下载章节会复用';
+            task.nextRetryAt = null;
+          }
+          _tasks.add(task);
+        }
+      }
+      _initialized = true;
+    } catch (error) {
+      // Reading remains available. Never overwrite an unreadable queue.
+      _persistenceBlocked = true;
+      queueError = '下载队列无法读取，原文件已保留：$error';
+      _initialized = true;
+    } finally {
+      if (!_closed) notifyListeners();
+    }
+  }
+
+  Future<void> retryLoadQueue() async {
+    if (_executions.isNotEmpty) return;
+    _initialized = false;
+    _initializing = null;
+    _persistenceBlocked = false;
+    queueError = null;
+    await initialize();
+  }
+
+  Future<void> _persist() {
+    if (!_persistent) return Future.value();
+    if (_persistenceBlocked) {
+      return Future.error(StateError(queueError ?? '下载队列不可写'));
+    }
+    // Serialize snapshots, not mutable task references observed after an await.
+    final snapshot = [
+      for (final task in _tasks) DownloadTask.fromJson(task.toJson()),
+    ];
+    late final Future<void> write;
+    write = (_writes ?? Future<void>.value())
+        .catchError((_) {})
+        .then((_) => _store.save(snapshot))
+        .then((_) => queueError = null)
+        .then<void>((_) {})
+        .whenComplete(() {
+          if (identical(_writes, write)) _writes = null;
+        });
+    _writes = write;
+    return write;
+  }
+
+  void _checkpoint() {
+    if (!_persistent || _checkpointTimer != null || _closed) return;
+    _checkpointTimer = Timer(const Duration(milliseconds: 500), () {
+      _checkpointTimer = null;
+      unawaited(_persist().catchError(_persistenceError));
+    });
+  }
+
+  void _persistenceError(Object error) {
+    queueError = '下载队列未保存，请检查存储空间：$error';
+    if (!_closed) notifyListeners();
+  }
+
+  Future<void> flush() async {
+    _checkpointTimer?.cancel();
+    _checkpointTimer = null;
+    await _settingsWrites;
+    await initialize();
+    await _persist();
+    await _writes;
+  }
+
+  void _schedule() {
+    if (_closed || _suspended) return;
+    unawaited(
+      initialize().then((_) {
+        if (_closed || _suspended) return;
+        final limit = _persistent
+            ? maxConcurrentTasks
+            : DownloadQueueStore.maxTasks;
+        final runningBooks = {
+          for (final task in _tasks)
+            if (isRunning(task.id)) task.book.bookId,
+        };
+        for (final task in _tasks.reversed.toList()) {
+          if (_executions.length >= limit) break;
+          if (task.status != DownloadTaskStatus.pending ||
+              isRunning(task.id) ||
+              runningBooks.contains(task.book.bookId)) {
+            continue;
+          }
+          if (task.nextRetryAt != null &&
+              task.nextRetryAt!.isAfter(DateTime.now())) {
+            continue;
+          }
+          task.nextRetryAt = null;
+          late final Future<void> execution;
+          execution = _executeTask(task).whenComplete(() {
+            _executions.remove(task.id);
+            if (!_closed) {
+              notifyListeners();
+              _schedule();
+            }
+          });
+          _executions[task.id] = execution;
+          runningBooks.add(task.book.bookId);
+          unawaited(execution.catchError(_persistenceError));
+        }
+        _retryTimer?.cancel();
+        final deadlines =
+            _tasks
+                .where(
+                  (e) =>
+                      e.status == DownloadTaskStatus.pending &&
+                      e.nextRetryAt != null &&
+                      e.nextRetryAt!.isAfter(DateTime.now()),
+                )
+                .map((e) => e.nextRetryAt!)
+                .toList()
+              ..sort();
+        if (deadlines.isNotEmpty) {
+          final delay = deadlines.first.difference(DateTime.now());
+          _retryTimer = Timer(
+            delay.isNegative ? Duration.zero : delay,
+            _schedule,
+          );
+        }
+      }),
+    );
+  }
+
+  Future<void> setConcurrency({int? books, int? chapters}) {
+    late final Future<void> pending;
+    pending = (_settingsWrites ?? Future<void>.value())
+        .catchError((_) {})
+        .then((_) => _setConcurrency(books: books, chapters: chapters))
+        .whenComplete(() {
+          if (identical(_settingsWrites, pending)) _settingsWrites = null;
+        });
+    _settingsWrites = pending;
+    return pending;
+  }
+
+  Future<void> _setConcurrency({int? books, int? chapters}) async {
+    final count = books ?? maxConcurrentTasks,
+        perBook = chapters ?? chapterConcurrency;
+    if (![1, 2, 3, 4].contains(count) || ![3, 6, 12].contains(perBook)) {
+      throw ArgumentError('并行书籍须为 1–4，每书并行章节须为 3 / 6 / 12');
+    }
+    if (!await (await SharedPreferences.getInstance()).setString(
+      preferencesKey,
+      jsonEncode({'version': 1, 'books': count, 'chapters': perBook}),
+    )) {
+      throw StateError('并行设置未保存');
+    }
+    maxConcurrentTasks = count;
+    chapterConcurrency = perBook;
+    if (!_closed) notifyListeners();
+    _schedule(); // Existing runs finish; lowering the limit does not destroy work.
+  }
+
+  Future<void> prioritize(String id) async {
+    await initialize();
+    final task = _tasks.where((e) => e.id == id).firstOrNull;
+    if (task == null ||
+        task.status != DownloadTaskStatus.pending ||
+        isRunning(id)) {
+      return;
+    }
+    _tasks.remove(task);
+    _tasks.add(
+      task,
+    ); // Stored newest-first; the scheduler consumes the reverse.
+    await _persist();
+    notifyListeners();
+    _schedule();
+  }
 
   DownloadTask? getActiveTask(String bookId) {
     for (final task in _tasks) {
@@ -119,24 +329,57 @@ class DownloadService extends ChangeNotifier {
     if (existing != null) {
       return existing;
     }
+    if (chapters.isEmpty ||
+        chapters.length > 50000 ||
+        (format != 'TXT' && format != 'EPUB')) {
+      throw ArgumentError('下载目录为空、过大或文件格式不受支持');
+    }
+    for (final previous in _tasks) {
+      if (previous.canResume &&
+          previous.book.bookId == book.bookId &&
+          previous.format == format &&
+          listEquals(
+            previous.chapters.map((chapter) => chapter.itemId).toList(),
+            chapters.map((chapter) => chapter.itemId).toList(),
+          )) {
+        unawaited(resumeDownload(previous.id).catchError(_persistenceError));
+        return previous;
+      }
+    }
+    if (_tasks.length >= DownloadQueueStore.maxTasks) {
+      final old = _tasks.lastWhere(
+        (task) => !task.isActive && !isRunning(task.id),
+        orElse: () => throw StateError('下载队列已满，请先完成或取消任务'),
+      );
+      _tasks.remove(old);
+    }
 
     final task = DownloadTask(
-      id: '${book.bookId}_${DateTime.now().millisecondsSinceEpoch}',
+      id: '${book.bookId}_${DateTime.now().microsecondsSinceEpoch}_${_sequence++}',
       book: book,
       chapters: chapters,
       format: format,
       total: chapters.length,
       status: DownloadTaskStatus.pending,
-      message: '正在准备下载...',
+      message: '排队等待下载...',
     );
 
     _tasks.insert(0, task);
     notifyListeners();
 
-    // 异步执行下载流程，不阻塞当前调用
-    final execution = _executeTask(task);
-    _executions.add(execution);
-    unawaited(execution.whenComplete(() => _executions.remove(execution)));
+    // A task waiting behind the concurrency limit must also be durable, even
+    // when the running book is stalled and emits no further progress events.
+    unawaited(
+      initialize().then((_) => _persist()).catchError((Object error) {
+        if (task.status == DownloadTaskStatus.pending && !isRunning(task.id)) {
+          task.status = DownloadTaskStatus.failed;
+          task.error = error.toString();
+          task.message = '下载队列未能保存，未开始下载';
+        }
+        _persistenceError(error);
+      }),
+    );
+    _schedule();
 
     return task;
   }
@@ -144,20 +387,57 @@ class DownloadService extends ChangeNotifier {
   /// 取消下载任务
   void cancelDownload(String bookId) {
     for (final task in _tasks) {
-      if (task.book.bookId == bookId && task.isActive) {
-        task.isCancelled = true;
-        task.status = DownloadTaskStatus.cancelled;
-        task.message = '已取消下载';
-        if (ReaderPlatform.isMacOS) {
-          unawaited(
-            ReaderPlatform.invoke('cancelExport', {
-              'id': task.id,
-            }).catchError((_) => null),
-          );
-        }
+      if (task.book.bookId == bookId &&
+          (task.isActive || task.status == DownloadTaskStatus.paused)) {
+        _stopTask(task, paused: false);
       }
     }
     notifyListeners();
+    _checkpoint();
+  }
+
+  void _stopTask(DownloadTask task, {required bool paused}) {
+    task.isCancelled = true;
+    task.status = paused
+        ? DownloadTaskStatus.paused
+        : DownloadTaskStatus.cancelled;
+    task.message = paused ? '已暂停，已下载章节会保留' : '已取消，已下载章节仍保留';
+    task.nextRetryAt = null;
+    if (ReaderPlatform.isMacOS) {
+      unawaited(
+        ReaderPlatform.invoke('cancelExport', {
+          'id': task.id,
+        }).catchError((_) => null),
+      );
+    }
+  }
+
+  void pauseDownload(String taskId) {
+    final task = _tasks.where((task) => task.id == taskId).firstOrNull;
+    if (task == null || !task.isActive) return;
+    _stopTask(task, paused: true);
+    notifyListeners();
+    _checkpoint();
+  }
+
+  Future<void> resumeDownload(String taskId) async {
+    final task = _tasks.where((task) => task.id == taskId).firstOrNull;
+    if (task == null || !task.canResume) return;
+    // Never reset the stop flag of a still-running request. Rapid pause/resume
+    // waits for that run to unwind, rather than resurrecting its stale response.
+    await _executions[taskId];
+    if (_closed || !_tasks.contains(task) || !task.canResume) return;
+    task.isCancelled = false;
+    task.error = null;
+    task.errorKind = null;
+    task.failedChapterIds = [];
+    task.retryCount = 0;
+    task.nextRetryAt = null;
+    task.status = DownloadTaskStatus.pending;
+    task.message = '排队继续，将校验并复用已下载章节';
+    await _persist();
+    notifyListeners();
+    _schedule();
   }
 
   /// 移除已完成或失败的任务
@@ -165,30 +445,106 @@ class DownloadService extends ChangeNotifier {
     for (final task in activeTasks.toList()) {
       cancelDownload(task.book.bookId);
     }
-    await Future.wait(_executions.toList());
+    await Future.wait(_executions.values.toList());
+    if (_initialized && _persistent) await flush();
+  }
+
+  Future<void> pauseAllAndWait() async {
+    await initialize();
+    _suspended = true;
+    try {
+      for (final task in activeTasks) {
+        _stopTask(task, paused: true);
+      }
+      notifyListeners();
+      // Durable interruption state precedes waiting for slow network requests.
+      await flush();
+      await Future.wait(_executions.values.toList());
+      await flush();
+    } finally {
+      _suspended = false;
+    }
+  }
+
+  Future<void> prepareToQuit() async {
+    if (!_persistent) return cancelAllAndWait();
+    await initialize();
+    // An unreadable queue never started work. Preserve it verbatim, but do not
+    // trap the rest of the reader in an application that cannot be quit.
+    if (_persistenceBlocked && !hasActiveTasks && _executions.isEmpty) return;
+    _suspended = true;
+    try {
+      final saving = {
+        for (final task in activeTasks)
+          if (task.status == DownloadTaskStatus.saving) task.id,
+      };
+      for (final task in activeTasks) {
+        _stopTask(task, paused: true);
+      }
+      notifyListeners();
+      await flush();
+      // Cache writes are atomic. A blocked HTTP response need not hold Cmd-Q
+      // hostage; its task is already paused durably. Native exports, however,
+      // must finish/cancel so an already committed file remains authoritative.
+      await Future.wait([
+        for (final id in saving)
+          if (_executions[id] case final execution?) execution,
+      ]);
+      await flush();
+    } finally {
+      _suspended = false;
+    }
+  }
+
+  Future<void> waitForIdle() async {
+    await initialize();
+    while (hasActiveTasks || _executions.isNotEmpty) {
+      _schedule();
+      await Future<void>.delayed(const Duration(milliseconds: 10));
+    }
+    await _writes;
   }
 
   /// 移除已完成或失败的任务
   void removeTask(String taskId) {
-    _tasks.removeWhere((t) => t.id == taskId);
+    _tasks.removeWhere(
+      (task) => task.id == taskId && !task.isActive && !isRunning(task.id),
+    );
     notifyListeners();
+    _checkpoint();
+  }
+
+  @override
+  void dispose() {
+    _closed = true;
+    _checkpointTimer?.cancel();
+    _retryTimer?.cancel();
+    for (final task in activeTasks) {
+      _stopTask(task, paused: true);
+    }
+    super.dispose();
   }
 
   /// 执行后台任务
   Future<void> _executeTask(DownloadTask task) async {
     try {
+      await _persist();
+      if (task.isCancelled || _closed) return;
       // 检查权限
-      if (!await _requestStoragePermission()) {
+      if (!await (_requestPermission?.call() ?? _requestStoragePermission())) {
+        if (task.isCancelled) return;
         task.status = DownloadTaskStatus.failed;
         task.error = '需要存储权限才能下载文件';
         task.message = '存储权限不足';
         notifyListeners();
         return;
       }
+      if (task.isCancelled || _closed) return;
 
       task.status = DownloadTaskStatus.downloading;
       task.message = '开始并发下载...';
       notifyListeners();
+      await _persist();
 
       DateTime lastNotifyTime = DateTime.now();
 
@@ -197,12 +553,13 @@ class DownloadService extends ChangeNotifier {
         bookId: task.book.bookId,
         chapters: task.chapters,
         isCancelled: () => task.isCancelled,
-        concurrency: 12,
+        concurrency: chapterConcurrency,
         onProgress: (current, total, message) {
           if (task.isCancelled) return;
           task.current = current;
           task.total = total;
           task.message = message;
+          _checkpoint();
 
           // 节流通知，避免界面刷新过频
           final now = DateTime.now();
@@ -215,9 +572,6 @@ class DownloadService extends ChangeNotifier {
       );
 
       if (task.isCancelled) {
-        task.status = DownloadTaskStatus.cancelled;
-        task.message = '下载已取消';
-        notifyListeners();
         return;
       }
 
@@ -225,9 +579,13 @@ class DownloadService extends ChangeNotifier {
       task.status = DownloadTaskStatus.saving;
       task.message = '章节下载完毕，正在生成 ${task.format} 文件...';
       notifyListeners();
+      await _persist();
+      if (task.isCancelled || _closed) return;
 
       String? filePath;
-      if (task.format == 'TXT') {
+      if (_exportTask != null) {
+        filePath = await _exportTask(task);
+      } else if (task.format == 'TXT') {
         filePath = await _assembleAndSaveTxt(
           task.book,
           task.chapters,
@@ -246,32 +604,73 @@ class DownloadService extends ChangeNotifier {
       // A saved native result is authoritative: cancellation after the atomic
       // commit cannot turn an existing exported file into a cancelled task.
       if (task.isCancelled && !(ReaderPlatform.isMacOS && filePath != null)) {
-        task.status = DownloadTaskStatus.cancelled;
-        task.message = '导出已取消，已下载正文仍保留';
+        if (task.status != DownloadTaskStatus.paused) {
+          task.status = DownloadTaskStatus.cancelled;
+          task.message = '导出已取消，已下载正文仍保留';
+        }
       } else if (filePath != null) {
         task.status = DownloadTaskStatus.completed;
         task.filePath = filePath;
         task.message = '下载完成';
+        task.error = null;
+        task.errorKind = null;
+        task.failedChapterIds = [];
+        task.nextRetryAt = null;
       } else {
         task.status = DownloadTaskStatus.failed;
         task.error = '保存文件失败';
         task.message = '保存文件失败';
+        task.errorKind = 'export';
       }
     } catch (e) {
       if (e is FileExportCancelled) {
         task.isCancelled = true;
-        task.status = DownloadTaskStatus.cancelled;
-        task.message = '导出已取消，已下载正文仍保留';
+        if (task.status != DownloadTaskStatus.paused) {
+          task.status = DownloadTaskStatus.cancelled;
+          task.message = '导出已取消，已下载正文仍保留';
+        }
         return;
       }
       if (kDebugMode) {
         debugPrint('DownloadTask error: $e');
       }
-      task.status = DownloadTaskStatus.failed;
-      task.error = e.toString();
-      task.message = '下载异常: $e';
+      if (!task.isCancelled) {
+        task.errorKind = e is ChapterDownloadIncomplete
+            ? (e.diskFailure ? 'disk' : 'unavailable')
+            : e is FileSystemException
+            ? 'disk'
+            : e is SocketException ||
+                  e is TimeoutException ||
+                  e is HttpException
+            ? 'network'
+            : 'other';
+        if (e is ChapterDownloadIncomplete) {
+          task.failedChapterIds = e.failedChapterIds;
+          task.current = e.downloaded;
+        }
+        task.error = e.toString();
+        if (task.errorKind == 'network' && task.retryCount < 2) {
+          task.retryCount++;
+          task.nextRetryAt = DateTime.now().add(
+            retryBase * (1 << (task.retryCount - 1)),
+          );
+          task.status = DownloadTaskStatus.pending;
+          task.message = '网络错误，${task.retryCount}/2 次退避重试；已下载章节保留';
+        } else {
+          task.status = DownloadTaskStatus.failed;
+          task.message =
+              '${task.errorKind == 'disk'
+                  ? '存储写入失败'
+                  : task.errorKind == 'unavailable'
+                  ? '部分章节未完整提供'
+                  : '下载未完成'}；成功缓存保留，可查看详情后重试';
+        }
+      }
     } finally {
-      notifyListeners();
+      if (!_closed) {
+        notifyListeners();
+        await _persist();
+      }
     }
   }
 
@@ -375,7 +774,9 @@ class DownloadService extends ChangeNotifier {
 
       for (int i = 0; i < chapters.length; i++) {
         final ch = chapters[i];
-        final cacheFile = File('${offlineDir.path}/${ch.itemId}.txt');
+        final cacheFile = File(
+          '${offlineDir.path}/${ReaderCacheService.segment(ch.itemId)}.txt',
+        );
         if (await cacheFile.exists() && await cacheFile.length() > 0) {
           await sink.addStream(cacheFile.openRead());
         } else {
@@ -459,10 +860,15 @@ class DownloadService extends ChangeNotifier {
       final chapterContents = <Map<String, String>>[];
       for (int i = 0; i < chapters.length; i++) {
         final ch = chapters[i];
-        final cacheFile = File('${offlineDir.path}/${ch.itemId}.txt');
-        String content = '[章节内容下载失败]';
-        if (await cacheFile.exists() && await cacheFile.length() > 0) {
-          content = await cacheFile.readAsString();
+        final cacheFile = File(
+          '${offlineDir.path}/${ReaderCacheService.segment(ch.itemId)}.txt',
+        );
+        if (!await cacheFile.exists()) {
+          throw const FileSystemException('已下载章节不完整，未生成占位正文');
+        }
+        final content = await cacheFile.readAsString();
+        if (!ReaderCacheService.isReadable(content)) {
+          throw const FileSystemException('已下载正文无效，未生成占位正文');
         }
         chapterContents.add({'title': chapters[i].title, 'content': content});
       }

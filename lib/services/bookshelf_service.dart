@@ -5,6 +5,7 @@ import '../models/book.dart';
 import '../models/chapter.dart';
 import '../models/bookshelf_book.dart';
 import 'api_service.dart';
+import 'reader_trash_service.dart';
 
 /// 书架服务 - 本地收藏、进度缓存与批量管理
 class BookshelfService {
@@ -29,6 +30,7 @@ class BookshelfService {
   final List<BookshelfBook> _books = [];
   SharedPreferences? _prefs;
   bool _initialized = false;
+  bool _storageReadable = true;
   int _generation = 0;
 
   Future<void> reload() async {
@@ -73,6 +75,7 @@ class BookshelfService {
     final prefs = await SharedPreferences.getInstance();
     if (generation != _generation) return;
     _prefs = prefs;
+    _storageReadable = true;
     final jsonStr = prefs.getString(_storageKey);
     var repaired = false;
     if (jsonStr != null && jsonStr.isNotEmpty) {
@@ -111,6 +114,7 @@ class BookshelfService {
         _books.clear();
         _books.addAll(byId.values);
       } catch (e) {
+        _storageReadable = false;
         if (kDebugMode) debugPrint('初始化书架失败: $e');
       }
     }
@@ -129,12 +133,15 @@ class BookshelfService {
     // Encode at execution time, not before awaiting a prior disk write.
     _writes = _writes.catchError((_) {}).then((_) async {
       if (generation != _generation) return;
+      if (!_storageReadable) throw StateError('书架数据损坏，原记录已保留；请先恢复备份');
       _prefs ??= await SharedPreferences.getInstance();
       if (generation != _generation) return;
-      await _prefs!.setString(
+      if (!await _prefs!.setString(
         _storageKey,
         json.encode(_books.map((b) => b.toJson()).toList()),
-      );
+      )) {
+        throw StateError('书架未保存，请检查存储空间');
+      }
       if (notify) changeNotifier.value++;
     });
     return _writes;
@@ -200,20 +207,53 @@ class BookshelfService {
 
   /// 从书架移除单本书
   Future<void> removeFromBookshelf(String bookId) async {
-    await initialize();
-    _membership[bookId] = (_membership[bookId] ?? 0) + 1;
-    _books.removeWhere((b) => b.bookId == bookId);
-    await _save();
+    await removeMultipleWithUndo([bookId]);
   }
 
   /// 批量从书架中移除书籍
   Future<void> removeMultiple(List<String> bookIds) async {
+    await removeMultipleWithUndo(bookIds);
+  }
+
+  Future<ReaderTrashEntry?> removeMultipleWithUndo(List<String> bookIds) async {
     await initialize();
+    if (!_storageReadable) throw StateError('书架数据损坏，未执行删除');
     final idSet = bookIds.toSet();
+    final removed = _books.where((b) => idSet.contains(b.bookId)).toList();
+    if (removed.isEmpty) return null;
     for (final id in idSet) {
       _membership[id] = (_membership[id] ?? 0) + 1;
     }
+    final entry = await ReaderTrashService().stash(
+      targetKey: _storageKey,
+      label: removed.length == 1
+          ? removed.first.bookName
+          : '${removed.length} 本书',
+      items: removed.map((e) => e.toJson()).toList(),
+    );
     _books.removeWhere((b) => idSet.contains(b.bookId));
+    try {
+      await _save();
+    } catch (_) {
+      _books.addAll(removed.where((e) => !isInBookshelf(e.bookId)));
+      rethrow;
+    }
+    return entry;
+  }
+
+  Future<void> flush() => _writes;
+  Future<void> restoreSnapshots(ReaderTrashEntry entry) async {
+    await initialize();
+    for (final json in entry.items) {
+      final book = BookshelfBook.fromJson(json);
+      final current = getBook(book.bookId);
+      if (current != null) {
+        // Never replace reading progress accumulated after a book was removed.
+        continue;
+      }
+      _membership[book.bookId] = (_membership[book.bookId] ?? 0) + 1;
+      _books.add(book);
+    }
     await _save();
   }
 

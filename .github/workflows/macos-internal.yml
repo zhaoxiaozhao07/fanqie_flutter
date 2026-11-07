@@ -1,0 +1,205 @@
+name: 构建 macOS 自用 DMG
+run-name: macOS arm64 自用 Release · ${{ github.ref_name }}
+
+# Deliberately independent of the Android release workflow and signing secrets.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本校验（留空使用 pubspec.yaml，不会修改版本号）'
+        required: false
+        default: ''
+        type: string
+      publish:
+        description: '创建独立的 macOS 自用预发布版本（未公证，不覆盖 Android Release）'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-internal-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: 测试并构建 arm64 Release DMG
+    # A standard, non-larger Apple Silicon runner; do not use an Intel label.
+    runs-on: macos-26
+    timeout-minutes: 60
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      full_version: ${{ steps.version.outputs.full_version }}
+      artifact_name: ${{ steps.version.outputs.artifact_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: 校验架构、版本与发布范围
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          set -euo pipefail
+          [[ "$(uname -m)" == arm64 ]] || { echo 'Apple Silicon runner is required'; exit 1; }
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          FULL_VERSION=$(awk '/^version:/{print $2}' pubspec.yaml)
+          VERSION=${FULL_VERSION%%+*}
+          BUILD=${FULL_VERSION##*+}
+          [[ "$FULL_VERSION" == *+* && "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$BUILD" =~ ^[0-9]+$ ]]
+          if [[ -n "$REQUESTED_VERSION" && "$REQUESTED_VERSION" != "$VERSION" ]]; then
+            echo '手动版本与代码版本不一致'; exit 1
+          fi
+          if [[ "$PUBLISH" == true && "$GITHUB_REF" != refs/heads/main ]]; then
+            echo '仅 main 可发布自用预发布版本；其他分支请关闭 publish'; exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "full_version=$FULL_VERSION" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
+          echo "artifact_name=fanqie-macos-arm64-$VERSION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          mkdir -p build/macos/ci-logs
+          sw_vers
+          xcodebuild -version
+          for script in scripts/*.sh; do bash -n "$script"; done
+          git diff --check
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.4'
+          channel: stable
+          architecture: arm64
+          cache: true
+      - name: 准备 macOS 依赖
+        run: |
+          set -euo pipefail
+          flutter --version
+          flutter config --enable-macos-desktop
+          flutter pub get --enforce-lockfile
+      - name: 静态分析
+        run: |
+          set -euo pipefail
+          flutter analyze --no-pub 2>&1 | tee build/macos/ci-logs/flutter-analyze.log
+      - name: 离线单元与组件回归
+        run: |
+          set -euo pipefail
+          flutter test --no-pub --reporter expanded 2>&1 | tee build/macos/ci-logs/flutter-test.log
+      - name: 构建生产入口 Release
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          BUILD_NUMBER: ${{ steps.version.outputs.build }}
+        run: |
+          set -euo pipefail
+          flutter build macos --release --no-pub --target lib/main.dart \
+            --build-name="$VERSION" --build-number="$BUILD_NUMBER" \
+            2>&1 | tee build/macos/ci-logs/flutter-build.log
+      - name: 内部签名、架构校验与 DMG 打包
+        env:
+          FULL_VERSION: ${{ steps.version.outputs.full_version }}
+        run: |
+          set -euo pipefail
+          # "internal" is ad-hoc signing of a Release build, not a Debug build.
+          # The separate "release" packaging mode requires Developer ID/notarization.
+          scripts/package_macos.sh \
+            build/macos/Build/Products/Release/FanqieReader.app \
+            internal build/macos/distribution/ci \
+            2>&1 | tee build/macos/ci-logs/package.log
+          (cd build/macos/distribution/ci && shasum -a 256 -c ./*.dmg.sha256)
+          flutter --version --machine > build/macos/ci-logs/flutter-version.json
+          python3 - <<'PY'
+          import datetime, hashlib, json, os, pathlib, subprocess
+          out = pathlib.Path("build/macos/distribution/ci")
+          images = list(out.glob("*.dmg"))
+          assert len(images) == 1, "Expected exactly one internal DMG"
+          sdk = json.loads(pathlib.Path("build/macos/ci-logs/flutter-version.json").read_text())
+          run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
+          info = {
+              "version": os.environ["FULL_VERSION"],
+              "source_commit": os.environ["GITHUB_SHA"],
+              "source_ref": os.environ["GITHUB_REF"],
+              "workflow_run": run_url,
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "built_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
+              "architecture": subprocess.check_output(["uname", "-m"], text=True).strip(),
+              "build_mode": "Release",
+              "build_target": "lib/main.dart",
+              "minimum_macos_target": "12.0",
+              "signing": "ad-hoc",
+              "notarized": False,
+              "flutter": sdk,
+              "xcode": subprocess.check_output(["xcodebuild", "-version"], text=True).strip(),
+              "sha256": {image.name: hashlib.sha256(image.read_bytes()).hexdigest() for image in images},
+          }
+          (out / "build-info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.artifact_name }}
+          path: |
+            build/macos/distribution/ci/*.dmg
+            build/macos/distribution/ci/*.dmg.sha256
+            build/macos/distribution/ci/build-info.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: 保存验证日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-ci-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/macos/ci-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    name: 发布独立的自用预发布附件
+    needs: build
+    if: inputs.publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist/macos
+      - name: 创建 macOS 预发布版本（不覆盖既有标签或附件）
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          FULL_VERSION: ${{ needs.build.outputs.full_version }}
+        run: |
+          set -euo pipefail
+          NAME="fanqie-v$VERSION-macos-arm64-internal.dmg"
+          (cd dist/macos && sha256sum -c "$NAME.sha256")
+          # Separate namespace + immutable run identity; never move Android v* tags.
+          TAG="macos-internal-v$VERSION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          {
+            printf '# macOS 自用构建\n\n'
+            printf '版本：`%s`；生产入口 `lib/main.dart`，Release AOT，Apple Silicon / arm64。\n\n' "$FULL_VERSION"
+            printf '**仅供自用：临时 ad-hoc 签名，未使用 Developer ID，未经过 Apple 公证。**\n'
+            printf '无需 Apple ID 或额外仓库密钥；不承诺通过 Gatekeeper，首次打开可能需要在系统「隐私与安全性」中允许。\n\n'
+            printf '最低构建目标 macOS 12.0，不等于最低系统实机或完整安装升级验收。\n'
+            printf '请先校验同名 SHA-256 文件，退出旧实例，再将 DMG 内应用拖到 Applications。\n'
+            printf '听书服务地址、模型、音色和 API Key 在应用内配置，Keychain 保存密钥，不属于 CI secrets。\n\n'
+            printf '此预发布不修改 Android 正式 Release、APK、正文或版本标签。\n'
+            printf '仓库公开，因此预发布附件也公开；包内不包含个人阅读数据或语音密钥。\n\n'
+            printf '源码提交：`%s`\n\n[构建与测试日志](%s)；完整来源见附件 `build-info.json`。\n' "$GITHUB_SHA" "$RUN_URL"
+          } > dist/macos/release-notes.md
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "番茄Reader macOS 自用 v$VERSION（构建 $GITHUB_RUN_NUMBER）" \
+            --notes-file dist/macos/release-notes.md \
+            "dist/macos/$NAME" "dist/macos/$NAME.sha256" dist/macos/build-info.json
+          RELEASE_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
+          {
+            printf '## macOS 自用 Release DMG\n\n'
+            printf '[下载 DMG 与 SHA-256](%s)\n\n' "$RELEASE_URL"
+            printf 'Release 构建；arm64；临时签名；未公证。Android 发布保持不变。\n'
+          } >> "$GITHUB_STEP_SUMMARY"

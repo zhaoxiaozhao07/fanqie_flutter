@@ -1,6 +1,7 @@
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import '../models/reader_illustration.dart';
+import 'reader_display_text.dart';
 
 class ReaderContentBlock {
   final int paragraphIndex, start, end;
@@ -64,8 +65,10 @@ class ReaderParagraphGeometry {
   final TextStyle style;
   final TextScaler scaler;
   final double width;
+  final double textWidthInset;
   final bool indent;
   final Size inlineCommentSize;
+  final String displayScript;
   double height = 0;
 
   ReaderParagraphGeometry({
@@ -74,10 +77,12 @@ class ReaderParagraphGeometry {
     required this.style,
     required this.scaler,
     required this.width,
+    this.textWidthInset = 0,
     required this.indent,
     required double spacing,
     required double imageHeight,
     this.inlineCommentSize = Size.zero,
+    this.displayScript = 'original',
   }) {
     for (final block in readerContentBlocks([
       source,
@@ -108,7 +113,7 @@ class ReaderParagraphGeometry {
         text: TextSpan(
           style: style,
           children: [
-            TextSpan(text: text),
+            TextSpan(text: ReaderDisplayText.convert(text, displayScript)),
             if (comment)
               const WidgetSpan(
                 alignment: PlaceholderAlignment.middle,
@@ -129,7 +134,7 @@ class ReaderParagraphGeometry {
               ]
             : const [],
       )
-      ..layout(maxWidth: math.max(1, width));
+      ..layout(maxWidth: math.max(1, width - textWidthInset));
   }
 
   (int, double, String?) atY(double y) {

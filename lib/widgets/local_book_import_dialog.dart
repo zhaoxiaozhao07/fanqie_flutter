@@ -10,13 +10,23 @@ import '../services/local_book_service.dart';
 import '../services/safe_zip_reader.dart';
 
 class LocalBookImportDialog extends StatefulWidget {
-  const LocalBookImportDialog({super.key});
+  final File? initialFile;
+  final String? initialError;
+  final bool autoPreview;
+  final LocalBookService? service;
+  const LocalBookImportDialog({
+    super.key,
+    this.initialFile,
+    this.initialError,
+    this.autoPreview = false,
+    this.service,
+  });
   @override
   State<LocalBookImportDialog> createState() => _LocalBookImportDialogState();
 }
 
 class _LocalBookImportDialogState extends State<LocalBookImportDialog> {
-  final _service = LocalBookService();
+  late final _service = widget.service ?? LocalBookService();
   File? _file;
   final _ownedPicks = <Directory>[];
   LocalImportPreview? _preview;
@@ -27,6 +37,18 @@ class _LocalBookImportDialogState extends State<LocalBookImportDialog> {
   bool _committing = false;
   String _progress = '';
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _file = widget.initialFile;
+    _error = widget.initialError;
+    if (widget.autoPreview && _file != null && _error == null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_prepare());
+      });
+    }
+  }
 
   Future<void> _pick() async {
     final token = _token = LocalImportToken();
@@ -359,6 +381,11 @@ class _LocalBookImportDialogState extends State<LocalBookImportDialog> {
                         child: const Text('返回调整'),
                       ),
                     FilledButton(
+                      key: ValueKey(
+                        preview == null
+                            ? 'local-import-preview'
+                            : 'local-import-confirm',
+                      ),
                       onPressed: _busy || _file == null
                           ? null
                           : preview == null

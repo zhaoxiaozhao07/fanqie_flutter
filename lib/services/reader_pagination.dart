@@ -6,8 +6,16 @@ import 'package:flutter/material.dart';
 import '../models/reading_position.dart';
 import '../models/reader_illustration.dart';
 import 'reader_content.dart';
+import 'reader_display_text.dart';
+import 'reader_text.dart';
+import 'reader_typography.dart';
 
 class ReaderLayout {
+  // RenderEditable reserves a 1px gap in addition to the configured cursor
+  // width, even for read-only SelectableText. Account for that in text
+  // measurement, not in canonical character offsets or illustration geometry.
+  static const selectableCursorWidth = 2.0;
+  static const selectableTextInset = 1.0 + selectableCursorWidth;
   final Size size;
   final TextStyle bodyStyle;
   final TextStyle titleStyle;
@@ -17,6 +25,9 @@ class ReaderLayout {
   final Size inlineCommentSize;
   final bool showPageNumber;
   final double chapterEndHeight;
+  final double textWidthInset;
+  final bool smartTypography;
+  final String displayScript;
 
   const ReaderLayout({
     required this.size,
@@ -28,6 +39,9 @@ class ReaderLayout {
     this.inlineCommentSize = Size.zero,
     this.showPageNumber = true,
     this.chapterEndHeight = 0,
+    this.textWidthInset = 0,
+    this.smartTypography = false,
+    this.displayScript = 'original',
   });
 
   Object get key => (
@@ -40,6 +54,9 @@ class ReaderLayout {
     inlineCommentSize,
     showPageNumber,
     chapterEndHeight,
+    textWidthInset,
+    smartTypography,
+    displayScript,
   );
 
   // Paint-only changes (night theme, highlights) must reuse measured pages.
@@ -202,10 +219,11 @@ class ReaderPaginationCache {
     required bool indent,
     List<ReaderIllustration> illustrations = const [],
   }) {
-    final width = math.max(
+    final contentWidth = math.max(
       1.0,
       layout.size.width - layout.horizontalPadding * 2,
     );
+    final width = math.max(1.0, contentWidth - layout.textWidthInset);
     final painter = TextPainter(
       textDirection: TextDirection.ltr,
       textScaler: layout.textScaler,
@@ -220,7 +238,7 @@ class ReaderPaginationCache {
       painter.text = TextSpan(
         style: style,
         children: [
-          TextSpan(text: text),
+          TextSpan(text: ReaderDisplayText.convert(text, layout.displayScript)),
           if (hasComment)
             const WidgetSpan(
               alignment: PlaceholderAlignment.middle,
@@ -299,7 +317,7 @@ class ReaderPaginationCache {
         if (block.image != null) {
           var spacing = fragments.isEmpty ? 0.0 : layout.paragraphSpacing;
           double imageHeight() => block.image!.displayHeight(
-            width,
+            contentWidth,
             math.max(1, available() - endHeight).toDouble(),
           );
           var height = imageHeight();
@@ -344,12 +362,31 @@ class ReaderPaginationCache {
           if (height > room + 0.01) {
             final lines = painter.computeLineMetrics();
             var candidate = 0;
+            var fittingLines = 0;
             for (final line in lines) {
               if (line.baseline + line.descent > room + 0.01) break;
+              fittingLines++;
               final position = painter.getPositionForOffset(
                 Offset(0, line.baseline),
               );
               candidate = painter.getLineBoundary(position).end;
+            }
+            if (layout.smartTypography &&
+                fragments.isNotEmpty &&
+                fittingLines == 1 &&
+                lines.length >= 3) {
+              flush(); // Do not begin a multi-line paragraph with an orphan.
+              continue;
+            }
+            if (layout.smartTypography &&
+                fittingLines >= 3 &&
+                fittingLines == lines.length - 1) {
+              final preceding = lines[fittingLines - 2];
+              candidate = painter
+                  .getLineBoundary(
+                    painter.getPositionForOffset(Offset(0, preceding.baseline)),
+                  )
+                  .end; // Leave at least two lines for the continuation.
             }
             if (candidate <= prefix.length && fragments.isNotEmpty) {
               flush();
@@ -381,6 +418,20 @@ class ReaderPaginationCache {
                   original.substring(cursor).characters.first.length;
               oversized = true;
             }
+            end = ReaderText.safeOffset(display, end);
+            if (layout.smartTypography && !oversized) {
+              end = ReaderTypography.safePageEnd(
+                display,
+                end,
+                minimum: prefix.length,
+              );
+            }
+            if (end <= prefix.length) {
+              end =
+                  prefix.length +
+                  original.substring(cursor, block.end).characters.first.length;
+              oversized = true;
+            }
             height = measure(
               display.substring(0, end),
               layout.bodyStyle,
@@ -400,6 +451,24 @@ class ReaderPaginationCache {
                     painter.getPositionForOffset(Offset(0, previous.baseline)),
                   )
                   .end;
+              end = ReaderText.safeOffset(display, end);
+              if (layout.smartTypography) {
+                end = ReaderTypography.safePageEnd(
+                  display,
+                  end,
+                  minimum: prefix.length,
+                );
+              }
+              if (end <= prefix.length) {
+                end =
+                    prefix.length +
+                    original
+                        .substring(cursor, block.end)
+                        .characters
+                        .first
+                        .length;
+                oversized = true;
+              }
               height = measure(
                 display.substring(0, end),
                 layout.bodyStyle,

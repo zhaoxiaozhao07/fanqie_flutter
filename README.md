@@ -2,9 +2,45 @@
 
 基于 Flutter 的 Android 小说阅读客户端，内置 Dart 服务引擎，无需单独部署后端。
 
-[最新版本](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/latest) · [发布验证](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/release.yml)
+[最新 Android 版本](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/latest) · [Android 发布](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/release.yml) · [macOS 自用构建](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/macos-internal.yml)
 
-macOS 核心阅读客户端已完成主要适配代码与本地自动化验证，当前仅提供 Apple Silicon 内部测试构建，部分手工验收仍待完成。正式签名、公证与 GitHub Actions 构建按当前决定延期。见 [开发计划](docs/MACOS_CLIENT_DEVELOPMENT_PLAN.md) 与 [实施和验证记录](docs/MACOS_CLIENT_VERIFICATION.md)。
+macOS 核心阅读客户端已完成主要适配代码与本地自动化验证，仅提供 Apple Silicon 自用构建，部分手工验收仍待完成。现已按用户要求加入独立 GitHub Actions Release DMG 构建：无需 Apple ID 或新增密钥，临时签名、未公证，不覆盖 Android 发布。见 [自用打包说明](docs/MACOS_INTERNAL_RELEASE.md)、[开发计划](docs/MACOS_CLIENT_DEVELOPMENT_PLAN.md) 与 [实施和验证记录](docs/MACOS_CLIENT_VERIFICATION.md)。
+
+### macOS 本地阅读体验优化（2026-11-06）
+
+- 「阅读全屏」是正文沉浸模式：隐藏阅读工具栏、章节信息与状态栏，正文使用完整阅读视口，不改变应用窗口大小或进入系统全屏。点击中间或将鼠标移到上边缘可唤出菜单，`Esc` 退出，`F11` 切换。
+- 双页取消 `1280` 总宽上限，按窗口实际宽度均分两页，页间距 `24`；左右只保留排版边距。支持自动／单栏／双栏，窄窗口或过大字号自动回退单栏。
+- 修复桌面正文吞掉单击、仿真翻页禁用鼠标点击的问题；双击选词、拖选与右键批注保留优先级，设置入口始终可用。
+- 翻页中缩放窗口先完成原翻页，再按原文锚点重排；双栏每次翻两页，奇数末页右栏留空，阅读位置与批注字符范围保持不变。
+- 滚轮同一次操作的连续信号与惯性合并，不再排队补翻第二次；双页一次只翻一组。桌面普通动画放慢至 `320ms`、仿真至 `360ms`，无动画和手机原有节奏不变。
+- 新增常驻目录：宽窗口左侧停靠，窄窗口覆盖显示；支持名称／序号搜索、分卷、正倒序、定位当前章和书签／笔记入口。切换窗口、开关目录或进入沉浸模式保留目录状态与原文位置。
+- `⌘J` 按序号跳章，`⌘⇧D` 开关目录，`Space / ⇧Space` 前后翻屏，`Home / End` 到本章首尾，`⌘+ / ⌘− / ⌘0` 调整／重置字号，`F1` 查看快捷键；macOS 菜单栏增加「阅读」菜单。输入框、选区和弹窗优先。
+- 设置、笔记、书签和缓存使用桌面居中弹窗；正文搜索在下面的工作空间迭代中改为侧栏。连续键盘滚动可平滑衔接和立即反向，滚轮／触控板会暂停自动滚屏，减少动态效果时直接定位。
+- 修复桌面可选正文与分页测量不一致导致的页底裁字，分页、选区、插图混排和滚动锚点使用一致的文本宽度；不改写原文位置或批注。
+- 本阶段历史验证：全量 566 项测试通过（11 项默认跳过），10 项 macOS 集成与 13 项 Swift 通过，原生与截图验收详见 [验证记录](docs/MACOS_CLIENT_VERIFICATION.md)。当时仅本地测试；最新 V3 与自用云构建范围见下文。应用系统全屏／Retina 属于独立手工验收，不与阅读全屏混淆。
+
+### macOS 阅读工作空间与本地工具（2026-11-06）
+
+- **持续正文搜索**：宽窗口停靠、窄窗口覆盖；关闭重开保留本书的关键词、结果与选中项。`Enter` 跳转，`⌘G / ⌘⇧G` 或 `F3 / ⇧F3` 逐处查找，只扫描已加载／本地缓存，不为搜索下载全书。
+- **位置前进／后退**：工具栏、`⌘[ / ⌘]` 和鼠标前进／后退键使用精确原文锚点；新跳转清除前进分支，失败或取消不改写当前位置与历史。
+- **侧栏记忆与正文选区**：目录与搜索共用默认 `304`、可调整 `240–480` 的宽度，拖动只预览，松开后重排一次，双击分隔线重置；目录开关和宽度独立记忆。桌面原生 `SelectionArea` 支持双击选词、跨段／跨栏复制，复制不包含缩进或评论气泡；V3 追加同章跨段批注，原文字符范围保持。
+- **持久化下载队列**：默认并行两本书，可选 `1–4` 本／每书 `3、6、12` 章；同书任务串行，支持优先下载、暂停、继续、有限网络退避及失败详情。重启后中断任务保持暂停，复用完整缓存，不自动联网或弹出保存窗口；移除任务不删除正文或导出文件。
+- **Finder 文件接收**：声明 TXT／EPUB 的备用查看器并接收窗口拖拽，复制到原生受控暂存后逐个预览、明确确认导入；原文件不删除。单文件最多 `128 MB`，最多 `16` 个待处理文件、暂存总量 `512 MB`；符号链接、目录、非本地 URL 和不支持的文件被拒绝。完整 Finder／拖拽手工验收仍单独保留。
+- **跨书笔记工作台**：桌面导航「笔记」或 `⌘⇧N`，按书籍、标签、颜色、时间以及全文关键词筛选，编辑／删除仍操作原来的逐书笔记记录；书架移除后保留书名索引。定位先验证目录身份与引用，歧义不跳转；当前筛选结果可导出 Markdown／JSON，名称索引随同端备份恢复。
+- 最终内部测试包：[阅读工作空间 DMG](build/macos/distribution/reading-workspace/fanqie-v3.3.4-macos-arm64-internal.dmg)，附同名 SHA-256；先退出旧实例。版本仍为 `3.3.4+340`，未经正式签名或公证。
+- 长时入口：`FLUTTER=/path/to/flutter scripts/test_macos_reader_soak.sh`，默认 30 分钟，固定语义基线、聚焦和临时防休眠，并对每次原文前进与精确保位做断言；本轮 395 次操作通过。
+- 本地性能入口：`FLUTTER=/path/to/flutter scripts/test_macos_reader_performance.sh`，运行隔离的 AOT Profile 工作负载；指标、设备与前台会话限制见验证记录，不等同于完整 FPS／Retina 验收。
+
+### 阅读体验 V3（本轮追加）
+
+- **交互与排版**：动画速度、正文点击翻页开关、自定义阅读快捷键；仿真快照改为异步。中文分页尽量避免标点与孤行问题；栏间距、每行目标字数、HEX 配色与对比度提示；离线简繁逐字显示，不改写复制、搜索、听书或批注原文。
+- **外部字体**：设置中导入／预览／删除 TTF、OTF，校验结构和 SHA-256；每个最多 `20 MB`，最多 `20` 个／`200 MB`，只保存应用内副本。支持全局／单书设置；字体缺失时回退，原文位置保留。手动备份可包含字体文件。
+- **数据保护**：删除书架／书签／笔记和修改笔记先存旧版本；Snackbar 撤销，回收站保留 `30` 天／`1000` 次／`16 MB`，满时拒绝新的破坏操作。备份页可启用应用内自动快照，最多 `128 MB`，先验证新快照再清理旧份；不能代替外部备份。
+- **本地工作台**：书架搜索、分组／未读／在读／读完；离线跨书正文搜索（目录缺失不猜顺序）；笔记缓存原文预览、批量标签／回收站、筛选与滚动状态记忆；正文搜索支持全部／当前匹配高亮。
+- **跨段批注**：同章连续选区可跨段、双栏和可见分页，保存起止段落与 UTF-16 字符范围；最多 `20000` 字符，引用变化或歧义不猜位置。编辑、导出、备份兼容旧单段笔记。
+- **macOS 听书**：阅读菜单「听书 / 暂停」「系统语音与兼容 TTS 接口」。使用可用系统声音，或沿用安卓端 `POST /v1/audio/speech` 及自定义 Base URL／模型／音色／速度；Keychain 保存密钥，支持 MP3／WAV、媒体控制、暂停／停止、跨章、定时与原文高亮。网络请求可取消，限制 `16 MB`，拒绝携带密钥的重定向。
+- 版本保持 `3.3.4+340`；用户于 2026-11-07 授权推送并构建自用 DMG。macOS 使用独立预发布，不冒充 Developer ID / 公证正式版。具体测试与真实服务／前台／Retina 的验收边界见 [V3 实施记录](docs/READING_EXPERIENCE_V3_IMPLEMENTATION.md)。
+- 最终自动化：**606 项 Dart、11 项 macOS 集成、18 项 Swift、9 项安卓原生通过**；30 分钟连续阅读 369 次操作通过；生产入口 Release 与内部包校验通过。[V3 内部 DMG](build/macos/distribution/reading-experience-v3/fanqie-v3.3.4-macos-arm64-internal.dmg)（同目录 SHA-256）。未等同于真实外部 TTS 听辨、前台 FPS 或 Retina 验收。
 
 ## v3.3.4 帖子回复展开（覆盖更新，构建 340）
 
@@ -171,7 +207,7 @@ DEVICE_ID=emulator-5554 bash scripts/test_android_platform.sh
 
 ### macOS 内部构建与验证
 
-仅 Apple Silicon（`arm64`），最低构建目标 macOS 12.0；最低系统实机、正式签名、公证与公开分发尚未完成。macOS 听书属于后续 S7，当前隐藏入口，不支持跨端同步或备份互通。
+仅 Apple Silicon（`arm64`），最低构建目标 macOS 12.0；最低系统实机、正式签名、公证与公开分发尚未完成。V3 已接入 macOS 系统／兼容接口听书；真实声音、媒体键及 Retina 验收单独记录。不提供跨端同步或自动迁移安卓密钥。
 
 ```bash
 flutter pub get
@@ -192,9 +228,9 @@ flutter test integration_test/macos_reader_soak_test.dart -d macos \
 
 macOS 阅读文件、缓存和恢复日志使用 Application Support；导出通过系统“另存为”流式保存，取消不写入下载成功记录、不删除已下载正文。平台测试使用隔离目录/偏好设置，不用于日常阅读数据。
 
-当前不配置或运行 macOS GitHub Actions，先在本机测试；正式签名、公证及公开分发后续再做。现有 Android 工作流保持不变，本次检查点提交通过 `[skip ci]` 避免触发云端构建。阶段状态和后续配置见 [macOS 验证记录](docs/MACOS_CLIENT_VERIFICATION.md)。
+用户已授权使用独立的 [macOS 自用工作流](.github/workflows/macos-internal.yml)：手动触发，生产入口 Release 构建，临时签名 DMG、SHA-256 与构建来源附件。默认创建独立预发布，不改写 Android 标签／Release／APK，不成为 Latest；无需新增 secrets 或 Apple ID。推送使用 `[skip ci]` 避免无关的 Android 构建，macOS 单独通过 `workflow_dispatch` 启动。参数、下载与首次打开说明见 [自用打包文档](docs/MACOS_INTERNAL_RELEASE.md)。Developer ID、公证及正式安装验收仍未完成。
 
-## 发布
+## Android 发布
 
 版本号来自 `pubspec.yaml`，发布标签必须与其一致。发布 workflow 恢复为单个快速构建任务：
 

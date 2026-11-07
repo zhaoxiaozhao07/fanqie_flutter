@@ -12,6 +12,7 @@ class ReaderSettings {
   final bool indent;
   final bool pageMode;
   final String pageAnimation;
+  final String desktopColumns;
   final int themeIndex;
   final int dayThemeIndex;
   final int nightThemeIndex;
@@ -30,6 +31,13 @@ class ReaderSettings {
   final bool haptics;
   final bool restReminder;
   final int restMinutes;
+  final double animationSpeed;
+  final bool tapToTurn;
+  final double columnGap;
+  final int lineCharacters;
+  final bool smartTypography;
+  final String displayScript;
+  final int? customBackground, customText;
 
   const ReaderSettings({
     this.fontSize = 18,
@@ -41,6 +49,7 @@ class ReaderSettings {
     this.indent = true,
     this.pageMode = false,
     this.pageAnimation = 'cover',
+    this.desktopColumns = 'auto',
     this.themeIndex = 1,
     this.dayThemeIndex = 1,
     this.nightThemeIndex = 3,
@@ -59,6 +68,14 @@ class ReaderSettings {
     this.haptics = false,
     this.restReminder = false,
     this.restMinutes = 30,
+    this.animationSpeed = 1,
+    this.tapToTurn = true,
+    this.columnGap = 24,
+    this.lineCharacters = 0,
+    this.smartTypography = true,
+    this.displayScript = 'original',
+    this.customBackground,
+    this.customText,
   });
 
   int effectiveTheme({required bool systemDark, required DateTime now}) {
@@ -83,6 +100,7 @@ class ReaderSettings {
     'indent': indent,
     'pageMode': pageMode,
     'pageAnimation': pageAnimation,
+    'desktopColumns': desktopColumns,
     'themeIndex': themeIndex,
     'dayThemeIndex': dayThemeIndex,
     'nightThemeIndex': nightThemeIndex,
@@ -101,6 +119,14 @@ class ReaderSettings {
     'haptics': haptics,
     'restReminder': restReminder,
     'restMinutes': restMinutes,
+    'animationSpeed': animationSpeed,
+    'tapToTurn': tapToTurn,
+    'columnGap': columnGap,
+    'lineCharacters': lineCharacters,
+    'smartTypography': smartTypography,
+    'displayScript': displayScript,
+    if (customBackground != null) 'customBackground': customBackground,
+    if (customText != null) 'customText': customText,
   };
 
   factory ReaderSettings.fromJson(Map<String, dynamic> json) {
@@ -127,12 +153,17 @@ class ReaderSettings {
       letterSpacing: number('letterSpacing', .5, 0, 3),
       paragraphSpacing: number('paragraphSpacing', 14, 0, 32),
       horizontalPadding: number('horizontalPadding', 20, 8, 48),
-      fontFamily: choice('fontFamily', {
-        'system',
-        'serif',
-        'kaiti',
-        'sans-serif',
-      }, 'system'),
+      fontFamily:
+          RegExp(
+            r'^external_[a-f0-9]{64}$',
+          ).hasMatch(json['fontFamily']?.toString() ?? '')
+          ? json['fontFamily'] as String
+          : choice('fontFamily', {
+              'system',
+              'serif',
+              'kaiti',
+              'sans-serif',
+            }, 'system'),
       indent: flag('indent', true),
       pageMode: flag('pageMode', false),
       pageAnimation: choice('pageAnimation', {
@@ -142,6 +173,11 @@ class ReaderSettings {
         'simulation',
         'none',
       }, 'cover'),
+      desktopColumns: choice('desktopColumns', {
+        'auto',
+        'single',
+        'double',
+      }, 'auto'),
       themeIndex: number('themeIndex', 1, 0, 4).toInt(),
       dayThemeIndex: number('dayThemeIndex', 1, 0, 2).toInt(),
       nightThemeIndex: number('nightThemeIndex', 3, 3, 4).toInt(),
@@ -167,6 +203,22 @@ class ReaderSettings {
         'right_hand',
         'left_hand',
       }, 'balanced'),
+      animationSpeed: number('animationSpeed', 1, .6, 1.6),
+      tapToTurn: flag('tapToTurn', true),
+      columnGap: number('columnGap', 24, 12, 80),
+      lineCharacters: number('lineCharacters', 0, 0, 60).toInt(),
+      smartTypography: flag('smartTypography', true),
+      displayScript: choice('displayScript', {
+        'original',
+        'simplified',
+        'traditional',
+      }, 'original'),
+      customBackground: json['customBackground'] is int
+          ? ((json['customBackground'] as int) & 0x00FFFFFF) | 0xFF000000
+          : null,
+      customText: json['customText'] is int
+          ? ((json['customText'] as int) & 0x00FFFFFF) | 0xFF000000
+          : null,
     );
   }
 
@@ -180,6 +232,7 @@ class ReaderSettings {
     bool? indent,
     bool? pageMode,
     String? pageAnimation,
+    String? desktopColumns,
     int? themeIndex,
     int? dayThemeIndex,
     int? nightThemeIndex,
@@ -198,6 +251,15 @@ class ReaderSettings {
     bool? haptics,
     bool? restReminder,
     int? restMinutes,
+    double? animationSpeed,
+    bool? tapToTurn,
+    double? columnGap,
+    int? lineCharacters,
+    bool? smartTypography,
+    String? displayScript,
+    int? customBackground,
+    int? customText,
+    bool clearCustomColors = false,
   }) => ReaderSettings.fromJson({
     ...toJson(),
     if (fontSize != null) 'fontSize': fontSize,
@@ -209,6 +271,7 @@ class ReaderSettings {
     if (indent != null) 'indent': indent,
     if (pageMode != null) 'pageMode': pageMode,
     if (pageAnimation != null) 'pageAnimation': pageAnimation,
+    if (desktopColumns != null) 'desktopColumns': desktopColumns,
     if (themeIndex != null) 'themeIndex': themeIndex,
     if (dayThemeIndex != null) 'dayThemeIndex': dayThemeIndex,
     if (nightThemeIndex != null) 'nightThemeIndex': nightThemeIndex,
@@ -227,6 +290,16 @@ class ReaderSettings {
     if (haptics != null) 'haptics': haptics,
     if (restReminder != null) 'restReminder': restReminder,
     if (restMinutes != null) 'restMinutes': restMinutes,
+    if (animationSpeed != null) 'animationSpeed': animationSpeed,
+    if (tapToTurn != null) 'tapToTurn': tapToTurn,
+    if (columnGap != null) 'columnGap': columnGap,
+    if (lineCharacters != null) 'lineCharacters': lineCharacters,
+    if (smartTypography != null) 'smartTypography': smartTypography,
+    if (displayScript != null) 'displayScript': displayScript,
+    if (customBackground != null) 'customBackground': customBackground,
+    if (customText != null) 'customText': customText,
+    if (clearCustomColors) 'customBackground': null,
+    if (clearCustomColors) 'customText': null,
   });
 
   ReaderSettings typographyFrom(ReaderSettings preset) => copyWith(
@@ -237,6 +310,9 @@ class ReaderSettings {
     horizontalPadding: preset.horizontalPadding,
     fontFamily: preset.fontFamily,
     indent: preset.indent,
+    columnGap: preset.columnGap,
+    lineCharacters: preset.lineCharacters,
+    smartTypography: preset.smartTypography,
   );
 
   static const presets = {

@@ -18,6 +18,28 @@ class ReaderTheme {
     required this.systemBrightness,
   });
 
+  ReaderTheme withColors({int? background, int? text}) {
+    if (background == null && text == null) return this;
+    final bg = background == null ? backgroundColor : Color(background);
+    final fg = text == null ? textColor : Color(text);
+    return ReaderTheme(
+      name: '自定义',
+      backgroundColor: bg,
+      textColor: fg,
+      secondaryColor: Color.lerp(fg, bg, .28)!,
+      highlightColor: Color.lerp(bg, fg, .10)!,
+      systemBrightness: bg.computeLuminance() < .2
+          ? Brightness.dark
+          : Brightness.light,
+    );
+  }
+
+  double get contrastRatio {
+    final a = backgroundColor.computeLuminance();
+    final b = textColor.computeLuminance();
+    return a > b ? (a + .05) / (b + .05) : (b + .05) / (a + .05);
+  }
+
   ThemeData get materialTheme => ThemeData(
     brightness: systemBrightness,
     colorScheme: ColorScheme.fromSeed(

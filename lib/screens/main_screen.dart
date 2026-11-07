@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:math' as math;
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'search_screen.dart';
 import 'bookshelf_screen.dart';
@@ -10,10 +11,13 @@ import '../widgets/reader_settings_sheet.dart';
 import '../services/desktop_commands.dart';
 import '../services/reader_platform.dart';
 import '../services/reader_settings_repository.dart';
+import '../services/external_book_import_service.dart';
+import 'notes_workspace_screen.dart';
 
 /// 主页面 - 底部三导航：主页、书架、历史
 class MainScreen extends StatefulWidget {
-  const MainScreen({super.key});
+  final ExternalBookImportService? externalImports;
+  const MainScreen({super.key, this.externalImports});
 
   @override
   State<MainScreen> createState() => _MainScreenState();
@@ -23,23 +27,30 @@ class _MainScreenState extends State<MainScreen> {
   int _currentIndex = 0;
   final _searchFocus = FocusNode(debugLabel: 'desktop-library-search');
   bool _dialogOpen = false;
+  bool _externalScheduled = false;
+  late final _externalImports =
+      widget.externalImports ?? ExternalBookImportService();
 
   final GlobalKey<BookshelfScreenState> _bookshelfKey =
       GlobalKey<BookshelfScreenState>();
   final GlobalKey<HistoryScreenState> _historyKey =
       GlobalKey<HistoryScreenState>();
+  final _notesKey = GlobalKey<NotesWorkspaceScreenState>();
 
   @override
   void initState() {
     super.initState();
     if (ReaderPlatform.isMacOS) {
       DesktopCommands.register(this, _desktopCommand);
+      _externalImports.addListener(_onExternalImports);
+      _onExternalImports();
     }
   }
 
   @override
   void dispose() {
     DesktopCommands.register(this, null);
+    _externalImports.removeListener(_onExternalImports);
     _searchFocus.dispose();
     super.dispose();
   }
@@ -54,6 +65,14 @@ class _MainScreenState extends State<MainScreen> {
     if (_dialogOpen) return true;
     switch (command) {
       case 'find':
+        if (_currentIndex == 1) {
+          _bookshelfKey.currentState?.focusSearch();
+          return true;
+        }
+        if (_currentIndex == 3) {
+          _notesKey.currentState?.focusSearch();
+          return true;
+        }
         Navigator.of(context).popUntil((route) => route.isFirst);
         _select(0);
         WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -65,6 +84,10 @@ class _MainScreenState extends State<MainScreen> {
         return true;
       case 'settings':
         unawaited(_settings());
+        return true;
+      case 'notes':
+        Navigator.of(context).popUntil((route) => route.isFirst);
+        _select(3);
         return true;
       default:
         return false;
@@ -84,6 +107,52 @@ class _MainScreenState extends State<MainScreen> {
       }
     } finally {
       _dialogOpen = false;
+      _onExternalImports();
+    }
+  }
+
+  void _onExternalImports() {
+    if (!mounted ||
+        _dialogOpen ||
+        _externalScheduled ||
+        _externalImports.pendingCount == 0) {
+      return;
+    }
+    _externalScheduled = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _externalScheduled = false;
+      if (mounted && !_dialogOpen) unawaited(_presentExternalImport());
+    });
+    WidgetsBinding.instance.ensureVisualUpdate();
+  }
+
+  Future<void> _presentExternalImport() async {
+    if (!mounted || _dialogOpen) return;
+    _dialogOpen = true;
+    final request = _externalImports.takeNext();
+    if (request == null) {
+      _dialogOpen = false;
+      return;
+    }
+    try {
+      final result = await showDialog(
+        context: context,
+        builder: (_) => LocalBookImportDialog(
+          initialFile: request.filePath == null
+              ? null
+              : File(request.filePath!),
+          initialError: request.error,
+          autoPreview: true,
+        ),
+      );
+      if (result != null && mounted) {
+        Navigator.of(context).popUntil((route) => route.isFirst);
+        _select(1);
+      }
+    } finally {
+      await _externalImports.complete(request);
+      _dialogOpen = false;
+      _onExternalImports();
     }
   }
 
@@ -110,6 +179,7 @@ class _MainScreenState extends State<MainScreen> {
       );
     } finally {
       _dialogOpen = false;
+      _onExternalImports();
     }
   }
 
@@ -127,10 +197,13 @@ class _MainScreenState extends State<MainScreen> {
           },
         ),
         HistoryScreen(key: _historyKey),
+        if (ReaderPlatform.isMacOS)
+          NotesWorkspaceScreen(key: _notesKey, isActive: _currentIndex == 3),
       ],
     );
     if (ReaderPlatform.isMacOS) {
       return Scaffold(
+        bottomNavigationBar: TtsPlayerPanel(onClose: () {}),
         body: LayoutBuilder(
           builder: (context, constraints) {
             final extended = constraints.maxWidth >= 1000;
@@ -180,6 +253,11 @@ class _MainScreenState extends State<MainScreen> {
                         icon: Icon(Icons.history_outlined),
                         selectedIcon: Icon(Icons.history_rounded),
                         label: Text('历史'),
+                      ),
+                      NavigationRailDestination(
+                        icon: Icon(Icons.edit_note_outlined),
+                        selectedIcon: Icon(Icons.edit_note),
+                        label: Text('笔记'),
                       ),
                     ],
                   ),

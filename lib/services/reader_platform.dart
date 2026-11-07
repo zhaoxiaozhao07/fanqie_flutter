@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 /// Runtime capabilities, separate from portable reading preferences.
 class ReaderCapabilities {
   final bool tts;
+  final bool nativeSpeech, mediaPlayback;
   final bool secureStorage;
   final bool windowBrightness;
   final bool volumeKeys;
@@ -13,9 +14,12 @@ class ReaderCapabilities {
   final bool networkType;
   final bool textDecoder;
   final bool fileExport;
+  final bool fileImport;
 
   const ReaderCapabilities({
     this.tts = false,
+    this.nativeSpeech = false,
+    this.mediaPlayback = false,
     this.secureStorage = false,
     this.windowBrightness = false,
     this.volumeKeys = false,
@@ -25,6 +29,7 @@ class ReaderCapabilities {
     this.networkType = false,
     this.textDecoder = false,
     this.fileExport = false,
+    this.fileImport = false,
   });
 
   factory ReaderCapabilities.forPlatform(TargetPlatform platform) {
@@ -32,6 +37,8 @@ class ReaderCapabilities {
     final macos = platform == TargetPlatform.macOS;
     return ReaderCapabilities(
       tts: android,
+      nativeSpeech: android,
+      mediaPlayback: android,
       secureStorage: android,
       windowBrightness: android,
       volumeKeys: android,
@@ -53,6 +60,8 @@ class ReaderCapabilities {
         values[key] is bool ? values[key] as bool : defaultValue;
     return ReaderCapabilities(
       tts: flag('tts', fallback.tts),
+      nativeSpeech: flag('nativeSpeech', fallback.nativeSpeech),
+      mediaPlayback: flag('mediaPlayback', fallback.mediaPlayback),
       secureStorage: flag('secureStorage', fallback.secureStorage),
       windowBrightness: flag(
         'windowBrightnessControl',
@@ -65,6 +74,7 @@ class ReaderCapabilities {
       networkType: flag('networkType', fallback.networkType),
       textDecoder: flag('textDecoder', fallback.textDecoder),
       fileExport: flag('fileExport', fallback.fileExport),
+      fileImport: flag('fileImport', false),
     );
   }
 }

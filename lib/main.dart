@@ -7,11 +7,29 @@ import 'services/reader_backup_service.dart';
 import 'services/app_lifecycle_service.dart';
 import 'services/reader_platform.dart';
 import 'widgets/desktop_shortcuts.dart';
+import 'services/download_service.dart';
+import 'services/external_book_import_service.dart';
+import 'services/reader_display_text.dart';
+import 'services/external_reader_fonts.dart';
+import 'services/reader_auto_backup_service.dart';
+import 'services/reader_trash_service.dart';
 
 Future<void> initializeReaderApplication() async {
   AppLifecycleService.initialize();
   await ReaderPlatform.initialize();
   await ReaderBackupService().recover();
+  await ReaderDisplayText.ensureLoaded();
+  try {
+    await ReaderTrashService().pruneExpired();
+  } catch (_) {}
+  await ReaderAutoBackupService().initialize();
+  try {
+    await ExternalReaderFonts().reload();
+  } catch (_) {
+    // A damaged optional font index must not prevent reading existing books.
+  }
+  if (ReaderPlatform.isMacOS) await DownloadService().initialize();
+  await ExternalBookImportService().initialize();
 }
 
 Future<void> main() async {

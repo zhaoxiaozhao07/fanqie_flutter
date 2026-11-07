@@ -50,6 +50,7 @@ class ReaderCachePolicy {
 /// Temporary reader data lives in its own tree. Explicit downloads, legacy
 /// offline data and imported books are read-only here, never eviction targets.
 class ReaderCacheService {
+  static const maxChapterBytes = 32 * 1024 * 1024;
   final Future<Directory> Function() documents;
   static final Map<String, Future<void>> _operations = {};
   static final Set<String> pinnedBooks = {};
@@ -121,7 +122,13 @@ class ReaderCacheService {
 
   Future<String?> _readFile(File file) async {
     try {
-      if (!await file.exists()) return null;
+      if (await FileSystemEntity.type(file.path, followLinks: false) !=
+              FileSystemEntityType.file ||
+          await FileSystemEntity.isLink(file.parent.path) ||
+          await FileSystemEntity.isLink(file.parent.parent.path) ||
+          await file.length() > maxChapterBytes) {
+        return null;
+      }
       final content = await file.readAsString();
       return isReadable(content) ? content : null;
     } on FileSystemException {

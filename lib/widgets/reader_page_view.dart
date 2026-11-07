@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
@@ -15,6 +17,7 @@ class ReaderPageItem {
 
 /// 模式只决定合成效果，章节与普通页面共用同一个翻页入口和收尾流程。
 class ReaderPageView extends StatefulWidget {
+  static const desktopAnimationDuration = Duration(milliseconds: 320);
   final List<ReaderPageItem> pages;
   final Object currentPageId;
   final Object contentVersion;
@@ -35,6 +38,8 @@ class ReaderPageView extends StatefulWidget {
   final bool reverseTapSides;
   final VoidCallback? onUserPageTurn;
   final String semanticLabel;
+  final double animationSpeed;
+  final bool tapToTurn;
 
   const ReaderPageView({
     super.key,
@@ -58,6 +63,8 @@ class ReaderPageView extends StatefulWidget {
     this.reverseTapSides = false,
     this.onUserPageTurn,
     this.semanticLabel = '小说阅读页',
+    this.animationSpeed = 1,
+    this.tapToTurn = true,
   });
 
   @override
@@ -80,6 +87,12 @@ class ReaderPageViewState extends State<ReaderPageView> {
   int _pageSetVersion = 0;
   int _controllerRevision = 0;
   bool _awaitingCommit = false;
+  int _commitGeneration = 0;
+  Size? _pageViewport;
+  static const _wheelQuietPeriod = Duration(milliseconds: 180);
+  Timer? _wheelGestureEnd;
+  bool _wheelGestureActive = false;
+  Duration? _lastWheelTimestamp;
 
   bool get isBusy =>
       _animating ||
@@ -165,6 +178,7 @@ class ReaderPageViewState extends State<ReaderPageView> {
 
   @override
   void dispose() {
+    _wheelGestureEnd?.cancel();
     widget.selection.removeListener(_onSelectionChanged);
     _controller.dispose();
     super.dispose();
@@ -172,6 +186,13 @@ class ReaderPageViewState extends State<ReaderPageView> {
 
   void turnToNextPage() => _turn(forward: true);
   void turnToPreviousPage() => _turn(forward: false);
+  void handleContentTap(Offset globalPosition) {
+    final box = context.findRenderObject();
+    if (box is RenderBox && box.hasSize) {
+      _tap(box.globalToLocal(globalPosition), box.size.width);
+    }
+  }
+
   void clearQueuedTurns() {
     _queuedDirection = null;
     _simulationKey.currentState?.clearQueuedTurns();
@@ -214,7 +235,14 @@ class ReaderPageViewState extends State<ReaderPageView> {
       } else {
         await controller.animateToPage(
           target,
-          duration: const Duration(milliseconds: 260),
+          duration: ReaderPlatform.isMacOS
+              ? Duration(
+                  microseconds:
+                      (ReaderPageView.desktopAnimationDuration.inMicroseconds /
+                              widget.animationSpeed.clamp(.6, 1.6))
+                          .round(),
+                )
+              : const Duration(milliseconds: 260),
           curve: Curves.easeOutCubic,
         );
       }
@@ -234,21 +262,26 @@ class ReaderPageViewState extends State<ReaderPageView> {
     final changed = page != _index;
     _index = page;
     _awaitingCommit = true;
-    if (changed) widget.onPageSettled(_pages[page]);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted) return;
-      _awaitingCommit = false;
-      if (_pendingConfiguration) setState(_synchronize);
-      widget.onInteractionEnded?.call();
+    final generation = ++_commitGeneration;
+    try {
+      if (changed) widget.onPageSettled(_pages[page]);
+    } finally {
+      // A callback/rebuild failure must never leave the input state latched.
       WidgetsBinding.instance.addPostFrameCallback((_) {
-        if (!mounted || isBusy) return;
-        final queued = _queuedDirection;
-        _queuedDirection = null;
-        if (queued != null) _turn(forward: queued);
+        if (!mounted || generation != _commitGeneration) return;
+        _awaitingCommit = false;
+        if (_pendingConfiguration) setState(_synchronize);
+        widget.onInteractionEnded?.call();
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!mounted || isBusy) return;
+          final queued = _queuedDirection;
+          _queuedDirection = null;
+          if (queued != null) _turn(forward: queued);
+        });
+        WidgetsBinding.instance.ensureVisualUpdate();
       });
       WidgetsBinding.instance.ensureVisualUpdate();
-    });
-    WidgetsBinding.instance.ensureVisualUpdate();
+    }
   }
 
   void _tap(Offset position, double width) {
@@ -258,6 +291,8 @@ class ReaderPageViewState extends State<ReaderPageView> {
     }
     if (widget.selection.value != null) {
       widget.onDismissSelection();
+    } else if (!widget.tapToTurn) {
+      widget.onCenterTap();
     } else if (position.dx < width * widget.previousTapFraction) {
       widget.onUserPageTurn?.call();
       widget.reverseTapSides ? turnToNextPage() : turnToPreviousPage();
@@ -267,6 +302,32 @@ class ReaderPageViewState extends State<ReaderPageView> {
     } else {
       widget.onCenterTap();
     }
+  }
+
+  void _wheel(PointerScrollEvent event) {
+    // A wheel notch / trackpad stroke can emit several signals, including
+    // momentum after the animation ends. Only its leading signal may turn;
+    // subsequent signals extend the gesture but never queue another page.
+    // Native event timestamps describe the gesture even when a busy frame
+    // delays dispatch beyond the idle timer. Do not mistake that delay for
+    // a second gesture. Synthetic/untimestamped events retain the idle fallback.
+    final timestamp = event.timeStamp;
+    final previous = _lastWheelTimestamp;
+    final hasTimeline =
+        timestamp > Duration.zero && previous != null && timestamp >= previous;
+    final continuing = hasTimeline
+        ? timestamp - previous < _wheelQuietPeriod
+        : _wheelGestureActive;
+    _lastWheelTimestamp = timestamp > Duration.zero ? timestamp : null;
+    _wheelGestureActive = true;
+    _wheelGestureEnd?.cancel();
+    _wheelGestureEnd = Timer(_wheelQuietPeriod, () {
+      _wheelGestureActive = false;
+      _wheelGestureEnd = null;
+    });
+    if (continuing || isBusy || widget.selection.value != null) return;
+    widget.onUserPageTurn?.call();
+    _turn(forward: event.scrollDelta.dy > 0);
   }
 
   bool _scroll(ScrollNotification notification) {
@@ -326,8 +387,7 @@ class ReaderPageViewState extends State<ReaderPageView> {
           // Let a descendant scrollable consume the event first. Vertical
           // mouse wheels otherwise have no effect on horizontal PageView.
           GestureBinding.instance.pointerSignalResolver.register(event, (_) {
-            widget.onUserPageTurn?.call();
-            _turn(forward: event.scrollDelta.dy > 0);
+            _wheel(event);
           });
         },
         onPointerDown: (event) {
@@ -354,9 +414,28 @@ class ReaderPageViewState extends State<ReaderPageView> {
         onPointerCancel: (_) => _pointerStart = null,
         child: LayoutBuilder(
           builder: (context, constraints) {
+            // Finish against the same physical page that started the turn.
+            // Resizing PageView changes its scroll pixels; resizing a curl
+            // cancels its animation. Scale the old viewport for this brief
+            // interval, then apply the new layout using the source anchor.
+            final viewport = isBusy
+                ? _pageViewport ?? constraints.biggest
+                : constraints.biggest;
+            _pageViewport = viewport;
+            final Widget page;
             if (_mode == 'simulation') {
-              return SimulationPageTurn(
+              page = SimulationPageTurn(
                 key: _simulationKey,
+                animationDuration: ReaderPlatform.isMacOS
+                    ? Duration(
+                        microseconds:
+                            (SimulationPageTurn
+                                        .desktopAnimationDuration
+                                        .inMicroseconds /
+                                    widget.animationSpeed.clamp(.6, 1.6))
+                                .round(),
+                      )
+                    : const Duration(milliseconds: 300),
                 totalPages: _pages.length,
                 currentPageIndex: _index,
                 pageSetKey: _pageSetVersion,
@@ -388,34 +467,40 @@ class ReaderPageViewState extends State<ReaderPageView> {
                 onPreviousChapter: widget.onPreviousBoundary,
                 onNextChapter: widget.onNextBoundary,
                 onCenterTap: widget.onCenterTap,
+                tapToTurn: widget.tapToTurn,
               );
-            }
-            return GestureDetector(
-              behavior: HitTestBehavior.translucent,
-              onTapUp: (details) =>
-                  _tap(details.localPosition, constraints.maxWidth),
-              child: NotificationListener<ScrollNotification>(
-                onNotification: _scroll,
-                child: PageView.builder(
-                  key: ValueKey(_controllerRevision),
-                  controller: _controller,
-                  itemCount: _pages.length,
-                  allowImplicitScrolling: true,
-                  physics: widget.selection.value != null
-                      ? const NeverScrollableScrollPhysics()
-                      : const BouncingScrollPhysics(
-                          parent: AlwaysScrollableScrollPhysics(),
-                        ),
-                  itemBuilder: (context, index) => ReaderPageTransition(
+            } else {
+              page = GestureDetector(
+                behavior: HitTestBehavior.translucent,
+                onTapUp: (details) =>
+                    _tap(details.localPosition, viewport.width),
+                child: NotificationListener<ScrollNotification>(
+                  onNotification: _scroll,
+                  child: PageView.builder(
+                    key: ValueKey(_controllerRevision),
                     controller: _controller,
-                    pageIndex: index,
-                    width: constraints.maxWidth,
-                    mode: _mode,
-                    isDark: widget.isDark,
-                    child: _pages[index].builder(context),
+                    itemCount: _pages.length,
+                    allowImplicitScrolling: true,
+                    physics: widget.selection.value != null
+                        ? const NeverScrollableScrollPhysics()
+                        : const BouncingScrollPhysics(
+                            parent: AlwaysScrollableScrollPhysics(),
+                          ),
+                    itemBuilder: (context, index) => ReaderPageTransition(
+                      controller: _controller,
+                      pageIndex: index,
+                      width: viewport.width,
+                      mode: _mode,
+                      isDark: widget.isDark,
+                      child: _pages[index].builder(context),
+                    ),
                   ),
                 ),
-              ),
+              );
+            }
+            return FittedBox(
+              fit: BoxFit.fill,
+              child: SizedBox.fromSize(size: viewport, child: page),
             );
           },
         ),
