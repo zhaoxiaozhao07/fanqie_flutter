@@ -41,6 +41,7 @@ macOS 核心阅读客户端已完成主要适配代码与本地自动化验证�
 - **macOS 听书**：阅读菜单「听书 / 暂停」「系统语音与兼容 TTS 接口」。使用可用系统声音，或沿用安卓端 `POST /v1/audio/speech` 及自定义 Base URL／模型／音色／速度；Keychain 保存密钥，支持 MP3／WAV、媒体控制、暂停／停止、跨章、定时与原文高亮。网络请求可取消，限制 `16 MB`，拒绝携带密钥的重定向。
 - 版本保持 `3.3.4+340`；用户于 2026-11-07 授权推送并构建自用 DMG。macOS 使用独立预发布，不冒充 Developer ID / 公证正式版。具体测试与真实服务／前台／Retina 的验收边界见 [V3 实施记录](docs/READING_EXPERIENCE_V3_IMPLEMENTATION.md)。
 - 最终自动化：**606 项 Dart、11 项 macOS 集成、18 项 Swift、9 项安卓原生通过**；30 分钟连续阅读 369 次操作通过；生产入口 Release 与内部包校验通过。[V3 内部 DMG](build/macos/distribution/reading-experience-v3/fanqie-v3.3.4-macos-arm64-internal.dmg)（同目录 SHA-256）。未等同于真实外部 TTS 听辨、前台 FPS 或 Retina 验收。
+- **云端自用包已发布（2026-11-07）**：[下载 DMG、SHA-256 与构建来源](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/tag/macos-internal-v3.3.4-42376204027-1)。[Actions 构建](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/runs/42376204027)通过静态分析、606 项离线回归、Release 编译和包校验；下载后独立验证也通过。临时签名、未公证，无需新增密钥；Android 仍为原 Latest 发布。
 
 ## v3.3.4 帖子回复展开（覆盖更新，构建 340）
 

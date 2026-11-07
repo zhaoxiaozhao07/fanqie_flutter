@@ -219,8 +219,33 @@ scripts/verify_macos_bundle.sh build/macos/Build/Products/Release/FanqieReader.a
   未读取秘密值，未新增或修改 Android secrets，也不需要 Apple 凭据。
 - 每次发布独立的 `macos-internal-*` 预发布标签，记录实际源码 SHA；
   不改写既有 Android Release 正文 / APK / `v3.3.4` 标签，不设为 Latest。
-- 云端成功与失败、实际下载链接另行记录；静态配置本身不视为构建通过。
-  自用步骤、校验与 Gatekeeper 边界见 [自用打包说明](MACOS_INTERNAL_RELEASE.md)。
+- 自用步骤、校验与 Gatekeeper 边界见 [自用打包说明](MACOS_INTERNAL_RELEASE.md)。
 - 推送前重新验证：锁定依赖获取、analyze、**606 项离线 Dart 测试通过 /
   11 项 opt-in 网络测试跳过**；两份工作流 actionlint 与全部 shell 脚本语法通过。
   `.github/workflows/release.yml` 与原版本完全一致。
+
+### 实际云端结果
+
+- [Run 42376204027](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/runs/42376204027)
+  **成功**：构建任务 `9m46s`，发布任务 `10s`。来源
+  `1eb74762adabc8375bc5902ea0677f179a768581`，`3.3.4+340` /
+  Flutter `3.47.4` / Dart `3.13.3` / Xcode `26.6` / arm64。
+- 云端 analyze、**606 项离线 Dart 测试 / 11 项网络跳过**、生产入口
+  Release 编译、ad-hoc 签名 / 架构 / 权限、DMG 与 SHA-256 全部通过。
+- 已发布独立
+  [macOS 自用预发布](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/tag/macos-internal-v3.3.4-42376204027-1)，
+  附 DMG、同名 SHA-256 和 `build-info.json`；标签精确指向上述源码。
+- 下载后的独立验证通过：镜像完整性、摘要、3 个 Mach-O 均 arm64 /
+  最低 load command ≤12、生产入口、内部签名及沙盒权限；版本确认
+  `3.3.4` / `340`。只挂载读验，未启动或覆盖安装此云端 App。
+- DMG `28,816,117` bytes；SHA-256：
+  `82980d468f876e227fe28711787cf2c725af4106d5c471fba991477e270e2331`。
+  本机证据位于 `build/macos/reading-verification/github-42376204027/`，
+  下载副本位于 `build/macos/distribution/github-42376204027/`。
+- 首次触发的 `42376137651` 为补齐原生回归测试源码后主动取消，
+  未发布产物；最终成功运行以上述完整测试检查点为来源，不把取消记为通过。
+- 复查现有 5 个 secrets 名称 / 更新时间不变，无新增 Apple 凭据；
+  Android `v3.3.4` 仍为 Latest，APK / 摘要资产 ID、大小和 digest 均未改变。
+- Node.js 20 强制使用 24、runner 容量及 Xcode 脚本依赖提示为非阻断提示，
+  本次任务均成功。未声称 Developer ID、公证、Gatekeeper、声音听辨或
+  macOS 12 实机通过。

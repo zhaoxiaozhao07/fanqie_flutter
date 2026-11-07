@@ -126,3 +126,18 @@ RSS `239828992` bytes。**实际 `foreground=false`、像素比 `1.0`**：
   macOS 12 实机及覆盖安装；既有 `foreground=false` Profile 数据不是 FPS 证明。
 - 正式 Developer ID、Gatekeeper、公证与正式分发仍延期；自用 Actions
   Release / ad-hoc DMG 已按 2026-11-07 用户授权单独纳入，不需要 Apple ID。
+
+### 自用云端交付（2026-11-07）
+
+[独立 Actions](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/runs/42376204027)
+已成功完成 analyze、606 项离线回归 / 11 项 opt-in 跳过、生产 Release、
+临时签名和 DMG 校验；
+[自用预发布附件](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/tag/macos-internal-v3.3.4-42376204027-1)
+不覆盖 Android 正式发布或 Latest。版本保持 `3.3.4+340`，来源
+`1eb74762adabc8375bc5902ea0677f179a768581`；未配置或读取 Apple / TTS 密钥。
+
+下载后镜像 / SHA-256 / 3 个 Mach-O / 生产入口 / 权限再次通过。
+云端 DMG 摘要为
+`82980d468f876e227fe28711787cf2c725af4106d5c471fba991477e270e2331`，
+与前述本机工具链产物单独记录，不要求不同工具链打包得到相同摘要。
+未启动、覆盖安装或补做上述人工听辨 / 前台 / 最低系统验收。

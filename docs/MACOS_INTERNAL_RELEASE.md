@@ -44,6 +44,18 @@ gh run list --workflow macos-internal.yml --limit 5
 [官方镜像清单](https://github.com/actions/runner-images#available-images)
 核查；不使用付费 larger runner。工作流仍断言实际 `uname -m == arm64`。
 
+## 已发布的自用包（2026-11-07）
+
+- [下载 DMG / SHA-256 / build-info.json](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/tag/macos-internal-v3.3.4-42376204027-1)
+- [成功的 Actions 构建](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/runs/42376204027)
+- 源码提交 `1eb74762adabc8375bc5902ea0677f179a768581`，版本 `3.3.4+340`，
+  Flutter `3.47.4` / Dart `3.13.3` / Xcode `26.6`。
+- 云端静态分析、606 项离线测试（11 项 opt-in 网络跳过）、生产 Release
+  编译、签名封装 / 架构 / 镜像校验通过；下载后再验证摘要、镜像及
+  3 个 Mach-O / 生产入口 / 权限通过。未运行云端声音听辨或人工安装验收。
+- DMG 大小 `28,816,117` bytes，SHA-256：
+  `82980d468f876e227fe28711787cf2c725af4106d5c471fba991477e270e2331`。
+
 ## 验证与产物
 
 必须通过静态分析、默认离线单元 / 组件测试及生产 Release 编译；失败不发布。
