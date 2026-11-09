@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
 import 'package:http/testing.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'helpers/tts_audio.dart';
 
 class FakeSpeechPlatform {
   String? secret;
@@ -61,6 +62,53 @@ void main() {
       expect(text.substring(chunk.startOffset, chunk.endOffset), chunk.text);
     }
   });
+  test(
+    'compatible failure without system voices pauses instead of inventing playback',
+    () async {
+      await tts.stop();
+      tts.dispose();
+      tts = TtsService.forTesting(
+        invoke: platform.invoke,
+        nativeSpeechAvailable: false,
+        client: MockClient((_) async => http.Response('', 401)),
+      );
+      await tts.saveSettings(
+        engineType: TtsEngineType.openAi,
+        openAiApiKey: 'synthetic-key',
+      );
+      await tts.startChapter('测试', '隔离测试原文。');
+      expect(tts.isPaused, true);
+      expect(tts.errorMessage, contains('系统语音也不可用'));
+      expect(platform.count('speakNativeTts'), 0);
+      expect(platform.count('playAudioFile'), 0);
+    },
+  );
+  test(
+    'server speed is not applied twice at the native audio player',
+    () async {
+      await tts.stop();
+      tts.dispose();
+      tts = TtsService.forTesting(
+        invoke: platform.invoke,
+        client: MockClient(
+          (_) async => http.Response.bytes(silentTtsWav(), 200),
+        ),
+      );
+      await tts.saveSettings(
+        engineType: TtsEngineType.openAi,
+        openAiApiKey: 'synthetic-key',
+        speechRate: 1.5,
+      );
+      await tts.startChapter('测试', '隔离测试原文。');
+      expect(
+        platform.calls
+            .lastWhere((call) => call.$1 == 'playAudioFile')
+            .$2!['rate'],
+        1.0,
+      );
+      expect(tts.actualEngine, TtsEngineType.openAi);
+    },
+  );
 
   test('settings persist without ever writing a plaintext key', () async {
     await tts.saveSettings(
@@ -163,13 +211,16 @@ void main() {
           return gate.future;
         }),
       );
-      await tts.saveSettings(engineType: TtsEngineType.openAi);
+      await tts.saveSettings(
+        engineType: TtsEngineType.openAi,
+        openAiApiKey: 'synthetic-test-key',
+      );
       final start = tts.startChapter('缓冲测试', '等待朗读的正文。' * 10);
       await drain();
       expect(requests, 1);
       expect(tts.state, TtsPlayState.buffering);
       await tts.pause();
-      gate.complete(http.Response.bytes([1, 2, 3], 200));
+      gate.complete(http.Response.bytes(silentTtsWav(), 200));
       await start;
       expect(tts.isPaused, isTrue);
       expect(platform.count('playAudioFile'), 0);
@@ -188,7 +239,10 @@ void main() {
         invoke: platform.invoke,
         client: MockClient((_) async => http.Response('', 401)),
       );
-      await tts.saveSettings(engineType: TtsEngineType.openAi);
+      await tts.saveSettings(
+        engineType: TtsEngineType.openAi,
+        openAiApiKey: 'synthetic-test-key',
+      );
       await tts.startChapter('降级', '原生语音测试。' * 10);
       expect(tts.actualEngine, TtsEngineType.native);
       expect(tts.notice, isNotEmpty);
@@ -209,10 +263,13 @@ void main() {
         invoke: platform.invoke,
         client: MockClient((_) async {
           requests++;
-          return http.Response.bytes([1, 2, 3], 200);
+          return http.Response.bytes(silentTtsWav(), 200);
         }),
       );
-      await tts.saveSettings(engineType: TtsEngineType.openAi);
+      await tts.saveSettings(
+        engineType: TtsEngineType.openAi,
+        openAiApiKey: 'synthetic-test-key',
+      );
       await tts.startChapter('长章', '文' * 2000);
       for (var i = 0; i < 8; i++) {
         await tts.nextChunk();
@@ -240,11 +297,14 @@ void main() {
         invoke: platform.invoke,
         client: MockClient((_) => gate.future),
       );
-      await tts.saveSettings(engineType: TtsEngineType.openAi);
+      await tts.saveSettings(
+        engineType: TtsEngineType.openAi,
+        openAiApiKey: 'synthetic-test-key',
+      );
       final starting = tts.startChapter('调整音色', '正文' * 50);
       await drain();
       await tts.saveSettings(engineType: TtsEngineType.native);
-      gate.complete(http.Response.bytes([1, 2, 3], 200));
+      gate.complete(http.Response.bytes(silentTtsWav(), 200));
       await starting;
       expect(tts.isPaused, true);
       expect(platform.count('playAudioFile'), 0);

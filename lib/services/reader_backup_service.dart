@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
 
 import 'package:archive/archive_io.dart';
 import 'package:flutter/foundation.dart';
@@ -19,19 +20,24 @@ import 'reading_history_service.dart';
 import 'safe_zip_reader.dart';
 import 'tts_service.dart';
 import 'reading_activity_service.dart';
+import 'external_reader_fonts.dart';
+import 'reader_trash_service.dart';
+import 'reader_library_service.dart';
 
 enum ReaderRestoreMode { merge, replace }
 
 class ReaderBackupInfo {
   final int books, notes, bookmarks, files;
   final DateTime createdAt;
+  final int fonts;
   const ReaderBackupInfo(
     this.books,
     this.notes,
     this.bookmarks,
     this.files,
-    this.createdAt,
-  );
+    this.createdAt, {
+    this.fonts = 0,
+  });
 }
 
 class ReaderBackupService {
@@ -43,6 +49,11 @@ class ReaderBackupService {
   }) : documents = documents ?? AppStorage.documents;
   static int _activeTransactions = 0;
   static bool get hasActiveTransaction => _activeTransactions > 0;
+  static Future<void>? _creates;
+  static Future<void> flushCreates() async {
+    await _creates;
+  }
+
   static const _journal = 'reader_restore_journal.json';
   static final _id = RegExp(r'^[a-zA-Z0-9_-]{1,180}$');
   static const _exact = {
@@ -55,6 +66,10 @@ class ReaderBackupService {
     'reader_cache_max_mb',
     'reader_activity_v1',
     'reader_activity_enabled',
+    BookmarkService.noteBooksKey,
+    ExternalReaderFonts.preferencesKey,
+    ReaderTrashService.preferencesKey,
+    ReaderLibraryService.preferencesKey,
   };
   static const _prefixes = [
     'reader_position_',
@@ -78,6 +93,9 @@ class ReaderBackupService {
   Future<Map<String, Object>> _snapshot() async {
     if (notifyServices) await ReadingActivityService().flush();
     await BookmarkService().flush();
+    await ReaderTrashService().flush();
+    await ReaderLibraryService().flush();
+    if (notifyServices) await BookshelfService().flush();
     await ReaderPositionService.flush();
     await ReaderSettingsRepository.flush();
     final prefs = await SharedPreferences.getInstance();
@@ -87,14 +105,44 @@ class ReaderBackupService {
     };
   }
 
-  Future<File> create({bool includeBooks = false}) async {
+  Future<File> create({bool includeBooks = false, bool includeFonts = true}) {
+    final operation = (_creates ?? Future<void>.value())
+        .catchError((_) {})
+        .then(
+          (_) =>
+              _create(includeBooks: includeBooks, includeFonts: includeFonts),
+        );
+    late final Future<void> pending;
+    pending = operation
+        .then<void>((_) {}, onError: (Object _, StackTrace _) {})
+        .whenComplete(() {
+          if (identical(_creates, pending)) _creates = null;
+        });
+    _creates = pending;
+    return operation;
+  }
+
+  Future<String> fingerprint() async {
+    final snapshot = await _snapshot();
+    final keys = snapshot.keys.toList()..sort();
+    return sha256
+        .convert(
+          utf8.encode(jsonEncode({for (final key in keys) key: snapshot[key]})),
+        )
+        .toString();
+  }
+
+  Future<File> _create({
+    required bool includeBooks,
+    required bool includeFonts,
+  }) async {
     final data = await _snapshot();
     _validate(data);
     final base = await documents();
     final output = Directory('${base.path}/reader_backups');
     await output.create(recursive: true);
     final file = File(
-      '${output.path}/fanqie-backup-${DateTime.now().millisecondsSinceEpoch}.zip',
+      '${output.path}/fanqie-backup-${DateTime.now().microsecondsSinceEpoch}.zip',
     );
     final manifest = jsonEncode({
       'format': 'fanqie-reading-backup',
@@ -107,7 +155,7 @@ class ReaderBackupService {
     }
     await compute(
       _writeBackup,
-      _BackupWrite(base.path, file.path, manifest, includeBooks),
+      _BackupWrite(base.path, file.path, manifest, includeBooks, includeFonts),
     );
     return file;
   }
@@ -138,7 +186,17 @@ class ReaderBackupService {
     var files = 0;
     for (final entry in zip.entries.values) {
       if (entry.name == 'manifest.json' || entry.name.endsWith('/')) continue;
-      _bookPath(entry.name);
+      final (kind, id, _) = _bookPath(entry.name);
+      if (kind == 'font') {
+        final inspected = await compute(
+          inspectReaderFont,
+          await zip.read(
+            entry.name,
+            maxBytes: ExternalReaderFonts.maxFileBytes,
+          ),
+        );
+        if (inspected.hash != id) throw const FormatException('备份字体校验失败');
+      }
       files++;
     }
     int count(String key) => preferences[key] is String
@@ -159,21 +217,35 @@ class ReaderBackupService {
         prefixed('bookmarks_'),
         files,
         DateTime.parse(decoded['created_at'] as String),
+        fonts: preferences[ExternalReaderFonts.preferencesKey] is String
+            ? (jsonDecode(
+                        preferences[ExternalReaderFonts.preferencesKey]
+                            as String,
+                      )
+                      as List)
+                  .length
+            : 0,
       ),
     );
   }
 
   Future<ReaderBackupInfo> inspect(File file) async => (await _read(file)).$3;
 
-  static (String, String) _bookPath(String name) {
+  static (String, String, String) _bookPath(String name) {
     final parts = SafeZipReader.safeName(name).split('/');
+    if (parts.length == 3 &&
+        parts.first == 'fonts' &&
+        RegExp(r'^[a-f0-9]{64}$').hasMatch(parts[1]) &&
+        ['font.ttf', 'font.otf'].contains(parts[2])) {
+      return ('font', parts[1], parts[2]);
+    }
     if (parts.length < 3 ||
         parts.first != 'books' ||
         !_id.hasMatch(parts[1]) ||
         parts.skip(2).any((part) => part.isEmpty || part == '.')) {
       throw const FormatException('备份包含不支持的书籍路径');
     }
-    return (parts[1], parts.skip(2).join('/'));
+    return ('book', parts[1], parts.skip(2).join('/'));
   }
 
   static void _validate(Map<String, Object> data) {
@@ -219,6 +291,31 @@ class ReaderBackupService {
           for (final preset in (json as Map).values) {
             ReaderSettings.fromJson(Map<String, dynamic>.from(preset as Map));
           }
+        } else if (key == ReaderLibraryService.preferencesKey) {
+          ReaderLibrarySnapshot.fromJson(json as Map);
+        } else if (key == ReaderTrashService.preferencesKey) {
+          ReaderTrashService.decode(value);
+        } else if (key == ExternalReaderFonts.preferencesKey) {
+          if (json is! List || json.length > 20) {
+            throw const FormatException('字体索引超限');
+          }
+          final fonts = json
+              .map((e) => ExternalReaderFont.fromJson(e as Map))
+              .toList();
+          if (fonts.map((e) => e.id).toSet().length != fonts.length) {
+            throw const FormatException('字体索引重复');
+          }
+        } else if (key == BookmarkService.noteBooksKey) {
+          if (json is! Map || json.length > 10000) {
+            throw const FormatException('笔记书籍名称索引损坏');
+          }
+          for (final entry in json.entries) {
+            if (!_id.hasMatch(entry.key.toString()) ||
+                entry.value is! Map ||
+                (entry.value as Map)['book_id'] != entry.key) {
+              throw const FormatException('笔记书籍身份不匹配');
+            }
+          }
         } else if (key.startsWith('notes_') || key.startsWith('bookmarks_')) {
           final prefix = key.startsWith('notes_') ? 'notes_' : 'bookmarks_';
           final bookId = key.substring(prefix.length);
@@ -232,13 +329,11 @@ class ReaderBackupService {
               throw const FormatException('批注身份不匹配');
             }
             if (prefix == 'notes_') {
-              if ((item['version'] as num? ?? 1) > 2) {
+              if ((item['version'] as num? ?? 1) > 3) {
                 throw const FormatException('笔记版本过新');
               }
               final note = ReadingNote.fromJson(item);
-              if (note.text.isEmpty ||
-                  (note.startOffset >= 0 &&
-                      note.endOffset - note.startOffset != note.text.length)) {
+              if (note.text.isEmpty || !note.validAnchor) {
                 throw const FormatException('笔记原文范围损坏');
               }
             } else {
@@ -313,6 +408,72 @@ class ReaderBackupService {
         final list = items.values.toList()
           ..sort((a, b) => _timestamp(b).compareTo(_timestamp(a)));
         output[key] = jsonEncode(list);
+      } else if (key == ReaderLibraryService.preferencesKey) {
+        final old = ReaderLibrarySnapshot.fromJson(
+          jsonDecode(previous as String) as Map,
+        );
+        final incoming = ReaderLibrarySnapshot.fromJson(
+          jsonDecode(entry.value as String) as Map,
+        );
+        Map<String, Map<String, dynamic>> combine(
+          Map<String, Map<String, dynamic>> a,
+          Map<String, Map<String, dynamic>> b,
+        ) {
+          final result = {...a};
+          for (final item in b.entries) {
+            if (result[item.key] == null ||
+                _timestamp(item.value).isAfter(_timestamp(result[item.key]!))) {
+              result[item.key] = item.value;
+            }
+          }
+          return result;
+        }
+
+        final combined = ReaderLibrarySnapshot(
+          groups: combine(old.groups, incoming.groups),
+          books: combine(old.books, incoming.books),
+        );
+        ReaderLibrarySnapshot.fromJson(combined.toJson());
+        output[key] = jsonEncode(combined.toJson());
+      } else if (key == ReaderTrashService.preferencesKey) {
+        final entries = <String, ReaderTrashEntry>{
+          for (final record in [
+            ...ReaderTrashService.decode(previous as String),
+            ...ReaderTrashService.decode(entry.value as String),
+          ])
+            record.id: record,
+        };
+        final raw = jsonEncode({
+          'version': 1,
+          'entries': entries.values.map((e) => e.toJson()).toList(),
+        });
+        ReaderTrashService.decode(raw);
+        output[key] = raw;
+      } else if (key == ExternalReaderFonts.preferencesKey) {
+        final fonts = <String, dynamic>{
+          for (final font in jsonDecode(previous as String) as List)
+            font['id']: font,
+        };
+        for (final font in jsonDecode(entry.value as String) as List) {
+          fonts.putIfAbsent(font['id'] as String, () => font);
+        }
+        if (fonts.length > 20) {
+          throw const FormatException('合并后字体超过 20 种，请先清理字体库');
+        }
+        output[key] = jsonEncode(fonts.values.toList());
+      } else if (key == BookmarkService.noteBooksKey) {
+        final items = Map<String, dynamic>.from(
+          jsonDecode(previous as String) as Map,
+        );
+        final next = jsonDecode(entry.value as String) as Map;
+        for (final item in next.entries) {
+          final old = items[item.key];
+          if (old == null ||
+              _timestamp(item.value as Map).isAfter(_timestamp(old as Map))) {
+            items[item.key.toString()] = item.value;
+          }
+        }
+        output[key] = jsonEncode(items);
       } else if (key.startsWith('reader_position_')) {
         final old = jsonDecode(previous as String) as Map;
         final next = jsonDecode(entry.value as String) as Map;
@@ -390,14 +551,14 @@ class ReaderBackupService {
     );
     final fresh = Directory('${work.path}/new');
     await fresh.create(recursive: true);
-    final bookIds = <String>{};
+    final groups = <(String, String)>{};
     try {
       // Validate all bytes before changing preferences or any existing book.
       for (final entry in zip.entries.values) {
         if (entry.name == 'manifest.json' || entry.name.endsWith('/')) continue;
-        final (bookId, relative) = _bookPath(entry.name);
-        bookIds.add(bookId);
-        final target = File('${fresh.path}/$bookId/$relative');
+        final (kind, id, relative) = _bookPath(entry.name);
+        groups.add((kind, id));
+        final target = File('${fresh.path}/$kind/$id/$relative');
         await target.parent.create(recursive: true);
         await zip.stream(entry.name).pipe(target.openWrite());
       }
@@ -409,16 +570,23 @@ class ReaderBackupService {
           : incoming;
       _validate(chosen);
       final operations = <Map<String, Object>>[];
-      for (final id in bookIds) {
-        final destination = Directory('${base.path}/offline_books/$id');
+      for (final (kind, id) in groups) {
+        final destination = _destination(base, kind, id);
+        if (await FileSystemEntity.type(
+              destination.parent.path,
+              followLinks: false,
+            ) ==
+            FileSystemEntityType.link) {
+          throw const FormatException('恢复目标目录不能是符号链接');
+        }
         final exists = await destination.exists();
         if (mode == ReaderRestoreMode.merge && exists) continue;
-        operations.add({'id': id, 'had_old': exists});
+        operations.add({'id': id, 'kind': kind, 'had_old': exists});
       }
       await AtomicFile.writeString(
         File('${base.path}/$_journal'),
         jsonEncode({
-          'version': 1,
+          'version': 2,
           'work': path.basename(work.path),
           'preferences': previous,
           'books': operations,
@@ -426,14 +594,15 @@ class ReaderBackupService {
       );
       for (final op in operations) {
         final id = op['id'] as String;
-        final destination = Directory('${base.path}/offline_books/$id');
+        final kind = op['kind'] as String;
+        final destination = _destination(base, kind, id);
         if (op['had_old'] == true) {
-          final old = Directory('${work.path}/old/$id');
+          final old = Directory('${work.path}/old/$kind/$id');
           await old.parent.create(recursive: true);
           await destination.rename(old.path);
         }
         await destination.parent.create(recursive: true);
-        await Directory('${fresh.path}/$id').rename(destination.path);
+        await Directory('${fresh.path}/$kind/$id').rename(destination.path);
       }
       await _writePreferences(chosen);
       await File('${base.path}/$_journal').delete();
@@ -464,7 +633,7 @@ class ReaderBackupService {
     final file = File('${base.path}/$_journal');
     if (!await file.exists()) return;
     final journal = jsonDecode(await file.readAsString()) as Map;
-    if (journal['version'] != 1 ||
+    if (![1, 2].contains(journal['version']) ||
         !RegExp(r'^restore-\d+$').hasMatch(journal['work'] as String)) {
       throw const FormatException('恢复日志损坏，已保留现场');
     }
@@ -473,9 +642,19 @@ class ReaderBackupService {
     final work = Directory('${base.path}/restore_work/${journal['work']}');
     for (final op in (journal['books'] as List).reversed) {
       final id = (op as Map)['id'] as String;
-      if (!_id.hasMatch(id)) throw const FormatException('恢复日志路径不合法');
-      final current = Directory('${base.path}/offline_books/$id');
-      final old = Directory('${work.path}/old/$id');
+      final kind = journal['version'] == 1 ? 'book' : op['kind'] as String;
+      if ((kind != 'book' && kind != 'font') ||
+          (kind == 'book'
+              ? !_id.hasMatch(id)
+              : !RegExp(r'^[a-f0-9]{64}$').hasMatch(id))) {
+        throw const FormatException('恢复日志路径不合法');
+      }
+      final current = _destination(base, kind, id);
+      final old = Directory(
+        journal['version'] == 1
+            ? '${work.path}/old/$id'
+            : '${work.path}/old/$kind/$id',
+      );
       if (await old.exists()) {
         if (await current.exists()) await current.delete(recursive: true);
         await old.rename(current.path);
@@ -495,13 +674,26 @@ class ReaderBackupService {
     await BookshelfService().reload();
     await ReadingHistoryService().reload();
     await ReadingActivityService().reload();
+    await ExternalReaderFonts().reload();
+    await ReaderLibraryService().load();
   }
+
+  static Directory _destination(Directory base, String kind, String id) =>
+      Directory(
+        '${base.path}/${kind == 'font' ? 'reader_fonts' : 'offline_books'}/$id',
+      );
 }
 
 class _BackupWrite {
   final String root, target, manifest;
-  final bool includeBooks;
-  const _BackupWrite(this.root, this.target, this.manifest, this.includeBooks);
+  final bool includeBooks, includeFonts;
+  const _BackupWrite(
+    this.root,
+    this.target,
+    this.manifest,
+    this.includeBooks,
+    this.includeFonts,
+  );
 }
 
 Future<void> _writeBackup(_BackupWrite request) async {
@@ -517,6 +709,33 @@ Future<void> _writeBackup(_BackupWrite request) async {
     await encoder.addFile(manifest, 'manifest.json');
     var total = 0;
     var count = 1;
+    if (request.includeFonts) {
+      final metadata =
+          (jsonDecode(request.manifest) as Map)['preferences'] as Map;
+      final fonts =
+          jsonDecode(
+                metadata[ExternalReaderFonts.preferencesKey] as String? ?? '[]',
+              )
+              as List;
+      for (final raw in fonts) {
+        final font = ExternalReaderFont.fromJson(raw as Map);
+        final file = File(
+          '${request.root}/reader_fonts/${font.hash}/font.${font.format}',
+        );
+        if (await FileSystemEntity.type(file.path, followLinks: false) !=
+                FileSystemEntityType.file ||
+            await file.length() > ExternalReaderFonts.maxFileBytes) {
+          throw const FormatException('字体文件丢失或过大，可取消包含字体后备份元数据');
+        }
+        final inspected = inspectReaderFont(await file.readAsBytes());
+        if (inspected.hash != font.hash) {
+          throw const FormatException('字体文件校验失败');
+        }
+        total += await file.length();
+        count++;
+        await encoder.addFile(file, 'fonts/${font.hash}/font.${font.format}');
+      }
+    }
     final books = Directory('${request.root}/offline_books');
     if (request.includeBooks && await books.exists()) {
       await for (final entity in books.list(followLinks: false)) {

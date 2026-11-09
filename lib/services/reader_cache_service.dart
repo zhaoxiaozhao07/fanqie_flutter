@@ -50,6 +50,7 @@ class ReaderCachePolicy {
 /// Temporary reader data lives in its own tree. Explicit downloads, legacy
 /// offline data and imported books are read-only here, never eviction targets.
 class ReaderCacheService {
+  static const maxChapterBytes = 32 * 1024 * 1024;
   final Future<Directory> Function() documents;
   static final Map<String, Future<void>> _operations = {};
   static final Set<String> pinnedBooks = {};
@@ -90,9 +91,8 @@ class ReaderCacheService {
       (file.parent.uri.pathSegments.where((s) => s.isNotEmpty).last ==
               'images' &&
           RegExp(
-            // Match against the URI form: Windows paths use backslashes.
             r'/[a-f0-9]{64}\.(png|jpg|gif|webp|bmp)$',
-          ).hasMatch(file.uri.path));
+          ).hasMatch(file.path));
 
   Future<Directory> temporaryRoot() async =>
       Directory('${(await documents()).path}/reader_cache_v2');
@@ -122,7 +122,13 @@ class ReaderCacheService {
 
   Future<String?> _readFile(File file) async {
     try {
-      if (!await file.exists()) return null;
+      if (await FileSystemEntity.type(file.path, followLinks: false) !=
+              FileSystemEntityType.file ||
+          await FileSystemEntity.isLink(file.parent.path) ||
+          await FileSystemEntity.isLink(file.parent.parent.path) ||
+          await file.length() > maxChapterBytes) {
+        return null;
+      }
       final content = await file.readAsString();
       return isReadable(content) ? content : null;
     } on FileSystemException {
@@ -196,10 +202,6 @@ class ReaderCacheService {
     return keys;
   }
 
-  // Directory listings return platform separators; compare a normalized form
-  // so Windows backslash paths match the pinned-book prefixes.
-  static String _normalizedPath(String value) => value.replaceAll('\\', '/');
-
   /// Returns bytes remaining. Pinned reading books can temporarily exceed the
   /// limit, but imported/downloaded books are never even enumerated.
   Future<int> trim(int maxBytes, {bool includePinned = false}) async {
@@ -217,11 +219,8 @@ class ReaderCacheService {
         final stat = await entry.stat();
         if (stat.type != FileSystemEntityType.file) continue;
         remaining += stat.size;
-        final path = _normalizedPath(entry.path);
         final pinned = pinnedBooks.any(
-          (book) => path.startsWith(
-            '${_normalizedPath(root.path)}/${segment(book)}/',
-          ),
+          (book) => entry.path.startsWith('${root.path}/${segment(book)}/'),
         );
         if (includePinned || !pinned) candidates.add((entry, stat));
       }

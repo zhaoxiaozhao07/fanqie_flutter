@@ -53,7 +53,12 @@ class ReadingNote {
       chapterHash,
       prefix,
       suffix;
-  final int chapterIndex, paragraphIndex, startOffset, endOffset, colorIndex;
+  final int chapterIndex,
+      paragraphIndex,
+      endParagraphIndex,
+      startOffset,
+      endOffset,
+      colorIndex;
   final List<String> tags;
   final DateTime createdAt, updatedAt;
   ReadingNote({
@@ -63,6 +68,7 @@ class ReadingNote {
     required this.chapterTitle,
     this.chapterId = '',
     this.paragraphIndex = 0,
+    int? endParagraphIndex,
     required this.text,
     this.note = '',
     this.startOffset = -1,
@@ -74,15 +80,27 @@ class ReadingNote {
     this.tags = const [],
     required this.createdAt,
     DateTime? updatedAt,
-  }) : updatedAt = updatedAt ?? createdAt;
+  }) : updatedAt = updatedAt ?? createdAt,
+       endParagraphIndex = endParagraphIndex ?? paragraphIndex;
+  bool get isSpanning => endParagraphIndex > paragraphIndex;
+  bool get validAnchor =>
+      paragraphIndex >= 0 &&
+      endParagraphIndex >= paragraphIndex &&
+      (isSpanning
+          ? startOffset >= 0 &&
+                endOffset > 0 &&
+                text.contains('\n\n') &&
+                text.length <= 20000
+          : startOffset < 0 || endOffset - startOffset == text.length);
   Map<String, dynamic> toJson() => {
-    'version': 2,
+    'version': isSpanning ? 3 : 2,
     'id': id,
     'book_id': bookId,
     'chapter_id': chapterId,
     'chapter_index': chapterIndex,
     'chapter_title': chapterTitle,
     'paragraph_index': paragraphIndex,
+    if (isSpanning) 'end_paragraph_index': endParagraphIndex,
     'text': text,
     'note': note,
     'start_offset': startOffset,
@@ -102,6 +120,10 @@ class ReadingNote {
     chapterId: json['chapter_id']?.toString() ?? '',
     chapterTitle: json['chapter_title']?.toString() ?? '',
     paragraphIndex: _number(json['paragraph_index']),
+    endParagraphIndex: _number(
+      json['end_paragraph_index'],
+      _number(json['paragraph_index']),
+    ),
     text: json['text']?.toString() ?? '',
     note: json['note']?.toString() ?? '',
     startOffset: _number(json['start_offset'], -1),
@@ -128,6 +150,7 @@ class ReadingNote {
     chapterIndex: chapterIndex,
     chapterTitle: chapterTitle,
     paragraphIndex: paragraphIndex,
+    endParagraphIndex: endParagraphIndex,
     text: text,
     note: note,
     startOffset: startOffset,

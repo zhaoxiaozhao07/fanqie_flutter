@@ -14,7 +14,10 @@ class ReaderSystemService {
   static Object? _brightnessOwner;
   static Object? _screenOwner;
   static Future<bool> Function()? _quitHandler;
+  static Future<void> Function()? _windowHiddenHandler;
   static bool Function(String)? _desktopCommandHandler;
+  static Object? _externalImportOwner;
+  static Future<void> Function()? _externalImportsAvailable;
   static final Map<Object, Future<void> Function()> _saveParticipants = {};
 
   static void registerQuitHandler(Future<bool> Function() handler) {
@@ -22,8 +25,23 @@ class ReaderSystemService {
     _ensureGlobalHandler();
   }
 
+  static void registerWindowHiddenHandler(Future<void> Function() handler) {
+    _windowHiddenHandler = handler;
+    _ensureGlobalHandler();
+  }
+
   static void registerDesktopCommandHandler(bool Function(String) handler) {
     _desktopCommandHandler = handler;
+    _ensureGlobalHandler();
+  }
+
+  static void registerExternalImportsListener(
+    Object owner,
+    Future<void> Function()? handler,
+  ) {
+    if (handler == null && !identical(owner, _externalImportOwner)) return;
+    _externalImportOwner = handler == null ? null : owner;
+    _externalImportsAvailable = handler;
     _ensureGlobalHandler();
   }
 
@@ -87,9 +105,13 @@ class ReaderSystemService {
       } else if (call.method == 'onDesktopCommand') {
         return _desktopCommandHandler?.call(call.arguments?.toString() ?? '') ??
             false;
+      } else if (call.method == 'onExternalImportsAvailable') {
+        await _externalImportsAvailable?.call();
+        return true;
       } else if (call.method == 'onWindowHidden') {
         try {
           await flushParticipants();
+          await _windowHiddenHandler?.call();
         } catch (_) {
           // Durable write errors are reported by the reader/quit coordinator.
         }
@@ -163,26 +185,6 @@ class ReaderSystemService {
     }
   }
 
-  /// Desktop native borderless full-screen (F11 / Esc chain). Only the app
-  /// itself toggles it, so this flag mirrors the native window state.
-  static bool _fullScreen = false;
-
-  static bool get isFullScreen => _fullScreen;
-
-  static Future<void> toggleFullScreen() async {
-    if (!ReaderPlatform.isDesktop) return;
-    try {
-      final value = await _channel.invokeMethod<bool>('toggleFullScreen');
-      _fullScreen = value ?? !_fullScreen;
-    } catch (_) {}
-  }
-
-  static Future<bool> exitFullScreenIfActive() async {
-    if (!_fullScreen) return false;
-    await toggleFullScreen();
-    return true;
-  }
-
   /// 获取系统电量百分比 (0~100，异常返回 -1)
   static Future<int> getBatteryLevel() async {
     if (!ReaderPlatform.capabilities.battery) return -1;
@@ -199,13 +201,15 @@ class ReaderSystemService {
     required String title,
     required String subtitle,
     required bool isPlaying,
+    bool isActive = true,
   }) async {
-    if (!ReaderPlatform.capabilities.tts) return;
+    if (!ReaderPlatform.capabilities.mediaPlayback) return;
     try {
       await _channel.invokeMethod('updateMediaPlaybackState', {
         'title': title,
         'subtitle': subtitle,
         'isPlaying': isPlaying,
+        'isActive': isActive,
       });
     } catch (_) {}
   }

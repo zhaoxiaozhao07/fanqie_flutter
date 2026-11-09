@@ -17,7 +17,7 @@ enum ReaderNativeTestHost {
   }
 }
 
-class MainFlutterWindow: NSWindow, NSWindowDelegate {
+class MainFlutterWindow: NSWindow, NSWindowDelegate, NSDraggingDestination {
   private(set) var readerPlatform: ReaderNativePlatform?
   private(set) var fullScreenTransitioning = false
 
@@ -52,6 +52,7 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
     RegisterGeneratedPlugins(registry: flutterViewController)
     readerPlatform = ReaderNativePlatform(
       window: self, messenger: flutterViewController.engine.binaryMessenger)
+    registerForDraggedTypes([.fileURL])
 
     super.awakeFromNib()
   }
@@ -86,6 +87,23 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate {
   func windowDidExitFullScreen(_ notification: Notification) { fullScreenTransitioning = false }
   func windowDidFailToEnterFullScreen(_ window: NSWindow) { fullScreenTransitioning = false }
   func windowDidFailToExitFullScreen(_ window: NSWindow) { fullScreenTransitioning = false }
+
+  private func droppedURLs(_ sender: NSDraggingInfo) -> [URL] {
+    (sender.draggingPasteboard.readObjects(
+      forClasses: [NSURL.self], options: [.urlReadingFileURLsOnly: true]) as? [URL]) ?? []
+  }
+
+  func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+    droppedURLs(sender).contains(where: ReaderExternalFileInbox.accepts) ? .copy : []
+  }
+
+  func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
+    let urls = droppedURLs(sender)
+    guard urls.contains(where: ReaderExternalFileInbox.accepts) else { return false }
+    ReaderExternalFileInbox.shared.enqueue(urls)
+    showReaderWindow()
+    return true
+  }
 }
 
 /// The same channel name and callback contract as Android; no playback stubs
@@ -101,6 +119,10 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
   private var readerCommandsEnabled = false
   private let decoder = ReaderTextDecoder()
   private lazy var exporter = ReaderFileExporter(window: window)
+  private lazy var playback = ReaderPlayback { [weak self] method, args in
+    self?.channel.invokeMethod(method, arguments: args)
+  }
+  private var secretService: String { (Bundle.main.bundleIdentifier ?? "com.fanqie.reader.macos") + ".tts" }
 
   init(window: MainFlutterWindow, messenger: FlutterBinaryMessenger) {
     self.window = window
@@ -129,6 +151,9 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
       self.networkLock.unlock()
     }
     monitor.start(queue: DispatchQueue(label: "com.fanqie.reader.network"))
+    ReaderExternalFileInbox.shared.onReady = { [weak self] in
+      self?.channel.invokeMethod("onExternalImportsAvailable", arguments: nil)
+    }
     DispatchQueue.main.async { [weak self] in self?.installMenus() }
   }
 
@@ -142,14 +167,58 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
     switch call.method {
     case "getReaderCapabilities":
       result([
-        "tts": false, "mediaPlayback": false, "secureStorage": false,
+        "tts": true, "nativeSpeech": ReaderPlayback.nativeSpeechAvailable,
+        "mediaPlayback": true, "secureStorage": true,
+        "audioOutput": ReaderPlayback.hasOutputDevice,
         "windowBrightnessControl": false, "volumeKeys": false, "haptics": false,
         "battery": Self.batteryLevel() >= 0, "keepAwake": true,
-        "networkType": true, "textDecoder": true, "fileExport": true,
+        "networkType": true, "textDecoder": true, "fileExport": true, "fileImport": true,
         "platform": "macos", "architecture": "arm64",
         "foreground": window?.isKeyWindow ?? false,
         "windowVisible": window?.isVisible ?? false,
       ])
+    case "readTtsSecret":
+      do { result(try ReaderKeychain.read(service: secretService, account: "openai-compatible-tts")) }
+      catch { result(FlutterError(code: "secureStorage", message: "无法读取系统安全存储；未改写原密钥", details: nil)) }
+    case "writeTtsSecret":
+      do {
+        guard let value = args["value"] as? String else { throw ReaderPlaybackError.invalidSecret }
+        try ReaderKeychain.write(value, service: secretService, account: "openai-compatible-tts")
+        result(true)
+      } catch { result(FlutterError(code: "secureStorage", message: "密钥未写入系统安全存储", details: nil)) }
+    case "initNativeTts":
+      result(ReaderPlayback.nativeSpeechAvailable)
+    case "getNativeTtsVoices":
+      result(ReaderPlayback.voices())
+    case "speakNativeTts":
+      result(playback.speak(id: args["id"] as? String ?? "", text: args["text"] as? String ?? "",
+        rate: (args["rate"] as? NSNumber)?.doubleValue ?? 1, voiceID: args["voice"] as? String ?? ""))
+    case "playAudioFile":
+      result(playback.play(id: args["id"] as? String ?? "",
+        file: URL(fileURLWithPath: args["filePath"] as? String ?? "")))
+    case "stopPlayback":
+      result(playback.stop(id: args["id"] as? String))
+    case "stopNativeTts":
+      result(playback.stopNative())
+    case "stopAudio":
+      result(playback.stopAudio())
+    case "pauseAudio":
+      result(playback.pauseAudio(id: args["id"] as? String))
+    case "resumeAudio":
+      result(playback.resumeAudio(id: args["id"] as? String))
+    case "setAudioVolume":
+      result(playback.setVolume((args["volume"] as? NSNumber)?.doubleValue ?? 1))
+    case "setSleepDeadline":
+      result(playback.setDeadline((args["milliseconds"] as? NSNumber)?.int64Value ?? 0))
+    case "getPlaybackState":
+      result(playback.playbackState())
+    case "updateMediaPlaybackState":
+      playback.updateMedia(title: args["title"] as? String ?? "", subtitle: args["subtitle"] as? String ?? "",
+        playing: args["isPlaying"] as? Bool ?? false, active: args["isActive"] as? Bool ?? false)
+      result(true)
+    case "releasePlaybackService":
+      playback.release()
+      result(true)
     case "getNetworkType":
       networkLock.lock()
       let kind = networkType
@@ -171,16 +240,55 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
     case "cancelExport":
       exporter.cancel(args["id"] as? String ?? "")
       result(true)
+    case "takeExternalImports":
+      result(ReaderExternalFileInbox.shared.takePending())
+    case "releaseExternalImport":
+      ReaderExternalFileInbox.shared.release(args["id"] as? String ?? "")
+      result(true)
+    case "externalImportsBusy":
+      result(ReaderExternalFileInbox.shared.hasTransfers)
     case "showMainWindow":
       window?.showReaderWindow()
       result(true)
     case "setReaderCommandsEnabled":
       readerCommandsEnabled = args["enabled"] as? Bool == true
       result(true)
+    case "setReaderShortcuts":
+      let shortcuts = args["bindings"] as? [String: [String: Any]] ?? [:]
+      if let menu = NSApp.mainMenu {
+        func update(_ menu: NSMenu) {
+          for item in menu.items {
+            let command = item.representedObject as? String ?? (
+              item.action == #selector(findContent) ? "find" :
+              item.action == #selector(toggleBookmark) ? "bookmark" :
+              item.action == #selector(openNotes) ? "notes" : "")
+            if let value = shortcuts[command], let label = value["label"] as? String {
+              if label.count == 1 { item.keyEquivalent = label }
+              else if label.hasPrefix("f"), let number = Int(label.dropFirst()),
+                (1...35).contains(number), let scalar = UnicodeScalar(Int(NSF1FunctionKey) + number - 1) {
+                item.keyEquivalent = String(scalar)
+              } else { item.keyEquivalent = "" }
+              var flags: NSEvent.ModifierFlags = []
+              if value["meta"] as? Bool == true { flags.insert(.command) }
+              if value["control"] as? Bool == true { flags.insert(.control) }
+              if value["alt"] as? Bool == true { flags.insert(.option) }
+              if value["shift"] as? Bool == true { flags.insert(.shift) }
+              item.keyEquivalentModifierMask = flags
+            }
+            if let child = item.submenu { update(child) }
+          }
+        }
+        update(menu)
+      }
+      result(true)
     case "requestQuit":
       result(true)
       NSApp.terminate(nil)
     #if DEBUG
+    case "stageTestExternalFiles":
+      let paths = args["paths"] as? [String] ?? []
+      ReaderExternalFileInbox.shared.enqueue(paths.map { URL(fileURLWithPath: $0) })
+      result(true)
     case "setTestWindowSize":
       if let width = args["width"] as? Double, let height = args["height"] as? Double {
         window?.setContentSize(NSSize(width: max(720, width), height: max(540, height)))
@@ -231,6 +339,11 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
       title: "导入本地小说…", action: #selector(importBook), keyEquivalent: "o")
     importItem.target = self
     file.addItem(importItem)
+    let notesItem = NSMenuItem(
+      title: "笔记工作台", action: #selector(openNotes), keyEquivalent: "n")
+    notesItem.keyEquivalentModifierMask = [.command, .shift]
+    notesItem.target = self
+    file.addItem(notesItem)
     let bookmark = NSMenuItem(
       title: "添加／移除阅读书签", action: #selector(toggleBookmark), keyEquivalent: "d")
     bookmark.target = self
@@ -241,6 +354,28 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
     let fileRoot = NSMenuItem(title: "文件", action: nil, keyEquivalent: "")
     fileRoot.submenu = file
     menu.insertItem(fileRoot, at: 1)
+    let reading = NSMenu(title: "阅读")
+    for (title, command, key, modifiers) in [
+      ("后退到阅读位置", "back", "[", NSEvent.ModifierFlags.command),
+      ("前进到阅读位置", "forward", "]", NSEvent.ModifierFlags.command),
+      ("下一处正文匹配", "findNext", "g", NSEvent.ModifierFlags.command),
+      ("上一处正文匹配", "findPrevious", "g", NSEvent.ModifierFlags([.command, .shift])),
+      ("显示／隐藏目录", "directory", "d", NSEvent.ModifierFlags([.command, .shift])),
+      ("跳转章节…", "jump", "j", NSEvent.ModifierFlags.command),
+      ("增大字号", "fontIncrease", "+", NSEvent.ModifierFlags.command),
+      ("缩小字号", "fontDecrease", "-", NSEvent.ModifierFlags.command),
+      ("重置字号", "fontReset", "0", NSEvent.ModifierFlags.command),
+      ("阅读快捷键…", "shortcuts", "", NSEvent.ModifierFlags.command),
+    ] {
+      let item = NSMenuItem(title: title, action: #selector(readerAction(_:)), keyEquivalent: key)
+      item.target = self
+      item.representedObject = command
+      item.keyEquivalentModifierMask = modifiers
+      reading.addItem(item)
+    }
+    let readingRoot = NSMenuItem(title: "阅读", action: nil, keyEquivalent: "")
+    readingRoot.submenu = reading
+    menu.insertItem(readingRoot, at: 2)
     updateFindMenu(menu)
   }
 
@@ -256,9 +391,14 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
   }
 
   @objc private func importBook() { sendCommand("import") }
+  @objc private func openNotes() { sendCommand("notes") }
   @objc private func openSettings() { sendCommand("settings") }
   @objc private func findContent() { sendCommand("find") }
   @objc private func toggleBookmark() { sendCommand("bookmark") }
+  @objc private func readerAction(_ sender: NSMenuItem) {
+    guard let command = sender.representedObject as? String else { return }
+    sendCommand(command)
+  }
 
   private func sendCommand(_ name: String) {
     window?.showReaderWindow()
@@ -266,7 +406,10 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
   }
 
   func validateMenuItem(_ menuItem: NSMenuItem) -> Bool {
-    if menuItem.action == #selector(toggleBookmark) { return readerCommandsEnabled }
+    if menuItem.action == #selector(toggleBookmark) ||
+       menuItem.action == #selector(readerAction(_:)) {
+      return readerCommandsEnabled && window?.attachedSheet == nil
+    }
     return window?.attachedSheet == nil
   }
 
@@ -300,6 +443,177 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
     if displayAssertion != 0 {
       IOPMAssertionRelease(displayAssertion)
       displayAssertion = 0
+    }
+  }
+}
+
+/// Finder-open and drag URLs carry a temporary sandbox grant. Copy only regular
+/// TXT/EPUB files into an owned staging directory while that grant is active;
+/// Dart previews the staged copy and explicitly releases it after the dialog.
+final class ReaderExternalFileInbox {
+  static let shared = ReaderExternalFileInbox()
+  static let maxFileBytes = 128 * 1024 * 1024
+  static let maxStagedBytes = 512 * 1024 * 1024
+  static let maxFiles = 16
+  var onReady: (() -> Void)?
+  private let worker = DispatchQueue(label: "com.fanqie.reader.finder-import", qos: .userInitiated)
+  private let root: URL
+  private var pending: [[String: Any]] = []
+  private var owned: [String: URL] = [:]
+  private var sourceKeys: [String: String] = [:]
+  private var transfers = Set<String>()
+  // Accessed only on the serial worker queue.
+  private var stagedSizes: [String: Int] = [:]
+  var hasTransfers: Bool { !transfers.isEmpty }
+
+  init(root: URL? = nil) {
+    let cache = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first
+      ?? FileManager.default.temporaryDirectory
+    self.root = root ?? cache.appendingPathComponent("ReaderExternalImports", isDirectory: true)
+    if root == nil {
+      worker.async {
+        // Only stale UUID directories in this dedicated cache are ours. Do not
+        // follow links or touch the original Finder files.
+        let entries = (try? FileManager.default.contentsOfDirectory(
+          at: self.root, includingPropertiesForKeys: [
+            .isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey,
+          ])) ?? []
+        for entry in entries where UUID(uuidString: entry.lastPathComponent) != nil {
+          let values = try? entry.resourceValues(forKeys: [
+            .isDirectoryKey, .isSymbolicLinkKey, .contentModificationDateKey,
+          ])
+          if values?.isDirectory == true, values?.isSymbolicLink != true,
+            let date = values?.contentModificationDate,
+            date < Date().addingTimeInterval(-86400) {
+            try? FileManager.default.removeItem(at: entry)
+          }
+        }
+      }
+    }
+  }
+
+  static func accepts(_ url: URL) -> Bool {
+    url.isFileURL && ["txt", "epub"].contains(url.pathExtension.lowercased())
+  }
+
+  func enqueue(_ urls: [URL]) {
+    for url in urls.prefix(Self.maxFiles) {
+      let key = url.standardizedFileURL.absoluteString
+      if sourceKeys.values.contains(key) { continue }
+      guard sourceKeys.count < Self.maxFiles else {
+        appendLimitError()
+        break
+      }
+      let id = UUID().uuidString
+      sourceKeys[id] = key
+      transfers.insert(id)
+      worker.async {
+        var record: [String: Any] = ["id": id, "name": url.lastPathComponent]
+        var staged: URL?
+        do {
+          let used = self.stagedSizes.values.reduce(0, +)
+          staged = try Self.stage(
+            url, in: self.root, id: id,
+            limit: min(Self.maxFileBytes, max(0, Self.maxStagedBytes - used)))
+          let bytes = try staged!.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+          self.stagedSizes[id] = bytes
+          record["path"] = staged!.path
+        } catch {
+          record["error"] = error.localizedDescription
+        }
+        DispatchQueue.main.async {
+          self.transfers.remove(id)
+          if let staged = staged { self.owned[id] = staged.deletingLastPathComponent() }
+          self.pending.append(record)
+          self.onReady?()
+        }
+      }
+    }
+    if urls.count > Self.maxFiles { appendLimitError() }
+  }
+
+  private func appendLimitError() {
+    guard pending.count < Self.maxFiles else { return }
+    pending.append([
+      "id": UUID().uuidString, "name": "批量导入",
+      "error": "一次最多接收 16 个文件；暂存总量最多 512 MB，未接收的文件请稍后重试。",
+    ])
+    onReady?()
+  }
+
+  func takePending() -> [[String: Any]] {
+    let result = pending
+    pending.removeAll()
+    return result
+  }
+
+  func release(_ id: String) {
+    sourceKeys.removeValue(forKey: id)
+    guard let directory = owned.removeValue(forKey: id) else { return }
+    worker.async {
+      try? FileManager.default.removeItem(at: directory)
+      self.stagedSizes.removeValue(forKey: id)
+    }
+  }
+
+  static func stage(
+    _ source: URL, in root: URL, id: String, limit: Int = maxFileBytes
+  ) throws -> URL {
+    guard accepts(source), UUID(uuidString: id) != nil else {
+      throw NSError(domain: "ReaderImport", code: 1, userInfo: [
+        NSLocalizedDescriptionKey: "仅支持本地 TXT / EPUB 文件。",
+      ])
+    }
+    let scoped = source.startAccessingSecurityScopedResource()
+    defer { if scoped { source.stopAccessingSecurityScopedResource() } }
+    let values = try source.resourceValues(forKeys: [
+      .isRegularFileKey, .isSymbolicLinkKey, .fileSizeKey,
+    ])
+    guard values.isRegularFile == true, values.isSymbolicLink != true,
+      let size = values.fileSize, size > 0, size <= limit else {
+      throw NSError(domain: "ReaderImport", code: 2, userInfo: [
+        NSLocalizedDescriptionKey: "文件为空、不是普通文件或超过导入容量限制（单文件 128 MB）。",
+      ])
+    }
+    let directory = root.appendingPathComponent(id, isDirectory: true)
+    try FileManager.default.createDirectory(
+      at: directory, withIntermediateDirectories: true,
+      attributes: [.posixPermissions: 0o700])
+    let target = directory.appendingPathComponent(source.lastPathComponent)
+    let temporary = directory.appendingPathComponent("source.pending")
+    do {
+      guard FileManager.default.createFile(
+        atPath: temporary.path, contents: nil, attributes: [.posixPermissions: 0o600]) else {
+        throw CocoaError(.fileWriteUnknown)
+      }
+      let descriptor = Darwin.open(source.path, O_RDONLY | O_NOFOLLOW)
+      guard descriptor >= 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+      let input = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+      defer { try? input.close() }
+      var info = stat()
+      guard fstat(descriptor, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+        info.st_size > 0, info.st_size <= Int64(limit) else {
+        throw CocoaError(.fileReadCorruptFile)
+      }
+      let output = try FileHandle(forWritingTo: temporary)
+      defer { try? output.close() }
+      var copied = 0
+      while let bytes = try input.read(upToCount: 64 * 1024), !bytes.isEmpty {
+        copied += bytes.count
+        guard copied <= limit else {
+          throw NSError(domain: "ReaderImport", code: 3, userInfo: [
+            NSLocalizedDescriptionKey: "复制期间文件超过导入容量限制。",
+          ])
+        }
+        try output.write(contentsOf: bytes)
+      }
+      guard copied == info.st_size else { throw CocoaError(.fileReadCorruptFile) }
+      try output.synchronize()
+      try FileManager.default.moveItem(at: temporary, to: target)
+      return target
+    } catch {
+      try? FileManager.default.removeItem(at: directory)
+      throw error
     }
   }
 }

@@ -36,6 +36,16 @@ CustomScrollView? readerScroll(Element element) {
   return result;
 }
 
+IconButton? readerFullScreenButton(Element element) {
+  final widget = element.widget;
+  if (widget is IconButton && widget.tooltip == '阅读全屏') return widget;
+  IconButton? result;
+  element.visitChildren((child) {
+    result ??= readerFullScreenButton(child);
+  });
+  return result;
+}
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final errors = <String>[];
@@ -61,7 +71,12 @@ Future<void> main() async {
     final caps = await ReaderPlatform.invoke<Map>('getReaderCapabilities');
     require(caps?['architecture'] == 'arm64', 'Incorrect native architecture');
     require(caps?['windowVisible'] == true, 'Release window is not visible');
-    require(caps?['tts'] == false, 'Deferred speech was accidentally enabled');
+    require(
+      caps?['tts'] == true &&
+          caps?['secureStorage'] == true &&
+          caps?['mediaPlayback'] == true,
+      'Speech/audio/secure native bridge is missing',
+    );
     final size = WidgetsBinding.instance.renderViews.first.size;
     require(size.width >= 720 && size.height >= 540, 'Invalid native viewport');
     final source = await File('${root.path}/release-import.txt').writeAsString(
@@ -137,9 +152,39 @@ Future<void> main() async {
     );
     scroll.jumpTo(1800);
     await WidgetsBinding.instance.endOfFrame;
+    await ReaderSystemService.flushParticipants();
+    final before = await ReaderPositionService().load(book.book.bookId);
+    final windowSize = WidgetsBinding.instance.renderViews.first.size;
+    final windowedHeight = scroll.position.viewportDimension;
+    final fullScreen = readerFullScreenButton(
+      WidgetsBinding.instance.rootElement!,
+    );
+    require(
+      fullScreen?.onPressed != null,
+      'Release reader full-screen entry missing',
+    );
+    fullScreen!.onPressed!();
+    await Future<void>.delayed(const Duration(seconds: 1));
+    await WidgetsBinding.instance.endOfFrame;
+    require(
+      scroll.position.viewportDimension >= windowedHeight + 40,
+      'Reading immersion did not reclaim the toolbar area',
+    );
+    require(
+      WidgetsBinding.instance.renderViews.first.size == windowSize,
+      'Reading immersion changed the application viewport',
+    );
+    await ReaderSystemService.flushParticipants();
+    final immersed = await ReaderPositionService().load(book.book.bookId);
+    require(
+      before != null &&
+          immersed?.paragraphIndex == before.paragraphIndex &&
+          immersed?.characterOffset == before.characterOffset,
+      'Reading immersion lost the source anchor',
+    );
     require(errors.isEmpty, 'Release framework/runtime errors: $errors');
     stdout.writeln(
-      'FANQIE_RELEASE_SMOKE_OK ${jsonEncode({'width': size.width, 'height': size.height, 'native': caps, 'rss': ProcessInfo.currentRss})}',
+      'FANQIE_RELEASE_SMOKE_OK ${jsonEncode({'width': size.width, 'height': size.height, 'native': caps, 'readerImmersive': true, 'rss': ProcessInfo.currentRss})}',
     );
     ReaderSystemService.registerQuitHandler(() async {
       stdout.writeln('FANQIE_RELEASE_QUIT_CALLBACK');

@@ -32,7 +32,7 @@ dependencies:
     sdk: flutter
 
   # HTTP 请求
-  http: ^1.2.0
+  http: ^1.6.0
   
   # 图片缓存
   cached_network_image: ^3.3.1
@@ -135,9 +135,6 @@ flutter:
 flutter_launcher_icons:
   android: true
   ios: false
-  windows:
-    generate: true
-    image_path: "assets/icons/fanqie.png"
   image_path: "assets/icons/fanqie.png"
   # Android 自适应图标
   adaptive_icon_background: "#FF6B6B"

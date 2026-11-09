@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 /// Runtime capabilities, separate from portable reading preferences.
 class ReaderCapabilities {
   final bool tts;
+  final bool nativeSpeech, mediaPlayback;
   final bool secureStorage;
   final bool windowBrightness;
   final bool volumeKeys;
@@ -13,9 +14,12 @@ class ReaderCapabilities {
   final bool networkType;
   final bool textDecoder;
   final bool fileExport;
+  final bool fileImport;
 
   const ReaderCapabilities({
     this.tts = false,
+    this.nativeSpeech = false,
+    this.mediaPlayback = false,
     this.secureStorage = false,
     this.windowBrightness = false,
     this.volumeKeys = false,
@@ -25,23 +29,25 @@ class ReaderCapabilities {
     this.networkType = false,
     this.textDecoder = false,
     this.fileExport = false,
+    this.fileImport = false,
   });
 
   factory ReaderCapabilities.forPlatform(TargetPlatform platform) {
     final android = platform == TargetPlatform.android;
-    final desktop =
-        platform == TargetPlatform.macOS || platform == TargetPlatform.windows;
+    final macos = platform == TargetPlatform.macOS;
     return ReaderCapabilities(
       tts: android,
+      nativeSpeech: android,
+      mediaPlayback: android,
       secureStorage: android,
       windowBrightness: android,
       volumeKeys: android,
       haptics: android,
-      battery: android || desktop,
-      keepAwake: android || desktop,
-      networkType: android || desktop,
-      textDecoder: android || desktop,
-      fileExport: android || desktop,
+      battery: android,
+      keepAwake: android || macos,
+      networkType: android || macos,
+      textDecoder: android || macos,
+      fileExport: android || macos,
     );
   }
 
@@ -54,6 +60,8 @@ class ReaderCapabilities {
         values[key] is bool ? values[key] as bool : defaultValue;
     return ReaderCapabilities(
       tts: flag('tts', fallback.tts),
+      nativeSpeech: flag('nativeSpeech', fallback.nativeSpeech),
+      mediaPlayback: flag('mediaPlayback', fallback.mediaPlayback),
       secureStorage: flag('secureStorage', fallback.secureStorage),
       windowBrightness: flag(
         'windowBrightnessControl',
@@ -66,6 +74,7 @@ class ReaderCapabilities {
       networkType: flag('networkType', fallback.networkType),
       textDecoder: flag('textDecoder', fallback.textDecoder),
       fileExport: flag('fileExport', fallback.fileExport),
+      fileImport: flag('fileImport', false),
     );
   }
 }
@@ -79,15 +88,6 @@ class ReaderPlatform {
   static bool get isMacOS =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
 
-  static bool get isWindows =>
-      !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
-
-  /// Desktop platforms share the native bridge contract (quit handshake,
-  /// transcoding, save panels, window integration) and desktop UX.
-  static bool get isDesktop => isMacOS || isWindows;
-
-  static bool get requiresNativeBridge => isMacOS || isWindows;
-
   static ReaderCapabilities get capabilities =>
       _initializedPlatform == defaultTargetPlatform && _capabilities != null
       ? _capabilities!
@@ -95,7 +95,7 @@ class ReaderPlatform {
 
   static Future<void> initialize() async {
     final platform = defaultTargetPlatform;
-    if (platform != TargetPlatform.android && !requiresNativeBridge) return;
+    if (platform != TargetPlatform.android && !isMacOS) return;
     try {
       final values = await channel.invokeMapMethod<String, dynamic>(
         'getReaderCapabilities',
@@ -105,10 +105,8 @@ class ReaderPlatform {
       _initializedPlatform = platform;
     } catch (_) {
       // Android keeps its existing support even on older native bridges.
-      if (requiresNativeBridge) {
-        throw StateError(
-          isMacOS ? 'macOS 原生模块未能初始化，请重新启动或重新构建客户端' : 'Windows 原生模块未能初始化，请重新启动或重新构建客户端',
-        );
+      if (isMacOS) {
+        throw StateError('macOS 原生模块未能初始化，请重新启动或重新构建客户端');
       }
     }
   }

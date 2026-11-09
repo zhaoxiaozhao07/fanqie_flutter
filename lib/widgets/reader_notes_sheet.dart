@@ -5,6 +5,7 @@ import '../models/reader_theme.dart';
 import '../services/bookmark_service.dart';
 import '../services/reader_export_service.dart';
 import 'note_editor_dialog.dart';
+import 'reader_undo.dart';
 
 class ReaderNotesSheet extends StatefulWidget {
   final Book book;
@@ -53,13 +54,15 @@ class _ReaderNotesSheetState extends State<ReaderNotesSheet> {
       ),
     );
     if (edit == null) return;
-    await _service.updateNote(
+    final undo = await _service.updateNoteWithUndo(
       note.edited(
         note: edit.note,
         colorIndex: edit.colorIndex,
         tags: edit.tags,
       ),
+      expectedUpdatedAt: note.updatedAt,
     );
+    if (mounted && undo != null) showReaderUndo(context, '笔记已更新', [undo]);
   }
 
   Future<void> _delete(ReadingNote note) async {
@@ -86,7 +89,10 @@ class _ReaderNotesSheetState extends State<ReaderNotesSheet> {
         ),
       ),
     );
-    if (confirmed == true) await _service.removeNote(note.id, note.bookId);
+    if (confirmed == true) {
+      final undo = await _service.deleteNotes(note.bookId, {note.id});
+      if (mounted && undo != null) showReaderUndo(context, '笔记已移入回收站', [undo]);
+    }
   }
 
   Future<void> _export(bool markdown) async {

@@ -6,8 +6,16 @@ import 'package:flutter/material.dart';
 import '../models/reading_position.dart';
 import '../models/reader_illustration.dart';
 import 'reader_content.dart';
+import 'reader_display_text.dart';
+import 'reader_text.dart';
+import 'reader_typography.dart';
 
 class ReaderLayout {
+  // RenderEditable reserves a 1px gap in addition to the configured cursor
+  // width, even for read-only SelectableText. Account for that in text
+  // measurement, not in canonical character offsets or illustration geometry.
+  static const selectableCursorWidth = 2.0;
+  static const selectableTextInset = 1.0 + selectableCursorWidth;
   final Size size;
   final TextStyle bodyStyle;
   final TextStyle titleStyle;
@@ -17,11 +25,9 @@ class ReaderLayout {
   final Size inlineCommentSize;
   final bool showPageNumber;
   final double chapterEndHeight;
-
-  /// Text columns per page (1 or 2). Dual-column is a layout preference;
-  /// the caller only enables it on wide desktop pages in page mode.
-  final int columns;
-  final double columnGap;
+  final double textWidthInset;
+  final bool smartTypography;
+  final String displayScript;
 
   const ReaderLayout({
     required this.size,
@@ -33,8 +39,9 @@ class ReaderLayout {
     this.inlineCommentSize = Size.zero,
     this.showPageNumber = true,
     this.chapterEndHeight = 0,
-    this.columns = 1,
-    this.columnGap = 32,
+    this.textWidthInset = 0,
+    this.smartTypography = false,
+    this.displayScript = 'original',
   });
 
   Object get key => (
@@ -47,8 +54,9 @@ class ReaderLayout {
     inlineCommentSize,
     showPageNumber,
     chapterEndHeight,
-    columns,
-    columnGap,
+    textWidthInset,
+    smartTypography,
+    displayScript,
   );
 
   // Paint-only changes (night theme, highlights) must reuse measured pages.
@@ -90,10 +98,6 @@ class ReaderPageFragment {
 
 class ReaderPage {
   final List<ReaderPageFragment> fragments;
-
-  /// Fragments per text column, in reading order; length matches the page's
-  /// column count (a trailing column may be empty at a chapter's end).
-  final List<int> columnSpans;
   final double availableHeight;
   final bool oversized;
   final double titleHeight;
@@ -101,7 +105,6 @@ class ReaderPage {
 
   const ReaderPage({
     required this.fragments,
-    required this.columnSpans,
     required this.availableHeight,
     this.oversized = false,
     this.titleHeight = 0,
@@ -216,14 +219,11 @@ class ReaderPaginationCache {
     required bool indent,
     List<ReaderIllustration> illustrations = const [],
   }) {
-    final columnCount = math.max(1, layout.columns);
-    final columnGap = columnCount > 1 ? layout.columnGap : 0.0;
-    final width = math.max(
+    final contentWidth = math.max(
       1.0,
-      (layout.size.width - layout.horizontalPadding * 2 -
-              columnGap * (columnCount - 1)) /
-          columnCount,
+      layout.size.width - layout.horizontalPadding * 2,
     );
+    final width = math.max(1.0, contentWidth - layout.textWidthInset);
     final painter = TextPainter(
       textDirection: TextDirection.ltr,
       textScaler: layout.textScaler,
@@ -238,7 +238,7 @@ class ReaderPaginationCache {
       painter.text = TextSpan(
         style: style,
         children: [
-          TextSpan(text: text),
+          TextSpan(text: ReaderDisplayText.convert(text, layout.displayScript)),
           if (hasComment)
             const WidgetSpan(
               alignment: PlaceholderAlignment.middle,
@@ -283,42 +283,24 @@ class ReaderPaginationCache {
     final firstHeight = math.max(1.0, normalHeight - titleHeight - 10);
     final pages = <ReaderPage>[];
     final fragments = <ReaderPageFragment>[];
-    // Columns of the page currently being assembled (reading order).
-    final pageColumns = <List<ReaderPageFragment>>[];
     var usedHeight = 0.0;
     var oversized = false;
-    double available() =>
-        pages.isEmpty && pageColumns.isEmpty ? firstHeight : normalHeight;
-    void emitPage({bool chapterEnd = false}) {
-      final columns = List<List<ReaderPageFragment>>.from(pageColumns);
-      if (columns.isEmpty) columns.add(const []);
+    double available() => pages.isEmpty ? firstHeight : normalHeight;
+    void flush({bool chapterEnd = false}) {
+      if (fragments.isEmpty) return;
       final endHeight = chapterEnd ? layout.chapterEndHeight : 0.0;
       pages.add(
         ReaderPage(
-          fragments: List.unmodifiable(columns.expand((c) => c)),
-          columnSpans: List.unmodifiable(
-            columns.map((c) => c.length),
-          ),
+          fragments: List.unmodifiable(fragments),
           availableHeight: math.max(1, available() - endHeight).toDouble(),
           oversized: oversized,
           titleHeight: pages.isEmpty ? titleHeight : 0,
           chapterEndHeight: endHeight,
         ),
       );
-      pageColumns.clear();
+      fragments.clear();
       usedHeight = 0;
       oversized = false;
-    }
-
-    void flush({bool chapterEnd = false}) {
-      if (fragments.isNotEmpty) {
-        pageColumns.add(List<ReaderPageFragment>.from(fragments));
-        fragments.clear();
-        usedHeight = 0;
-      }
-      if (chapterEnd || pageColumns.length >= columnCount) {
-        emitPage(chapterEnd: chapterEnd);
-      }
     }
 
     try {
@@ -335,7 +317,7 @@ class ReaderPaginationCache {
         if (block.image != null) {
           var spacing = fragments.isEmpty ? 0.0 : layout.paragraphSpacing;
           double imageHeight() => block.image!.displayHeight(
-            width,
+            contentWidth,
             math.max(1, available() - endHeight).toDouble(),
           );
           var height = imageHeight();
@@ -380,12 +362,31 @@ class ReaderPaginationCache {
           if (height > room + 0.01) {
             final lines = painter.computeLineMetrics();
             var candidate = 0;
+            var fittingLines = 0;
             for (final line in lines) {
               if (line.baseline + line.descent > room + 0.01) break;
+              fittingLines++;
               final position = painter.getPositionForOffset(
                 Offset(0, line.baseline),
               );
               candidate = painter.getLineBoundary(position).end;
+            }
+            if (layout.smartTypography &&
+                fragments.isNotEmpty &&
+                fittingLines == 1 &&
+                lines.length >= 3) {
+              flush(); // Do not begin a multi-line paragraph with an orphan.
+              continue;
+            }
+            if (layout.smartTypography &&
+                fittingLines >= 3 &&
+                fittingLines == lines.length - 1) {
+              final preceding = lines[fittingLines - 2];
+              candidate = painter
+                  .getLineBoundary(
+                    painter.getPositionForOffset(Offset(0, preceding.baseline)),
+                  )
+                  .end; // Leave at least two lines for the continuation.
             }
             if (candidate <= prefix.length && fragments.isNotEmpty) {
               flush();
@@ -417,6 +418,20 @@ class ReaderPaginationCache {
                   original.substring(cursor).characters.first.length;
               oversized = true;
             }
+            end = ReaderText.safeOffset(display, end);
+            if (layout.smartTypography && !oversized) {
+              end = ReaderTypography.safePageEnd(
+                display,
+                end,
+                minimum: prefix.length,
+              );
+            }
+            if (end <= prefix.length) {
+              end =
+                  prefix.length +
+                  original.substring(cursor, block.end).characters.first.length;
+              oversized = true;
+            }
             height = measure(
               display.substring(0, end),
               layout.bodyStyle,
@@ -436,6 +451,24 @@ class ReaderPaginationCache {
                     painter.getPositionForOffset(Offset(0, previous.baseline)),
                   )
                   .end;
+              end = ReaderText.safeOffset(display, end);
+              if (layout.smartTypography) {
+                end = ReaderTypography.safePageEnd(
+                  display,
+                  end,
+                  minimum: prefix.length,
+                );
+              }
+              if (end <= prefix.length) {
+                end =
+                    prefix.length +
+                    original
+                        .substring(cursor, block.end)
+                        .characters
+                        .first
+                        .length;
+                oversized = true;
+              }
               height = measure(
                 display.substring(0, end),
                 layout.bodyStyle,
@@ -465,7 +498,6 @@ class ReaderPaginationCache {
         pages.add(
           ReaderPage(
             fragments: const [],
-            columnSpans: const [0],
             availableHeight: math
                 .max(1, firstHeight - layout.chapterEndHeight)
                 .toDouble(),
