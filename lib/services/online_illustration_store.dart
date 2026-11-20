@@ -62,11 +62,19 @@ class OnlineIllustrationStore {
     String chapter,
     OnlineChapter document, {
     bool replace = false,
+    bool permanent = false,
   }) async {
     if (book.startsWith('local_')) return;
-    final existing = await _read(book, chapter, document.text);
-    if (existing != null && !replace) return;
-    final file = existing?.$1 ?? await _file(book, chapter, false);
+    final target = await _file(book, chapter, permanent);
+    if (!replace) {
+      final existing = await _read(book, chapter, document.text);
+      if (existing != null && (!permanent || existing.$1.path == target.path)) {
+        return;
+      }
+    }
+    final file = permanent
+        ? target
+        : ((await _read(book, chapter, document.text))?.$1 ?? target);
     await AtomicFile.writeString(
       file,
       jsonEncode({
@@ -87,6 +95,47 @@ class OnlineIllustrationStore {
 
   Future<bool> hasSources(String book, String chapter, String text) async =>
       await _read(book, chapter, text) != null;
+
+  /// 检查离线目录中的插图元数据与资源是否已经完整就绪（避免无插图章节进入全书串行锁）
+  Future<bool> isPermanentReady(
+    String book,
+    String chapter,
+    String text,
+  ) async {
+    final target = await _file(book, chapter, true);
+    try {
+      if (await FileSystemEntity.type(target.path, followLinks: false) !=
+          FileSystemEntityType.file) {
+        return false;
+      }
+      final data = jsonDecode(await target.readAsString());
+      if (data is! Map<String, dynamic> ||
+          data['version'] != 1 ||
+          data['textHash'] != _hash(text) ||
+          data['images'] is! List) {
+        return false;
+      }
+      final images = data['images'] as List;
+      if (images.isEmpty) return true;
+      for (final raw in images) {
+        if (raw is! Map) return false;
+        final asset = raw['asset']?.toString();
+        if (asset == null ||
+            raw['error'] != null ||
+            !ReaderIllustration.assetPattern.hasMatch(asset)) {
+          return false;
+        }
+        final assetFile = File('${target.parent.path}/$asset');
+        if (await FileSystemEntity.type(assetFile.path, followLinks: false) !=
+            FileSystemEntityType.file) {
+          return false;
+        }
+      }
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
 
   Future<List<ReaderIllustration>> read(
     String book,

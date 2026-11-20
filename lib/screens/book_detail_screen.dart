@@ -48,17 +48,45 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   int? _lastReadIndex;
   String? _lastReadTitle;
 
+  /// 已校验存在的下载文件信息（null 表示未下载或文件已被删除）
+  VerifiedDownloadInfo? _verifiedDownload;
+  bool _wasDownloading = false;
+
   @override
   void initState() {
     super.initState();
+    _downloadService.addListener(_onDownloadChanged);
     _loadBookDetail();
     _loadBookReviews();
+    unawaited(_refreshDownloadedState());
   }
 
   @override
   void dispose() {
+    _downloadService.removeListener(_onDownloadChanged);
     _apiService.dispose();
     super.dispose();
+  }
+
+  /// 下载任务状态变化时，在任务结束后重新校验本地文件
+  void _onDownloadChanged() {
+    final downloading = _downloadService.isDownloading(widget.book.bookId);
+    if (_wasDownloading && !downloading) {
+      unawaited(_refreshDownloadedState());
+    }
+    _wasDownloading = downloading;
+  }
+
+  /// 确认历史下载文件是否仍然存在，存在才显示为已下载
+  Future<void> _refreshDownloadedState() async {
+    try {
+      final info = await _downloadService.checkVerifiedDownload(
+        _bookDetail ?? widget.book,
+      );
+      if (mounted) setState(() => _verifiedDownload = info);
+    } catch (_) {
+      if (mounted) setState(() => _verifiedDownload = null);
+    }
   }
 
   /// Detail HTML is optional metadata, not a prerequisite for reading.
@@ -70,7 +98,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   Future<void> _loadMetadata() async {
     try {
       final detail = await _apiService.getBookDetail(widget.book.bookId);
-      if (mounted && detail != null) setState(() => _bookDetail = detail);
+      if (mounted && detail != null) {
+        setState(() => _bookDetail = detail);
+        unawaited(_refreshDownloadedState());
+      }
     } catch (_) {
       /* Keep the book metadata supplied by home/search. */
     }
@@ -439,11 +470,56 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       return;
     }
 
+    // 已下载且文件仍存在时，先提示已下载，允许用户选择重新下载其他格式
+    await _refreshDownloadedState();
+    if (!mounted) return;
+    final verified = _verifiedDownload;
+    if (verified != null) {
+      final redownload = await _showAlreadyDownloadedDialog(verified);
+      if (redownload != true || !mounted) return;
+    }
+
     final format = await DownloadDialog.show(context, book.bookName);
 
     if (format != null && mounted) {
       _startDownload(format);
     }
+  }
+
+  Future<bool?> _showAlreadyDownloadedDialog(VerifiedDownloadInfo info) {
+    return showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('已下载'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('格式：${info.availableFormats.join(' / ')}'),
+            const SizedBox(height: 6),
+            Text('大小：${info.formattedFileSize}'),
+            const SizedBox(height: 6),
+            SelectableText(
+              '位置：${info.filePath}',
+              style: const TextStyle(
+                fontSize: 12,
+                color: AppTheme.textSecondary,
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('知道了'),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('重新下载'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _showDownloadStatusDialog(DownloadTask task) {
@@ -535,7 +611,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
           ),
           child: Row(
             children: [
-              // 下载按钮（活动状态动态反映后台进度）
+              // 下载按钮（活动状态动态反映后台进度；文件已存在时高亮显示“已下载”）
               OutlinedButton.icon(
                 onPressed: _showDownloadDialog,
                 icon: isDownloading
@@ -547,18 +623,30 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                           color: AppTheme.primaryColor,
                         ),
                       )
-                    : const Icon(Icons.download_rounded, size: 20),
+                    : Icon(
+                        _verifiedDownload != null
+                            ? Icons.download_done_rounded
+                            : Icons.download_rounded,
+                        size: 20,
+                      ),
                 label: Text(
                   isDownloading
                       ? '下载中 ${(activeTask.progress * 100).toInt()}%'
-                      : '下载',
+                      : (_verifiedDownload != null ? '已下载' : '下载'),
                 ),
                 style: OutlinedButton.styleFrom(
+                  foregroundColor: (!isDownloading && _verifiedDownload != null)
+                      ? Colors.green.shade700
+                      : AppTheme.primaryColor,
                   padding: const EdgeInsets.symmetric(
                     horizontal: 16,
                     vertical: 12,
                   ),
-                  side: const BorderSide(color: AppTheme.primaryColor),
+                  side: BorderSide(
+                    color: (!isDownloading && _verifiedDownload != null)
+                        ? Colors.green.shade600
+                        : AppTheme.primaryColor,
+                  ),
                   shape: RoundedRectangleBorder(
                     borderRadius: BorderRadius.circular(24),
                   ),
@@ -1119,6 +1207,15 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       : AppTheme.tagCompleted,
                 ),
               ),
+              if (_verifiedDownload != null)
+                InkWell(
+                  onTap: _showDownloadDialog,
+                  borderRadius: BorderRadius.circular(16),
+                  child: _buildTag(
+                    '已下载 (${_verifiedDownload!.availableFormats.join('/')})',
+                    Colors.green.shade700,
+                  ),
+                ),
               _buildTag(
                 book.creationStatus,
                 book.creationStatus == '完结'

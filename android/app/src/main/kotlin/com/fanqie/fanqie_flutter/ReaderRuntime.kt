@@ -1,9 +1,11 @@
 package com.fanqie.fanqie_flutter
 
+import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.net.Uri
 import android.os.BatteryManager
 import android.os.Build
 import android.os.Environment
@@ -131,10 +133,29 @@ object ReaderRuntime {
                         val name = File(call.argument<String>("fileName") ?: "export.txt").name
                         val mime = call.argument<String>("mimeType") ?: "application/octet-stream"
                         files.execute {
-                            val saved = saveToDownloads(app, source, name, mime)
+                            val saved = saveToDownloadsDetailed(app, source, name, mime)
+                            main.post { result.success(saved["saved"] == true) }
+                        }
+                    }
+                    "saveToDownloadsDetailed" -> {
+                        val source = call.argument<String>("filePath") ?: ""
+                        val name = File(call.argument<String>("fileName") ?: "export.txt").name
+                        val mime = call.argument<String>("mimeType") ?: "application/octet-stream"
+                        files.execute {
+                            val saved = saveToDownloadsDetailed(app, source, name, mime)
                             main.post { result.success(saved) }
                         }
                     }
+                    "checkDownloadedFile" -> {
+                        val filePath = call.argument<String>("filePath") ?: ""
+                        val contentUri = call.argument<String>("contentUri") ?: ""
+                        val fileName = call.argument<String>("fileName") ?: ""
+                        files.execute {
+                            val checked = checkDownloadedFile(app, filePath, contentUri, fileName)
+                            main.post { result.success(checked) }
+                        }
+                    }
+                    "getAndroidSdkInt" -> result.success(Build.VERSION.SDK_INT)
                     "initNativeTts", "speakNativeTts", "playAudioFile", "pauseAudio", "resumeAudio",
                     "stopNativeTts", "stopAudio", "stopPlayback", "setAudioVolume", "setSleepDeadline",
                     "updateMediaPlaybackState", "releasePlaybackService", "getPlaybackState" -> {
@@ -151,36 +172,214 @@ object ReaderRuntime {
         return engine
     }
 
-    private fun saveToDownloads(context: Context, source: String, name: String, mime: String): Boolean {
+    /// 保存文件到 Android 公共下载目录 Download/fanqie，并返回真实路径、URI 与大小
+    private fun saveToDownloadsDetailed(
+        context: Context,
+        source: String,
+        name: String,
+        mime: String
+    ): Map<String, Any?> {
         try {
-            if (!File(source).isFile || name.isBlank()) return false
+            val sourceFile = File(source)
+            if (!sourceFile.isFile || name.isBlank()) {
+                return mapOf("saved" to false, "error" to "待保存的源文件不存在")
+            }
+            val size = sourceFile.length()
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 val resolver = context.contentResolver
+                val relativePath = "${Environment.DIRECTORY_DOWNLOADS}/fanqie/"
+
+                // 清理同目录下本应用之前写入的同名旧记录，避免产生 (1) 重复副本或插入冲突
+                try {
+                    val selection =
+                        "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND " +
+                        "(${MediaStore.MediaColumns.RELATIVE_PATH} = ? OR ${MediaStore.MediaColumns.RELATIVE_PATH} = ?)"
+                    val selectionArgs = arrayOf(
+                        name,
+                        relativePath,
+                        "${Environment.DIRECTORY_DOWNLOADS}/fanqie"
+                    )
+                    resolver.delete(MediaStore.Downloads.EXTERNAL_CONTENT_URI, selection, selectionArgs)
+                } catch (_: Exception) {
+                    // 非本应用拥有的同名文件删除失败时忽略，交由系统分配新文件名
+                }
+
                 val values = ContentValues().apply {
                     put(MediaStore.MediaColumns.DISPLAY_NAME, name)
                     put(MediaStore.MediaColumns.MIME_TYPE, mime)
-                    put(MediaStore.MediaColumns.RELATIVE_PATH, "${Environment.DIRECTORY_DOWNLOADS}/fanqie")
+                    put(MediaStore.MediaColumns.RELATIVE_PATH, relativePath)
                     put(MediaStore.MediaColumns.IS_PENDING, 1)
                 }
-                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return false
+                val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values)
+                    ?: return mapOf("saved" to false, "error" to "MediaStore 创建下载记录失败")
+                var actualName = name
                 try {
-                    val output = resolver.openOutputStream(uri) ?: throw IllegalStateException()
-                    output.use { stream -> File(source).inputStream().use { it.copyTo(stream) } }
+                    val output = resolver.openOutputStream(uri)
+                        ?: throw IllegalStateException("无法打开下载输出流")
+                    output.use { stream -> sourceFile.inputStream().use { it.copyTo(stream) } }
                     values.clear()
                     values.put(MediaStore.MediaColumns.IS_PENDING, 0)
                     resolver.update(uri, values, null, null)
+
+                    // 回查实际落盘文件名，防止系统在冲突时自动重命名为 xxx (1).epub
+                    resolver.query(
+                        uri,
+                        arrayOf(MediaStore.MediaColumns.DISPLAY_NAME),
+                        null,
+                        null,
+                        null
+                    )?.use { cursor ->
+                        if (cursor.moveToFirst()) {
+                            val queried = cursor.getString(0)
+                            if (!queried.isNullOrBlank()) {
+                                actualName = queried
+                            }
+                        }
+                    }
                 } catch (error: Exception) {
-                    resolver.delete(uri, null, null)
+                    try {
+                        resolver.delete(uri, null, null)
+                    } catch (_: Exception) {}
                     throw error
                 }
+                val displayPath = "/storage/emulated/0/Download/fanqie/$actualName"
+                return mapOf(
+                    "saved" to true,
+                    "path" to displayPath,
+                    "uri" to uri.toString(),
+                    "fileName" to actualName,
+                    "size" to size
+                )
             } else {
                 @Suppress("DEPRECATION")
-                val dir = File(Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS), "fanqie")
-                if (!dir.exists() && !dir.mkdirs()) return false
-                File(source).inputStream().use { input -> File(dir, name).outputStream().use { input.copyTo(it) } }
+                val dir = File(
+                    Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS),
+                    "fanqie"
+                )
+                if (!dir.exists() && !dir.mkdirs()) {
+                    return mapOf("saved" to false, "error" to "无法创建 Download/fanqie 目录")
+                }
+                val target = File(dir, name)
+                sourceFile.inputStream().use { input ->
+                    target.outputStream().use { input.copyTo(it) }
+                }
+                return mapOf(
+                    "saved" to true,
+                    "path" to target.absolutePath,
+                    "uri" to null,
+                    "fileName" to name,
+                    "size" to target.length()
+                )
             }
-            return true
-        } catch (_: Exception) { return false }
+        } catch (error: Exception) {
+            return mapOf("saved" to false, "error" to (error.message ?: error.toString()))
+        }
+    }
+
+    /// 校验已下载文件是否真实存在（兼容 Android 10+ 分区存储与外部文件删除检测）
+    private fun checkDownloadedFile(
+        context: Context,
+        filePath: String,
+        contentUri: String,
+        fileName: String
+    ): Map<String, Any?> {
+        // 1. 优先通过 content:// URI 打开文件描述符确认物理文件依然存在且可读
+        if (contentUri.startsWith("content://")) {
+            val verified = verifyContentUri(context, contentUri)
+            if (verified != null) return verified
+        }
+        if (filePath.startsWith("content://")) {
+            val verified = verifyContentUri(context, filePath)
+            if (verified != null) return verified
+        }
+
+        // 2. Android 10+ 通过 MediaStore.Downloads 按文件名查询 Download/fanqie 目录并实测可读性
+        val candidateName = fileName.ifBlank {
+            if (filePath.isNotBlank() && !filePath.startsWith("content://")) {
+                File(filePath).name
+            } else {
+                ""
+            }
+        }
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q && candidateName.isNotBlank()) {
+            try {
+                val resolver = context.contentResolver
+                val selection =
+                    "${MediaStore.MediaColumns.DISPLAY_NAME} = ? AND " +
+                    "${MediaStore.MediaColumns.IS_PENDING} = 0 AND " +
+                    "(${MediaStore.MediaColumns.RELATIVE_PATH} = ? OR ${MediaStore.MediaColumns.RELATIVE_PATH} = ?)"
+                val selectionArgs = arrayOf(
+                    candidateName,
+                    "${Environment.DIRECTORY_DOWNLOADS}/fanqie/",
+                    "${Environment.DIRECTORY_DOWNLOADS}/fanqie"
+                )
+                resolver.query(
+                    MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                    arrayOf(
+                        MediaStore.MediaColumns._ID,
+                        MediaStore.MediaColumns.SIZE,
+                        MediaStore.MediaColumns.DISPLAY_NAME
+                    ),
+                    selection,
+                    selectionArgs,
+                    "${MediaStore.MediaColumns.DATE_MODIFIED} DESC"
+                )?.use { cursor ->
+                    while (cursor.moveToNext()) {
+                        val id = cursor.getLong(0)
+                        val itemUri = ContentUris.withAppendedId(
+                            MediaStore.Downloads.EXTERNAL_CONTENT_URI,
+                            id
+                        )
+                        val verified = verifyContentUri(context, itemUri.toString())
+                        if (verified != null) {
+                            return mapOf(
+                                "exists" to true,
+                                "size" to verified["size"],
+                                "uri" to itemUri.toString(),
+                                "path" to "/storage/emulated/0/Download/fanqie/${cursor.getString(2) ?: candidateName}"
+                            )
+                        }
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+
+        // 3. 回退到直接文件系统检查
+        if (filePath.isNotBlank() && !filePath.startsWith("content://")) {
+            try {
+                val file = File(filePath)
+                if (file.isFile && file.length() > 0L) {
+                    return mapOf(
+                        "exists" to true,
+                        "size" to file.length(),
+                        "path" to file.absolutePath
+                    )
+                }
+            } catch (_: Exception) {}
+        }
+
+        return mapOf("exists" to false, "size" to 0L)
+    }
+
+    private fun verifyContentUri(context: Context, uriString: String): Map<String, Any?>? {
+        return try {
+            val uri = Uri.parse(uriString)
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { afd ->
+                val len = afd.length
+                val actualSize = if (len > 0L) {
+                    len
+                } else {
+                    afd.parcelFileDescriptor.statSize
+                }
+                if (actualSize > 0L) {
+                    mapOf("exists" to true, "size" to actualSize, "uri" to uriString)
+                } else {
+                    null
+                }
+            }
+        } catch (_: Exception) {
+            null
+        }
     }
 }
 

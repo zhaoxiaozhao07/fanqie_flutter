@@ -602,17 +602,22 @@ class FanqieBackendEngine {
 
   final FanqieMobileGateway _mobileGateway = FanqieMobileGateway();
 
-  Future<OnlineChapter?> _fetchDocument(String id) async {
+  Future<OnlineChapter?> _fetchDocument(
+    String id, {
+    bool useSessionPool = false,
+  }) async {
     if (_chapterDocumentLoader != null) return _chapterDocumentLoader(id);
     if (_chapterLoader != null) {
       final text = await _chapterLoader(id);
       return text == null ? null : OnlineChapter(text);
     }
-    return _mobileGateway.fetchChapterDocument(id);
+    return _mobileGateway.fetchChapterDocument(
+      id,
+      useSessionPool: useSessionPool,
+    );
   }
 
-  /// Bypass *all* text caches only to recover missing image metadata. Never
-  /// replace an existing chapter's text/IDs/positions with a newer edition.
+  /// 仅在缺失或损坏时修复插图元数据与本地图片，绝不覆盖已有正文文本与锚点
   Future<void> repairChapterImages(
     String bookId,
     String chapterId,
@@ -626,7 +631,12 @@ class FanqieBackendEngine {
       if (document.text.trim() != text.trim()) {
         throw const FormatException('线上正文已变化，未改动原书，请勿删除阅读数据');
       }
-      await onlineImages.saveSources(bookId, chapterId, document);
+      await onlineImages.saveSources(
+        bookId,
+        chapterId,
+        document,
+        permanent: permanent,
+      );
     }
     final protect =
         permanent ||
@@ -634,11 +644,16 @@ class FanqieBackendEngine {
     try {
       await onlineImages.hydrate(bookId, chapterId, text, permanent: protect);
     } on FormatException {
-      // Signed CDN URLs can expire while a failed image stays in the sidecar.
-      // Refresh only from the same full chapter and keep the old text intact.
+      // 签名 CDN 链接过期时重新拉取同版本章节刷新图片地址，保持原正文不变
       final fresh = await _fetchDocument(chapterId);
       if (fresh == null || fresh.text.trim() != text.trim()) rethrow;
-      await onlineImages.saveSources(bookId, chapterId, fresh, replace: true);
+      await onlineImages.saveSources(
+        bookId,
+        chapterId,
+        fresh,
+        replace: true,
+        permanent: protect,
+      );
       await onlineImages.hydrate(bookId, chapterId, text, permanent: protect);
     }
   }
@@ -692,7 +707,7 @@ class FanqieBackendEngine {
     return null;
   }
 
-  /// 7. 高性能全章节并发下载接口（由内置后端引擎直接控制，无前端人为限速与批次延迟）
+  /// 7. 高性能全章节并发下载接口（直接落盘离线目录，避免逐章触发临时缓存全量扫描，并内置多会话防限流与补漏重试）
   Future<void> downloadChapters({
     required String bookId,
     required List<Chapter> chapters,
@@ -706,91 +721,209 @@ class FanqieBackendEngine {
     if (isCancelled?.call() == true) return;
     await directoryCache.saveDownloaded(bookId, chapters);
     final offlineDir = await getOfflineBookDir(bookId);
+
+    // 预扫描离线目录中已有的章节文件，判断本次实际待下载数量
+    final existingNames = <String>{};
+    try {
+      await for (final entity in offlineDir.list(followLinks: false)) {
+        if (entity is File && entity.path.endsWith('.txt')) {
+          existingNames.add(entity.uri.pathSegments.last);
+        }
+      }
+    } catch (_) {}
+
+    final estimatedPending = chapters
+        .where(
+          (ch) => !existingNames.contains(
+            '${ReaderCacheService.segment(ch.itemId)}.txt',
+          ),
+        )
+        .length;
+
+    // 待下载章节较多时提前并行预热匿名设备会话池，避免单设备触发服务端 100 章限流
+    if (_chapterDocumentLoader == null &&
+        _chapterLoader == null &&
+        !bookId.startsWith('local_') &&
+        estimatedPending > 15) {
+      if (isCancelled?.call() == true) return;
+      onProgress?.call(0, total, '正在准备并发下载通道...');
+      await _mobileGateway.prepareDownloadSessionPool(
+        desiredSize: estimatedPending > 150 ? 4 : 3,
+      );
+    }
+
     int completed = 0;
-    int nextIndex = 0;
     final failures = <String>{};
     var diskFailure = false;
 
-    Future<void> worker() async {
-      while (true) {
-        if (isCancelled?.call() == true) return;
+    Future<bool> processChapter(Chapter chapter) async {
+      final segment = ReaderCacheService.segment(chapter.itemId);
+      final offlineFile = File('${offlineDir.path}/$segment.txt');
 
-        int currentIndex;
-        if (nextIndex >= total) return;
-        currentIndex = nextIndex++;
+      String? text;
+      OnlineChapter? fetchedDoc;
 
-        final chapter = chapters[currentIndex];
-        final offlineFile = File(
-          '${offlineDir.path}/${ReaderCacheService.segment(chapter.itemId)}.txt',
-        );
-
-        // 检查是否已有离线文件
-        bool hasCached = false;
-        try {
-          if (await offlineFile.exists()) {
-            hasCached = ReaderCacheService.isReadable(
-              await offlineFile.readAsString(),
-            );
+      // 1. 优先复用已有离线正文
+      try {
+        if (await offlineFile.exists()) {
+          final existing = await offlineFile.readAsString();
+          if (ReaderCacheService.isReadable(existing)) {
+            text = existing;
           }
-        } catch (_) {}
+        }
+      } catch (_) {}
 
-        if (!hasCached) {
-          String? content;
-          for (int retry = 0; retry < 2; retry++) {
-            if (isCancelled?.call() == true) return;
+      // 2. 未离线时，先检查临时阅读缓存，否则直接通过移动端会话池拉取完整章节并落盘离线目录
+      if (text == null) {
+        if (!bookId.startsWith('local_')) {
+          // 优先复用已有临时阅读缓存（不触发全盘 trim）
+          final tempCached = await readerCache.read(bookId, chapter.itemId);
+          if (ReaderCacheService.isReadable(tempCached)) {
+            text = tempCached;
+          } else {
             try {
-              content = await getChapterContent(chapter.itemId, bookId: bookId);
-              if (ReaderCacheService.isReadable(content)) {
+              final legacyFile = await _getChapterCacheFile(chapter.itemId);
+              if (await legacyFile.exists()) {
+                final cached = await legacyFile.readAsString();
+                if (cached.length > 50 &&
+                    ReaderCacheService.isReadable(cached)) {
+                  text = cached;
+                }
+              }
+            } catch (_) {}
+          }
+        }
+
+        if (text == null && !bookId.startsWith('local_')) {
+          for (int retry = 0; retry < 2; retry++) {
+            if (isCancelled?.call() == true) return false;
+            try {
+              final doc = await _fetchDocument(
+                chapter.itemId,
+                useSessionPool: true,
+              );
+              if (doc != null && ReaderCacheService.isReadable(doc.text)) {
+                fetchedDoc = doc;
+                text = doc.text;
                 break;
               }
             } catch (_) {}
             if (retry < 1) {
-              await Future.delayed(Duration(milliseconds: 100 * (retry + 1)));
+              await Future.delayed(Duration(milliseconds: 120 * (retry + 1)));
             }
-          }
-
-          if (isCancelled?.call() == true) return;
-          if (ReaderCacheService.isReadable(content)) {
-            try {
-              final staged = File('${offlineFile.path}.pending');
-              await staged.writeAsString(content!, flush: true);
-              await staged.rename(offlineFile.path);
-            } catch (_) {
-              failures.add(chapter.itemId);
-              diskFailure = true;
-            }
-          } else {
-            failures.add(chapter.itemId);
           }
         }
 
-        // Even already downloaded text may be from pre-image versions.
-        // A missing image is a retryable failure, not a completed download.
-        if (isCancelled?.call() == true) return;
+        if (isCancelled?.call() == true) return false;
+        if (text == null || !ReaderCacheService.isReadable(text)) {
+          return false;
+        }
+
+        // 直接原子写入离线目录，跳过临时阅读缓存的重复刷盘与全目录 trim
         try {
-          if (await offlineFile.exists()) {
-            final text = await offlineFile.readAsString();
-            if (ReaderCacheService.isReadable(text)) {
-              await repairChapterImages(
-                bookId,
-                chapter.itemId,
-                text,
-                permanent: true,
-              );
-            }
-          }
-        } catch (e) {
-          failures.add(chapter.itemId);
-          if (e is FileSystemException) diskFailure = true;
+          final staged = File('${offlineFile.path}.pending');
+          await staged.writeAsString(text, flush: true);
+          await staged.rename(offlineFile.path);
+        } catch (_) {
+          diskFailure = true;
+          return false;
         }
-        completed++;
+
+        if (fetchedDoc != null) {
+          try {
+            await onlineImages.saveSources(
+              bookId,
+              chapter.itemId,
+              fetchedDoc,
+              permanent: true,
+            );
+            // 普通无插图章节无需再走全书串行锁与重复读盘校验
+            if (fetchedDoc.images.isEmpty) {
+              return true;
+            }
+          } catch (e) {
+            if (e is FileSystemException) diskFailure = true;
+            return false;
+          }
+        }
+      }
+
+      // 3. 校验并持久化章节插图（历史纯文本章节或包含插图的章节在此水合）
+      if (isCancelled?.call() == true) return false;
+      final chapterText = text;
+      try {
+        if (await onlineImages.isPermanentReady(
+          bookId,
+          chapter.itemId,
+          chapterText,
+        )) {
+          return true;
+        }
+        await repairChapterImages(
+          bookId,
+          chapter.itemId,
+          chapterText,
+          permanent: true,
+        );
+        return true;
+      } catch (e) {
+        if (e is FileSystemException) diskFailure = true;
+        return false;
+      }
+    }
+
+    // 第一轮主并发下载
+    int nextIndex = 0;
+    Future<void> worker() async {
+      while (true) {
+        if (isCancelled?.call() == true) return;
+        if (nextIndex >= total) return;
+        final currentIndex = nextIndex++;
+        final chapter = chapters[currentIndex];
+        final ok = await processChapter(chapter);
+        if (isCancelled?.call() == true) return;
+        if (ok) {
+          completed++;
+        } else {
+          failures.add(chapter.itemId);
+        }
         onProgress?.call(completed, total, '正在下载: ${chapter.title}');
       }
     }
 
     final workerCount = concurrency.clamp(1, total);
-    final workers = List.generate(workerCount, (_) => worker());
-    await Future.wait(workers);
+    await Future.wait(List.generate(workerCount, (_) => worker()));
+
+    // 第二轮补漏重试：针对偶发网络抖动或个别超时失败的章节做低并发自动补齐
+    if (failures.isNotEmpty && !diskFailure && isCancelled?.call() != true) {
+      final retryChapters = chapters
+          .where((c) => failures.contains(c.itemId))
+          .toList();
+      failures.clear();
+      if (_chapterDocumentLoader == null && _chapterLoader == null) {
+        await _mobileGateway.prepareDownloadSessionPool(desiredSize: 2);
+      }
+      int retryIndex = 0;
+      Future<void> retryWorker() async {
+        while (true) {
+          if (isCancelled?.call() == true) return;
+          if (retryIndex >= retryChapters.length) return;
+          final chapter = retryChapters[retryIndex++];
+          final ok = await processChapter(chapter);
+          if (isCancelled?.call() == true) return;
+          if (ok) {
+            completed++;
+            onProgress?.call(completed, total, '正在补齐: ${chapter.title}');
+          } else {
+            failures.add(chapter.itemId);
+          }
+        }
+      }
+
+      final retryWorkers = retryChapters.length.clamp(1, 4);
+      await Future.wait(List.generate(retryWorkers, (_) => retryWorker()));
+    }
+
     if (failures.isNotEmpty && isCancelled?.call() != true) {
       throw ChapterDownloadIncomplete(
         failures.length,

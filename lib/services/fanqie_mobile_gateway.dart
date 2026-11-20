@@ -11,29 +11,72 @@ import 'package:pointycastle/export.dart' as pc;
 import '../models/comment.dart';
 import 'discussion_post_content.dart';
 
+/// 单个设备会话信息（用于避免单设备高频触发服务端限流）
+class _GatewaySession {
+  final String deviceId;
+  final String installId;
+  Uint8List contentKey;
+  int keyVer;
+  int requestCount = 0;
+  bool throttled = false;
+  Future<bool>? _refreshingKey;
+
+  _GatewaySession({
+    required this.deviceId,
+    required this.installId,
+    required this.contentKey,
+    required this.keyVer,
+  });
+
+  bool isUsable(int maxRequests) => !throttled && requestCount < maxRequests;
+}
+
 /// 番茄小说移动端接口与解密网关 (Fanqie Mobile Gateway)
 /// 参考 Fanqie-novel-Downloader (POf-L) 及移动端协议实现：
 /// - 官方移动端正文读取；不把 Web 试读预览当作完整正文
 /// - 原生实现字节跳动移动端请求签名体系 (x-argus 551 + x-ladon + x-khronos + x-ss-req-ticket)
 /// - 原生实现正文动态 AES 密钥协商 (registerkey) 与全量章节内容解密
+/// - 支持动态匿名设备注册与多设备会话池轮换，防止单设备高频下载被限流返回空响应
 class FanqieMobileGateway {
   static final FanqieMobileGateway _instance = FanqieMobileGateway._internal();
-  factory FanqieMobileGateway({HttpClient? client}) => client == null
+  factory FanqieMobileGateway({
+    HttpClient? client,
+    bool? allowDynamicRegistration,
+    int maxRequestsPerSession = defaultMaxRequestsPerSession,
+  }) => client == null && allowDynamicRegistration == null &&
+          maxRequestsPerSession == defaultMaxRequestsPerSession
       ? _instance
-      : FanqieMobileGateway._internal(client: client);
-  FanqieMobileGateway._internal({HttpClient? client}) : _sharedClient = client;
+      : FanqieMobileGateway._internal(
+          client: client,
+          allowDynamicRegistration: allowDynamicRegistration,
+          maxRequestsPerSession: maxRequestsPerSession,
+        );
+  FanqieMobileGateway._internal({
+    HttpClient? client,
+    bool? allowDynamicRegistration,
+    this.maxRequestsPerSession = defaultMaxRequestsPerSession,
+  }) : _sharedClient = client,
+       _allowDynamicRegistration = allowDynamicRegistration ?? (client == null);
 
   static const String readingBaseUrl = 'https://reading.snssdk.com';
   static const String userAgent = 'com.dragon.read';
+  static const int defaultMaxRequestsPerSession = 75;
+  static const int defaultSessionPoolSize = 3;
 
   // 默认种子设备（与移动端对齐）
   final String _deviceId = '2187355326004404';
   final String _installId = '2187355326270644';
+  final bool _allowDynamicRegistration;
+  final int maxRequestsPerSession;
 
-  Map<String, String> _buildCommonParams({Map<String, String>? extra}) {
+  Map<String, String> _buildCommonParams({
+    Map<String, String>? extra,
+    String? deviceId,
+    String? installId,
+  }) {
     return {
-      'iid': _installId,
-      'device_id': _deviceId,
+      'iid': installId ?? _installId,
+      'device_id': deviceId ?? _deviceId,
       'ac': 'wifi',
       'channel': '43536163a',
       'aid': '1967',
@@ -74,7 +117,7 @@ class FanqieMobileGateway {
     46,
   ]);
 
-  // 当前正文解密密钥
+  // 当前种子设备正文解密密钥
   Uint8List? _contentKey;
   int _keyVer = 0;
   Completer<bool>? _refreshKeyCompleter;
@@ -82,12 +125,238 @@ class FanqieMobileGateway {
   final _forumIds = <String, ({String id, DateTime expires})>{};
   final _forumRequests = <String, Future<String?>>{};
 
+  // 多设备会话池，用于大批量下载分摊请求并规避单设备限流
+  final List<_GatewaySession> _sessionPool = [];
+  int _sessionCursor = 0;
+  Future<_GatewaySession?>? _pendingRegistration;
+  int _activeRegistrations = 0;
+
   HttpClient get _client {
     _sharedClient ??= HttpClient()
       ..maxConnectionsPerHost = 32
       ..idleTimeout = const Duration(seconds: 30)
-      ..connectionTimeout = const Duration(seconds: 8);
+      ..connectionTimeout = const Duration(seconds: 10);
     return _sharedClient!;
+  }
+
+  /// 为批量下载预热多设备会话池，降低单设备触发 100 章限流的概率
+  Future<void> prepareDownloadSessionPool({
+    int desiredSize = defaultSessionPoolSize,
+  }) async {
+    if (!_allowDynamicRegistration) return;
+    _pruneSessions();
+    final target = desiredSize.clamp(1, 5);
+    final needed = target - _sessionPool.length;
+    if (needed <= 0) return;
+
+    final results = await Future.wait(
+      List.generate(needed, (_) => _createDynamicSession()),
+    );
+    for (final session in results) {
+      if (session != null &&
+          !_sessionPool.any((s) => s.deviceId == session.deviceId)) {
+        _sessionPool.add(session);
+      }
+    }
+  }
+
+  void _pruneSessions() {
+    _sessionPool.removeWhere((s) => !s.isUsable(maxRequestsPerSession));
+  }
+
+  Future<_GatewaySession?> _acquireSession({bool preferPool = false}) async {
+    if (!_allowDynamicRegistration) {
+      if (_contentKey == null && !await refreshKey()) return null;
+      return _GatewaySession(
+        deviceId: _deviceId,
+        installId: _installId,
+        contentKey: _contentKey!,
+        keyVer: _keyVer,
+      );
+    }
+
+    _pruneSessions();
+    if (_sessionPool.isNotEmpty) {
+      final session = _sessionPool[_sessionCursor % _sessionPool.length];
+      _sessionCursor = (_sessionCursor + 1) % 0x7fffffff;
+      session.requestCount++;
+      // 当会话接近配额上限时，提前在后台补充新会话实现无感轮换
+      if (session.requestCount >= maxRequestsPerSession) {
+        _sessionPool.remove(session);
+        _scheduleBackgroundSessionReplenish();
+      } else if (preferPool &&
+          _sessionPool.length < defaultSessionPoolSize &&
+          session.requestCount >= maxRequestsPerSession - 15) {
+        _scheduleBackgroundSessionReplenish();
+      }
+      return session;
+    }
+
+    // 会话池为空时，优先动态注册全新匿名设备会话
+    final created = await _registerSingleSessionCoalesced();
+    if (created != null) {
+      created.requestCount++;
+      return created;
+    }
+
+    // 注册通道异常时回退到默认种子设备会话
+    if (_contentKey == null && !await refreshKey()) return null;
+    final fallback = _GatewaySession(
+      deviceId: _deviceId,
+      installId: _installId,
+      contentKey: _contentKey!,
+      keyVer: _keyVer,
+    )..requestCount = 1;
+    return fallback;
+  }
+
+  void _scheduleBackgroundSessionReplenish() {
+    if (!_allowDynamicRegistration || _activeRegistrations >= 2) return;
+    _activeRegistrations++;
+    unawaited(
+      _createDynamicSession()
+          .then((session) {
+            if (session != null &&
+                !_sessionPool.any((s) => s.deviceId == session.deviceId)) {
+              _sessionPool.add(session);
+            }
+          })
+          .catchError((_) {})
+          .whenComplete(() {
+            _activeRegistrations = (_activeRegistrations - 1).clamp(0, 10);
+          }),
+    );
+  }
+
+  Future<_GatewaySession?> _registerSingleSessionCoalesced() async {
+    final existing = _pendingRegistration;
+    if (existing != null) {
+      final session = await existing;
+      if (session != null && session.isUsable(maxRequestsPerSession)) {
+        return session;
+      }
+    }
+    late final Future<_GatewaySession?> future;
+    future = _createDynamicSession()
+        .then((session) {
+          if (session != null &&
+              !_sessionPool.any((s) => s.deviceId == session.deviceId)) {
+            _sessionPool.add(session);
+          }
+          return session;
+        })
+        .whenComplete(() {
+          if (identical(_pendingRegistration, future)) {
+            _pendingRegistration = null;
+          }
+        });
+    _pendingRegistration = future;
+    return future;
+  }
+
+  /// 向官方匿名设备注册接口申请全新 device_id 与 install_id，并完成 AES 密钥协商
+  Future<_GatewaySession?> _createDynamicSession() async {
+    try {
+      final registered = await _registerAnonymousDevice();
+      if (registered == null) return null;
+      final negotiated = await _negotiateKeyForDevice(
+        registered.deviceId,
+        registered.installId,
+      );
+      if (negotiated == null) return null;
+      return _GatewaySession(
+        deviceId: registered.deviceId,
+        installId: registered.installId,
+        contentKey: negotiated.key,
+        keyVer: negotiated.keyVer,
+      );
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('FanqieMobileGateway _createDynamicSession error: $e');
+      }
+      return null;
+    }
+  }
+
+  Future<({String deviceId, String installId})?> _registerAnonymousDevice() async {
+    final rnd = Random();
+    String hex(int len) =>
+        List.generate(len, (_) => rnd.nextInt(16).toRadixString(16)).join();
+    final openudid = hex(16);
+    final clientudid = '${hex(8)}-${hex(4)}-4${hex(3)}-a${hex(3)}-${hex(12)}';
+
+    final payload = {
+      'magic_tag': 'ss_app_log',
+      'header': {
+        'display_name': '番茄免费小说',
+        'update_version_code': 70132,
+        'manifest_version_code': 70132,
+        'aid': 1967,
+        'channel': '43536163a',
+        'appkey': '57bfa27c67e58e7d920028d3',
+        'package': 'com.dragon.read',
+        'app_version': '7.0.1.32',
+        'version_code': 70132,
+        'sdk_version': '2.12.1-rc.17',
+        'os': 'Android',
+        'os_version': '10',
+        'os_api': 29,
+        'device_model': 'P30',
+        'device_brand': 'realme',
+        'device_manufacturer': 'realme',
+        'cpu_abi': 'arm64-v8a',
+        'release_build': 'c9a68b2_20251015',
+        'density_dpi': 480,
+        'display_density': 'xhdpi',
+        'resolution': '2340x1080',
+        'language': 'zh',
+        'timezone': 8,
+        'access': 'wifi',
+        'not_request_sender': 0,
+        'rom': 'RMX1901_11_A.15',
+        'rom_version': 'coloros_v6.0',
+        'openudid': openudid,
+        'clientudid': clientudid,
+        'req_id': clientudid,
+        'region': 'CN',
+        'tz_name': 'Asia/Shanghai',
+        'tz_offset': 28800,
+        'sim_region': 'cn',
+      },
+      '_gen_time': DateTime.now().millisecondsSinceEpoch,
+    };
+
+    final uri = Uri.https('log.snssdk.com', '/service/2/device_register/', {
+      'aid': '1967',
+      'app_name': 'novelapp',
+      'version_code': '70132',
+      'version_name': '7.0.1.32',
+      'device_platform': 'android',
+      'os': 'android',
+    });
+
+    final req = await _client.postUrl(uri).timeout(const Duration(seconds: 10));
+    req.headers.set('User-Agent', userAgent);
+    req.headers.set('Content-Type', 'application/json; charset=utf-8');
+    req.add(utf8.encode(jsonEncode(payload)));
+
+    final res = await req.close().timeout(const Duration(seconds: 10));
+    if (res.statusCode != 200) return null;
+    final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
+    final j = jsonDecode(utf8.decode(respBytes, allowMalformed: true));
+    if (j is! Map) return null;
+
+    final deviceId =
+        j['device_id_str']?.toString() ?? j['device_id']?.toString() ?? '';
+    final installId =
+        j['install_id_str']?.toString() ?? j['install_id']?.toString() ?? '';
+    if (deviceId.isEmpty ||
+        deviceId == '0' ||
+        installId.isEmpty ||
+        installId == '0') {
+      return null;
+    }
+    return (deviceId: deviceId, installId: installId);
   }
 
   /// 获取单章完整正文（突破 200 字锁章限制）
@@ -97,13 +366,17 @@ class FanqieMobileGateway {
   Future<OnlineChapter?> fetchChapterDocument(
     String itemId, {
     int retryCount = 0,
+    bool useSessionPool = false,
   }) async {
     final cleanId = itemId.trim();
     if (cleanId.isEmpty) return null;
 
-    if (_contentKey == null && !await refreshKey()) return null;
+    final session = await _acquireSession(preferPool: useSessionPool);
+    if (session == null) return null;
 
     final queryParams = _buildCommonParams(
+      deviceId: session.deviceId,
+      installId: session.installId,
       extra: {'item_id': cleanId, 'req_type': '1'},
     );
 
@@ -115,17 +388,35 @@ class FanqieMobileGateway {
     final sigHeaders = signRequest(uri.toString());
 
     try {
-      final req = await _client.getUrl(uri).timeout(const Duration(seconds: 8));
+      final req = await _client
+          .getUrl(uri)
+          .timeout(const Duration(seconds: 10));
       req.headers.set('User-Agent', userAgent);
       for (final e in sigHeaders.entries) {
         req.headers.set(e.key, e.value);
       }
 
-      final res = await req.close().timeout(const Duration(seconds: 8));
+      final res = await req.close().timeout(const Duration(seconds: 10));
       if (res.statusCode == 200) {
         final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
         final jsonStr = utf8.decode(respBytes, allowMalformed: true);
         if (jsonStr.isEmpty) {
+          // 服务端返回 HTTP 200 空响应体通常表示该设备触发高频限流，立即淘汰并切换会话
+          if (_allowDynamicRegistration) {
+            session.throttled = true;
+            _sessionPool.remove(session);
+            if (retryCount < 3) {
+              await Future.delayed(
+                Duration(milliseconds: 150 * (retryCount + 1)),
+              );
+              return await fetchChapterDocument(
+                itemId,
+                retryCount: retryCount + 1,
+                useSessionPool: true,
+              );
+            }
+            return null;
+          }
           if (retryCount < 1) {
             await Future.delayed(const Duration(milliseconds: 150));
             return await fetchChapterDocument(
@@ -145,21 +436,26 @@ class FanqieMobileGateway {
 
           // 密钥过期或无效处理
           if (encContent == 'Invalid' ||
-              (respKeyVer != 0 && respKeyVer != _keyVer)) {
+              (respKeyVer != 0 && respKeyVer != session.keyVer)) {
             if (retryCount < 2) {
-              await refreshKey();
+              if (_allowDynamicRegistration && session.deviceId != _deviceId) {
+                await _refreshSessionKey(session);
+              } else {
+                await refreshKey();
+              }
               return await fetchChapterDocument(
                 itemId,
                 retryCount: retryCount + 1,
+                useSessionPool: useSessionPool,
               );
             }
             return null;
           }
 
-          if (encContent.isNotEmpty && _contentKey != null) {
+          if (encContent.isNotEmpty) {
             final plainHtml = _decryptAesCbc(
               encContent,
-              _contentKey!,
+              session.contentKey,
               isCompressed: data['compress_status'] == 1,
             );
             if (plainHtml != null && plainHtml.isNotEmpty) {
@@ -173,9 +469,113 @@ class FanqieMobileGateway {
         debugPrint('FanqieMobileGateway fetchChapter error: $e');
       }
       if (retryCount < 2) {
-        await Future.delayed(Duration(milliseconds: 150 * (retryCount + 1)));
-        return await fetchChapterDocument(itemId, retryCount: retryCount + 1);
+        await Future.delayed(Duration(milliseconds: 200 * (retryCount + 1)));
+        return await fetchChapterDocument(
+          itemId,
+          retryCount: retryCount + 1,
+          useSessionPool: useSessionPool,
+        );
       }
+    }
+    return null;
+  }
+
+  Future<bool> _refreshSessionKey(_GatewaySession session) async {
+    final pending = session._refreshingKey;
+    if (pending != null) return pending;
+    final future = _negotiateKeyForDevice(session.deviceId, session.installId)
+        .then((result) {
+          if (result == null) return false;
+          session.contentKey = result.key;
+          session.keyVer = result.keyVer;
+          return true;
+        })
+        .whenComplete(() {
+          session._refreshingKey = null;
+        });
+    session._refreshingKey = future;
+    return future;
+  }
+
+  Future<({Uint8List key, int keyVer})?> _negotiateKeyForDevice(
+    String deviceId,
+    String installId,
+  ) async {
+    var id = BigInt.parse(deviceId);
+    final idBytes = Uint8List(16);
+    for (int i = 15; i >= 0; i--) {
+      idBytes[i] = (id & BigInt.from(0xFF)).toInt();
+      id >>= 8;
+    }
+    final reversedId = Uint8List.fromList(idBytes.reversed.toList());
+
+    final iv = Uint8List(16);
+    final rnd = Random();
+    for (int i = 0; i < 16; i++) {
+      iv[i] = rnd.nextInt(256);
+    }
+
+    final padded = _pkcs7Pad(reversedId, 16);
+    final encrypted = _aesCbcEncrypt(padded, _sharedKey, iv);
+
+    final content = Uint8List(iv.length + encrypted.length);
+    content.setRange(0, iv.length, iv);
+    content.setRange(iv.length, content.length, encrypted);
+
+    final plainBody = jsonEncode({'content': base64.encode(content)});
+    final gzipped = GZipEncoder().encode(utf8.encode(plainBody));
+
+    final queryParams = _buildCommonParams(
+      deviceId: deviceId,
+      installId: installId,
+    );
+
+    final uri = Uri.https(
+      'reading.snssdk.com',
+      '/reading/crypt/registerkey',
+      queryParams,
+    );
+    final sigHeaders = signRequest(uri.toString(), body: gzipped);
+
+    final req = await _client.postUrl(uri).timeout(const Duration(seconds: 10));
+    req.headers.set('User-Agent', userAgent);
+    req.headers.set('Content-Type', 'application/json; charset=utf-8');
+    req.headers.set('Content-Encoding', 'gzip');
+    for (final e in sigHeaders.entries) {
+      req.headers.set(e.key, e.value);
+    }
+    req.add(gzipped);
+
+    final res = await req.close().timeout(const Duration(seconds: 10));
+    if (res.statusCode != 200) return null;
+    final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
+    final jsonStr = utf8.decode(respBytes, allowMalformed: true);
+    final j = jsonDecode(jsonStr);
+
+    if (j is! Map || j['code'] != 0 || j['data'] is! Map) {
+      return null;
+    }
+    final keyVersion = int.tryParse(j['data']?['keyver']?.toString() ?? '');
+    final encryptedKey = j['data']?['key']?.toString();
+    if (encryptedKey == null || encryptedKey.isEmpty) return null;
+    final keyBuf = base64.decode(encryptedKey);
+    if (keyBuf.length < 32 || (keyBuf.length - 16) % 16 != 0) {
+      return null;
+    }
+    final kIv = Uint8List.sublistView(keyBuf, 0, 16);
+    final kCt = Uint8List.sublistView(keyBuf, 16);
+
+    var decKey = _aesCbcDecrypt(kCt, _sharedKey, kIv);
+    final padVal = decKey.last;
+    if (padVal > 0 &&
+        padVal <= 16 &&
+        decKey
+            .sublist(decKey.length - padVal)
+            .every((b) => b == padVal)) {
+      decKey = Uint8List.sublistView(decKey, 0, decKey.length - padVal);
+    }
+    if (decKey.length == 16 && keyVersion != null && keyVersion > 0) {
+      return (key: decKey, keyVer: keyVersion);
     }
     return null;
   }
@@ -189,87 +589,12 @@ class FanqieMobileGateway {
     _refreshKeyCompleter = completer;
 
     try {
-      var id = BigInt.parse(_deviceId);
-      final idBytes = Uint8List(16);
-      for (int i = 15; i >= 0; i--) {
-        idBytes[i] = (id & BigInt.from(0xFF)).toInt();
-        id >>= 8;
-      }
-      final reversedId = Uint8List.fromList(idBytes.reversed.toList());
-
-      final iv = Uint8List(16);
-      final rnd = Random();
-      for (int i = 0; i < 16; i++) {
-        iv[i] = rnd.nextInt(256);
-      }
-
-      final padded = _pkcs7Pad(reversedId, 16);
-      final encrypted = _aesCbcEncrypt(padded, _sharedKey, iv);
-
-      final content = Uint8List(iv.length + encrypted.length);
-      content.setRange(0, iv.length, iv);
-      content.setRange(iv.length, content.length, encrypted);
-
-      final plainBody = jsonEncode({'content': base64.encode(content)});
-      final gzipped = GZipEncoder().encode(utf8.encode(plainBody));
-
-      final queryParams = _buildCommonParams();
-
-      final uri = Uri.https(
-        'reading.snssdk.com',
-        '/reading/crypt/registerkey',
-        queryParams,
-      );
-      final sigHeaders = signRequest(uri.toString(), body: gzipped);
-
-      final req = await _client
-          .postUrl(uri)
-          .timeout(const Duration(seconds: 10));
-      req.headers.set('User-Agent', userAgent);
-      req.headers.set('Content-Type', 'application/json; charset=utf-8');
-      req.headers.set('Content-Encoding', 'gzip');
-      for (final e in sigHeaders.entries) {
-        req.headers.set(e.key, e.value);
-      }
-      req.add(gzipped);
-
-      final res = await req.close().timeout(const Duration(seconds: 10));
-      if (res.statusCode == 200) {
-        final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
-        final jsonStr = utf8.decode(respBytes, allowMalformed: true);
-        final j = jsonDecode(jsonStr);
-
-        if (j is! Map || j['code'] != 0 || j['data'] is! Map) {
-          completer.complete(false);
-          return false;
-        }
-        final keyVersion = int.tryParse(j['data']?['keyver']?.toString() ?? '');
-        final encryptedKey = j['data']?['key']?.toString();
-        if (encryptedKey != null && encryptedKey.isNotEmpty) {
-          final keyBuf = base64.decode(encryptedKey);
-          if (keyBuf.length < 32 || (keyBuf.length - 16) % 16 != 0) {
-            completer.complete(false);
-            return false;
-          }
-          final kIv = Uint8List.sublistView(keyBuf, 0, 16);
-          final kCt = Uint8List.sublistView(keyBuf, 16);
-
-          var decKey = _aesCbcDecrypt(kCt, _sharedKey, kIv);
-          final padVal = decKey.last;
-          if (padVal > 0 &&
-              padVal <= 16 &&
-              decKey
-                  .sublist(decKey.length - padVal)
-                  .every((b) => b == padVal)) {
-            decKey = Uint8List.sublistView(decKey, 0, decKey.length - padVal);
-          }
-          if (decKey.length == 16 && keyVersion != null && keyVersion > 0) {
-            _contentKey = decKey;
-            _keyVer = keyVersion;
-            completer.complete(true);
-            return true;
-          }
-        }
+      final result = await _negotiateKeyForDevice(_deviceId, _installId);
+      if (result != null) {
+        _contentKey = result.key;
+        _keyVer = result.keyVer;
+        completer.complete(true);
+        return true;
       }
       completer.complete(false);
       return false;

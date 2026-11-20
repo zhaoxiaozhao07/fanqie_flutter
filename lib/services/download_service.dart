@@ -29,6 +29,60 @@ export '../models/download_task.dart';
 typedef ProgressCallback =
     void Function(int current, int total, String message);
 
+/// 已通过本地存在性校验的书籍下载信息
+class VerifiedDownloadInfo {
+  final String format;
+  final String filePath;
+  final String? contentUri;
+  final int fileSize;
+  final DateTime? downloadTime;
+  final Set<String> availableFormats;
+
+  const VerifiedDownloadInfo({
+    required this.format,
+    required this.filePath,
+    this.contentUri,
+    required this.fileSize,
+    this.downloadTime,
+    required this.availableFormats,
+  });
+
+  String get formattedFileSize {
+    if (fileSize >= 1024 * 1024) {
+      return '${(fileSize / (1024 * 1024)).toStringAsFixed(2)} MB';
+    } else if (fileSize >= 1024) {
+      return '${(fileSize / 1024).toStringAsFixed(1)} KB';
+    }
+    return '$fileSize B';
+  }
+}
+
+class _SavedFileResult {
+  final String path;
+  final String? contentUri;
+  final int fileSize;
+  const _SavedFileResult({
+    required this.path,
+    this.contentUri,
+    required this.fileSize,
+  });
+}
+
+/// 顶层 ZIP 编码函数，用于在独立 Isolate 中压缩 EPUB 数据避免阻塞主线程
+List<int> _encodeEpubZipEntries(List<Map<String, Object>> entries) {
+  final archive = Archive();
+  for (final entry in entries) {
+    final name = entry['name'] as String;
+    final bytes = entry['bytes'] as List<int>;
+    // EPUB 规范要求 mimetype 条目不压缩
+    final file = name == 'mimetype'
+        ? ArchiveFile.noCompress(name, bytes.length, bytes)
+        : ArchiveFile(name, bytes.length, bytes);
+    archive.addFile(file);
+  }
+  return ZipEncoder().encode(archive);
+}
+
 /// 下载服务 - 支持后台异步并发下载与直连后端引擎
 class DownloadService extends ChangeNotifier {
   static final DownloadService _instance = DownloadService._internal();
@@ -317,6 +371,186 @@ class DownloadService extends ChangeNotifier {
 
   bool isDownloading(String bookId) {
     return getActiveTask(bookId) != null;
+  }
+
+  /// 检查书籍是否已经下载过，并且确认导出的本地文件依然存在且有效
+  Future<VerifiedDownloadInfo?> checkVerifiedDownload(Book book) async {
+    final candidates = <({
+      String format,
+      String filePath,
+      String? contentUri,
+      int fileSize,
+      DateTime? downloadTime,
+    })>[];
+    final seenPaths = <String>{};
+
+    void addCandidate({
+      required String format,
+      required String filePath,
+      String? contentUri,
+      required int fileSize,
+      DateTime? downloadTime,
+    }) {
+      final key = '${format.toUpperCase()}|$filePath|${contentUri ?? ''}';
+      if (filePath.isEmpty && (contentUri == null || contentUri.isEmpty)) return;
+      if (seenPaths.add(key)) {
+        candidates.add((
+          format: format.toUpperCase(),
+          filePath: filePath,
+          contentUri: contentUri,
+          fileSize: fileSize,
+          downloadTime: downloadTime,
+        ));
+      }
+    }
+
+    // 1. 优先检查持久化下载历史记录
+    final history = await _historyService.getHistoryByBookId(book.bookId);
+    if (history != null) {
+      addCandidate(
+        format: history.format,
+        filePath: history.filePath,
+        contentUri: history.contentUri,
+        fileSize: history.fileSize,
+        downloadTime: history.downloadTime,
+      );
+    }
+
+    // 2. 检查当前任务列表中的已完成任务（支持同书多格式下载检测）
+    for (final task in _tasks) {
+      if (task.book.bookId == book.bookId &&
+          task.status == DownloadTaskStatus.completed &&
+          task.filePath != null &&
+          task.filePath!.isNotEmpty) {
+        addCandidate(
+          format: task.format,
+          filePath: task.filePath!,
+          contentUri: null,
+          fileSize: 0,
+          downloadTime: null,
+        );
+      }
+    }
+
+    if (candidates.isEmpty) return null;
+
+    // 3. 如果历史中记录了某个格式，也附带探测同目录下另一格式是否同时存在（仅当存在同书历史记录时）
+    final safeBase = book.bookName.replaceAll(RegExp(r'[\\/:*?"<>|]'), '');
+    if (safeBase.isNotEmpty && candidates.first.filePath.isNotEmpty) {
+      final firstPath = candidates.first.filePath;
+      final slashIndex = firstPath.lastIndexOf(RegExp(r'[/\\]'));
+      if (slashIndex > 0) {
+        final dirPrefix = firstPath.substring(0, slashIndex);
+        for (final ext in const [('EPUB', 'epub'), ('TXT', 'txt')]) {
+          if (!candidates.any((c) => c.format == ext.$1)) {
+            addCandidate(
+              format: ext.$1,
+              filePath: '$dirPrefix/$safeBase.${ext.$2}',
+              contentUri: null,
+              fileSize: 0,
+              downloadTime: history?.downloadTime,
+            );
+          }
+        }
+      }
+    }
+
+    VerifiedDownloadInfo? primary;
+    final availableFormats = <String>{};
+
+    for (final item in candidates) {
+      final checked = await verifyDownloadedFile(
+        filePath: item.filePath,
+        contentUri: item.contentUri,
+      );
+      if (checked.exists) {
+        availableFormats.add(item.format);
+        primary ??= VerifiedDownloadInfo(
+          format: item.format,
+          filePath: checked.path.isNotEmpty ? checked.path : item.filePath,
+          contentUri: checked.contentUri ?? item.contentUri,
+          fileSize: checked.size > 0 ? checked.size : item.fileSize,
+          downloadTime: item.downloadTime,
+          availableFormats: availableFormats,
+        );
+      }
+    }
+
+    if (primary == null) return null;
+    return VerifiedDownloadInfo(
+      format: primary.format,
+      filePath: primary.filePath,
+      contentUri: primary.contentUri,
+      fileSize: primary.fileSize,
+      downloadTime: primary.downloadTime,
+      availableFormats: Set.unmodifiable(availableFormats),
+    );
+  }
+
+  /// 校验指定路径或 Android MediaStore URI 对应的已下载文件是否真实存在
+  Future<({bool exists, int size, String path, String? contentUri})>
+  verifyDownloadedFile({required String filePath, String? contentUri}) async {
+    if (filePath.isEmpty && (contentUri == null || contentUri.isEmpty)) {
+      return (exists: false, size: 0, path: filePath, contentUri: contentUri);
+    }
+
+    if (Platform.isAndroid) {
+      try {
+        final fileName = _extractFileName(filePath);
+        final res = await platform.invokeMapMethod<String, dynamic>(
+          'checkDownloadedFile',
+          {
+            'filePath': filePath,
+            'contentUri': contentUri ?? '',
+            'fileName': fileName,
+          },
+        );
+        if (res != null) {
+          final exists = res['exists'] == true;
+          final size = res['size'] is int
+              ? res['size'] as int
+              : int.tryParse(res['size']?.toString() ?? '0') ?? 0;
+          final resolvedPath = res['path']?.toString() ?? filePath;
+          final resolvedUri = res['uri']?.toString() ?? contentUri;
+          return (
+            exists: exists,
+            size: size,
+            path: resolvedPath,
+            contentUri: resolvedUri,
+          );
+        }
+      } on MissingPluginException {
+        // 测试环境或旧桥接不支持该方法时回退到本地 File 校验
+      } catch (e) {
+        if (kDebugMode) debugPrint('checkDownloadedFile platform error: $e');
+      }
+    }
+
+    if (filePath.isNotEmpty && !filePath.startsWith('content://')) {
+      try {
+        final file = File(filePath);
+        if (await file.exists()) {
+          final size = await file.length();
+          if (size > 0) {
+            return (
+              exists: true,
+              size: size,
+              path: filePath,
+              contentUri: contentUri,
+            );
+          }
+        }
+      } catch (_) {}
+    }
+
+    return (exists: false, size: 0, path: filePath, contentUri: contentUri);
+  }
+
+  String _extractFileName(String filePath) {
+    if (filePath.isEmpty || filePath.startsWith('content://')) return '';
+    final normalized = filePath.replaceAll('\\', '/');
+    final idx = normalized.lastIndexOf('/');
+    return idx >= 0 ? normalized.substring(idx + 1) : normalized;
   }
 
   /// 启动后台下载任务（非阻塞 UI，下载在后台执行）
@@ -791,8 +1025,9 @@ class DownloadService extends ChangeNotifier {
       }
       await sink.close();
       if (isCancelled?.call() == true) throw const FileExportCancelled();
+      final tempFileSize = await tempFile.exists() ? await tempFile.length() : 0;
 
-      final savedPath = await _saveFileViaPlatform(
+      final saved = await _saveFileViaPlatform(
         tempFile.path,
         safeFileName,
         'text/plain',
@@ -804,14 +1039,16 @@ class DownloadService extends ChangeNotifier {
         await tempFile.delete();
       }
 
-      if (savedPath != null) {
+      if (saved != null) {
         if (!ReaderPlatform.isMacOS && isCancelled?.call() == true) {
           throw const FileExportCancelled();
         }
-        int fileSize = 0;
-        final file = File(savedPath);
-        if (await file.exists()) {
-          fileSize = await file.length();
+        var fileSize = saved.fileSize > 0 ? saved.fileSize : tempFileSize;
+        if (fileSize <= 0) {
+          final file = File(saved.path);
+          if (await file.exists()) {
+            fileSize = await file.length();
+          }
         }
 
         await _historyService.addHistory(
@@ -825,11 +1062,12 @@ class DownloadService extends ChangeNotifier {
             wordNumber: book.wordNumber,
             downloadTime: DateTime.now(),
             format: 'TXT',
-            filePath: savedPath,
+            filePath: saved.path,
+            contentUri: saved.contentUri,
             fileSize: fileSize,
           ),
         );
-        return savedPath;
+        return saved.path;
       }
     } catch (e) {
       if (e is FileExportCancelled) rethrow;
@@ -1028,6 +1266,7 @@ $tocLinks</div>
             continue;
           }
           final file = File('${offlineDir.path}/$asset');
+          if (!await file.exists()) continue;
           final bytes = await file.readAsBytes();
           archive.addFile(ArchiveFile('OEBPS/$asset', bytes.length, bytes));
           final extension = asset.split('.').last;
@@ -1035,6 +1274,9 @@ $tocLinks</div>
           manifestItems.writeln(
             '    <item id="illustration-${imageAssets.length}" href="$asset" media-type="image/$mime"/>',
           );
+        }
+        if (i % 40 == 39) {
+          await Future<void>.delayed(Duration.zero);
         }
         final paragraphs = epubChapterContent(content, title, images);
 
@@ -1114,7 +1356,12 @@ $navPoints  </navMap>
         ),
       );
 
-      final zipData = ZipEncoder().encode(archive);
+      // 在独立 Isolate 中压缩，避免 EPUB 打包阶段阻塞 UI 线程
+      final zipEntries = <Map<String, Object>>[
+        for (final file in archive.files)
+          {'name': file.name, 'bytes': file.content as List<int>},
+      ];
+      final List<int> zipData = await compute(_encodeEpubZipEntries, zipEntries);
 
       Directory tempDir;
       try {
@@ -1126,8 +1373,9 @@ $navPoints  </navMap>
       final tempFile = File('${staging.path}/$safeFileName');
       await tempFile.writeAsBytes(zipData);
       if (isCancelled?.call() == true) throw const FileExportCancelled();
+      final tempFileSize = zipData.length;
 
-      final savedPath = await _saveFileViaPlatform(
+      final saved = await _saveFileViaPlatform(
         tempFile.path,
         safeFileName,
         'application/epub+zip',
@@ -1139,14 +1387,16 @@ $navPoints  </navMap>
         await tempFile.delete();
       }
 
-      if (savedPath != null) {
+      if (saved != null) {
         if (!ReaderPlatform.isMacOS && isCancelled?.call() == true) {
           throw const FileExportCancelled();
         }
-        final file = File(savedPath);
-        int fileSize = 0;
-        if (await file.exists()) {
-          fileSize = await file.length();
+        var fileSize = saved.fileSize > 0 ? saved.fileSize : tempFileSize;
+        if (fileSize <= 0) {
+          final file = File(saved.path);
+          if (await file.exists()) {
+            fileSize = await file.length();
+          }
         }
 
         await _historyService.addHistory(
@@ -1160,11 +1410,12 @@ $navPoints  </navMap>
             wordNumber: book.wordNumber,
             downloadTime: DateTime.now(),
             format: 'EPUB',
-            filePath: savedPath,
+            filePath: saved.path,
+            contentUri: saved.contentUri,
             fileSize: fileSize,
           ),
         );
-        return savedPath;
+        return saved.path;
       }
     } catch (e) {
       if (e is FileExportCancelled) rethrow;
@@ -1178,7 +1429,7 @@ $navPoints  </navMap>
   }
 
   /// 通过平台通道将临时文件保存到 Android 的 Downloads/fanqie，非 Android 环境保存到文档目录
-  Future<String?> _saveFileViaPlatform(
+  Future<_SavedFileResult?> _saveFileViaPlatform(
     String tempFilePath,
     String safeFileName,
     String mimeType, {
@@ -1199,16 +1450,50 @@ $navPoints  </navMap>
       if (result.status == FileExportStatus.failed) {
         throw FileSystemException(result.error ?? '导出保存失败');
       }
-      return result.path;
+      final path = result.path;
+      return path == null ? null : _SavedFileResult(path: path, fileSize: 0);
     } else if (Platform.isAndroid) {
       try {
-        final bool success = await platform.invokeMethod('saveToDownloads', {
-          'filePath': tempFilePath,
-          'fileName': safeFileName,
-          'mimeType': mimeType,
-        });
-        if (success) {
-          return '/storage/emulated/0/Download/fanqie/$safeFileName';
+        final res = await platform.invokeMapMethod<String, dynamic>(
+          'saveToDownloadsDetailed',
+          {
+            'filePath': tempFilePath,
+            'fileName': safeFileName,
+            'mimeType': mimeType,
+          },
+        );
+        if (res != null && res['saved'] == true) {
+          final actualName = res['fileName']?.toString() ?? safeFileName;
+          final size = res['size'] is int
+              ? res['size'] as int
+              : int.tryParse(res['size']?.toString() ?? '0') ?? 0;
+          return _SavedFileResult(
+            path:
+                res['path']?.toString() ??
+                '/storage/emulated/0/Download/fanqie/$actualName',
+            contentUri: res['uri']?.toString(),
+            fileSize: size,
+          );
+        }
+        if (res != null && kDebugMode) {
+          debugPrint('saveToDownloadsDetailed failed: ${res['error']}');
+        }
+      } on MissingPluginException {
+        // 旧原生桥接回退到布尔返回的保存接口
+        try {
+          final bool success = await platform.invokeMethod('saveToDownloads', {
+            'filePath': tempFilePath,
+            'fileName': safeFileName,
+            'mimeType': mimeType,
+          });
+          if (success) {
+            return _SavedFileResult(
+              path: '/storage/emulated/0/Download/fanqie/$safeFileName',
+              fileSize: 0,
+            );
+          }
+        } catch (e) {
+          if (kDebugMode) debugPrint('saveToDownloads platform error: $e');
         }
       } catch (e) {
         if (kDebugMode) debugPrint('saveToDownloads platform error: $e');
@@ -1223,7 +1508,7 @@ $navPoints  </navMap>
         final target = File('${saveDir.path}/$safeFileName');
         final src = File(tempFilePath);
         await src.copy(target.path);
-        return target.path;
+        return _SavedFileResult(path: target.path, fileSize: 0);
       } catch (e) {
         if (kDebugMode) debugPrint('Non-android file save error: $e');
       }
@@ -1231,9 +1516,31 @@ $navPoints  </navMap>
     return null;
   }
 
-  /// 请求存储权限
+  /// 获取 Android SDK 版本号，用于在 Android 10+ 跳过已废弃的外部存储权限申请
+  Future<int?> _getAndroidSdkInt() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final sdk = await platform.invokeMethod<int>('getAndroidSdkInt');
+      if (sdk != null && sdk > 0) return sdk;
+    } catch (_) {}
+    try {
+      final caps = await platform.invokeMapMethod<String, dynamic>(
+        'getReaderCapabilities',
+      );
+      final raw = caps?['sdk'];
+      if (raw is int && raw > 0) return raw;
+    } catch (_) {}
+    return null;
+  }
+
+  /// 请求存储权限（Android 10+ 通过 MediaStore.Downloads 保存文件，无需任何存储权限）
   Future<bool> _requestStoragePermission() async {
     if (!Platform.isAndroid) return true;
+
+    final sdkInt = await _getAndroidSdkInt();
+    if (sdkInt != null && sdkInt >= 29) {
+      return true;
+    }
 
     var status = await Permission.storage.request();
     if (status.isGranted) return true;

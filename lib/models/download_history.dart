@@ -12,6 +12,7 @@ class DownloadHistory {
   final DateTime downloadTime;
   final String format; // "TXT" / "EPUB"
   final String filePath;
+  final String? contentUri; // Android MediaStore URI（分区存储下用于精确校验文件存在性）
   final int fileSize; // bytes
 
   DownloadHistory({
@@ -25,6 +26,7 @@ class DownloadHistory {
     required this.downloadTime,
     required this.format,
     required this.filePath,
+    this.contentUri,
     required this.fileSize,
   });
 
@@ -45,6 +47,7 @@ class DownloadHistory {
           DateTime.now(),
       format: json['format']?.toString() ?? 'TXT',
       filePath: json['file_path']?.toString() ?? '',
+      contentUri: json['content_uri']?.toString(),
       fileSize: json['file_size'] is int
           ? json['file_size']
           : int.tryParse(json['file_size']?.toString() ?? '0') ?? 0,
@@ -64,6 +67,8 @@ class DownloadHistory {
       'download_time': downloadTime.toIso8601String(),
       'format': format,
       'file_path': filePath,
+      if (contentUri != null && contentUri!.isNotEmpty)
+        'content_uri': contentUri,
       'file_size': fileSize,
     };
   }
@@ -112,6 +117,7 @@ class DownloadHistory {
       downloadTime: downloadTime,
       format: format,
       filePath: filePath,
+      contentUri: contentUri,
       fileSize: fileSize,
     );
   }
