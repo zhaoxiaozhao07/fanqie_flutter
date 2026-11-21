@@ -22,21 +22,44 @@ class ReaderTheme {
     if (background == null && text == null) return this;
     final bg = background == null ? backgroundColor : Color(background);
     final fg = text == null ? textColor : Color(text);
+    // Reduce the blend when a valid body pair has little contrast to spare.
+    var highlight = bg;
+    for (var step = 10; step >= 0; step--) {
+      final candidate = Color.lerp(bg, fg, step / 100)!;
+      if (_contrast(fg, candidate) >= 4.5) {
+        highlight = candidate;
+        break;
+      }
+    }
+    var secondary = fg;
+    for (var step = 28; step >= 0; step--) {
+      final candidate = Color.lerp(fg, bg, step / 100)!;
+      if (_contrast(candidate, bg) >= 4.5 &&
+          _contrast(candidate, highlight) >= 4.5) {
+        secondary = candidate;
+        break;
+      }
+    }
     return ReaderTheme(
       name: '自定义',
       backgroundColor: bg,
       textColor: fg,
-      secondaryColor: Color.lerp(fg, bg, .28)!,
-      highlightColor: Color.lerp(bg, fg, .10)!,
+      secondaryColor: secondary,
+      highlightColor: highlight,
       systemBrightness: bg.computeLuminance() < .2
           ? Brightness.dark
           : Brightness.light,
     );
   }
 
-  double get contrastRatio {
-    final a = backgroundColor.computeLuminance();
-    final b = textColor.computeLuminance();
+  double get contrastRatio => _contrast(backgroundColor, textColor);
+  double get secondaryContrastRatio =>
+      _contrast(backgroundColor, secondaryColor);
+  double get highlightContrastRatio => _contrast(highlightColor, textColor);
+
+  static double _contrast(Color first, Color second) {
+    final a = first.computeLuminance();
+    final b = second.computeLuminance();
     return a > b ? (a + .05) / (b + .05) : (b + .05) / (a + .05);
   }
 
@@ -110,6 +133,38 @@ class ReaderTheme {
       textColor: Color(0xFFC7C7CC),
       secondaryColor: Color(0xFF96969B),
       highlightColor: Color(0xFF222224),
+      systemBrightness: Brightness.dark,
+    ),
+    ReaderTheme(
+      name: '暖灰纸',
+      backgroundColor: Color(0xFFECE8E0),
+      textColor: Color(0xFF34312D),
+      secondaryColor: Color(0xFF625C53),
+      highlightColor: Color(0xFFDDD7CB),
+      systemBrightness: Brightness.light,
+    ),
+    ReaderTheme(
+      name: '雾蓝',
+      backgroundColor: Color(0xFFE3EBEF),
+      textColor: Color(0xFF293840),
+      secondaryColor: Color(0xFF50616C),
+      highlightColor: Color(0xFFCEDCE3),
+      systemBrightness: Brightness.light,
+    ),
+    ReaderTheme(
+      name: '灰绿',
+      backgroundColor: Color(0xFFE4E8E0),
+      textColor: Color(0xFF30382F),
+      secondaryColor: Color(0xFF566052),
+      highlightColor: Color(0xFFD2DACD),
+      systemBrightness: Brightness.light,
+    ),
+    ReaderTheme(
+      name: '暖暗',
+      backgroundColor: Color(0xFF25221F),
+      textColor: Color(0xFFCCC2B3),
+      secondaryColor: Color(0xFFA89F92),
+      highlightColor: Color(0xFF38332D),
       systemBrightness: Brightness.dark,
     ),
   ];

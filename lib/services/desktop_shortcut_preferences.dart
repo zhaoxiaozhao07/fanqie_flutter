@@ -221,12 +221,27 @@ class DesktopShortcutPreferences extends ChangeNotifier {
       if (entry.value.activator.accepts(event, HardwareKeyboard.instance)) {
         return entry.key;
       }
+      if (ReaderPlatform.isWindows &&
+          !overridden(entry.key) &&
+          entry.value.meta &&
+          !entry.value.control) {
+        final ctrlActivator = SingleActivator(
+          LogicalKeyboardKey(entry.value.key),
+          control: true,
+          alt: entry.value.alt,
+          shift: entry.value.shift,
+          includeRepeats: false,
+        );
+        if (ctrlActivator.accepts(event, HardwareKeyboard.instance)) {
+          return entry.key;
+        }
+      }
     }
     return null;
   }
 
   Future<void> _updateNativeMenu() async {
-    if (!ReaderPlatform.isMacOS) return;
+    if (!ReaderPlatform.isDesktop) return;
     try {
       await ReaderPlatform.invoke('setReaderShortcuts', {
         'bindings': {

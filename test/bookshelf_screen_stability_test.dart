@@ -121,20 +121,25 @@ void main() {
   ) async {
     final key = GlobalKey<BookshelfScreenState>();
     await mount(tester, key);
-    final row = find.byKey(const ValueKey('local_b13'));
+    // Several additions can share a timestamp, so the ID tie-breaker does not
+    // guarantee b13/b14 are mounted. Reorder the actual visible second row.
+    final firstId = shelf.books.first.bookId;
+    final targetId = shelf.books[1].bookId;
+    final row = find.byKey(ValueKey(targetId));
     final image = find.descendant(
       of: row,
       matching: find.byType(BookCoverWidget),
     );
+    expect(image, findsOneWidget);
     final element = tester.element(image);
     await tester.runAsync(
-      () => shelf.updateReadingProgress('local_b13', 2, '新进度'),
+      () => shelf.updateReadingProgress(targetId, 2, '新进度'),
     );
     await tester.pumpAndSettle();
     expect(tester.element(image), same(element));
     expect(
       tester.getTopLeft(row).dy,
-      lessThan(tester.getTopLeft(find.byKey(const ValueKey('local_b14'))).dy),
+      lessThan(tester.getTopLeft(find.byKey(ValueKey(firstId))).dy),
     );
     for (var i = 0; i < 4; i++) {
       await key.currentState!.refresh();

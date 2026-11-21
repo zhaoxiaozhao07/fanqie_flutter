@@ -518,42 +518,44 @@ void main() {
     },
   );
 
-  test(
-    'cancelled export can retry and a committed native file wins over pause',
-    () async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(
-            const MethodChannel('com.fanqie.fanqie_flutter/download'),
-            (_) async => true,
-          );
-      final committed = Completer<String?>();
-      var exports = 0;
-      final queue = service(
-        _QueueApi(),
-        export: (_) async {
-          exports++;
-          if (exports == 1) throw const FileExportCancelled();
-          return committed.future;
-        },
-      );
-      await queue.initialize();
-      final task = queue.startBackgroundDownload(
-        book: book('a'),
-        chapters: chapters(),
-        format: 'TXT',
-      );
-      await queue.waitForIdle();
-      expect(task.status, DownloadTaskStatus.cancelled);
-      await queue.resumeDownload(task.id);
-      await until(() => exports == 2);
-      queue.pauseDownload(task.id);
-      committed.complete('${root.path}/committed.txt');
-      await queue.waitForIdle();
-      expect(task.status, DownloadTaskStatus.completed);
-      expect(task.filePath, endsWith('committed.txt'));
-    },
-  );
+  for (final platform in [TargetPlatform.macOS, TargetPlatform.windows]) {
+    test(
+      'cancelled export can retry and a committed native file wins over pause on $platform',
+      () async {
+        debugDefaultTargetPlatformOverride = platform;
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+            .setMockMethodCallHandler(
+              const MethodChannel('com.fanqie.fanqie_flutter/download'),
+              (_) async => true,
+            );
+        final committed = Completer<String?>();
+        var exports = 0;
+        final queue = service(
+          _QueueApi(),
+          export: (_) async {
+            exports++;
+            if (exports == 1) throw const FileExportCancelled();
+            return committed.future;
+          },
+        );
+        await queue.initialize();
+        final task = queue.startBackgroundDownload(
+          book: book('a'),
+          chapters: chapters(),
+          format: 'TXT',
+        );
+        await queue.waitForIdle();
+        expect(task.status, DownloadTaskStatus.cancelled);
+        await queue.resumeDownload(task.id);
+        await until(() => exports == 2);
+        queue.pauseDownload(task.id);
+        committed.complete('${root.path}/committed.txt');
+        await queue.waitForIdle();
+        expect(task.status, DownloadTaskStatus.completed);
+        expect(task.filePath, endsWith('committed.txt'));
+      },
+    );
+  }
 
   test(
     'real backend resume fetches only missing chapters, then exports offline',

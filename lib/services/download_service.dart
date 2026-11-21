@@ -15,6 +15,7 @@ import 'epub_chapter_content.dart';
 import 'cover_cache_service.dart';
 import 'book_image_fetcher.dart';
 import 'app_storage.dart';
+import 'desktop_download_output.dart';
 import 'file_export_service.dart';
 import 'reader_platform.dart';
 import 'download_queue_store.dart';
@@ -28,6 +29,60 @@ export '../models/download_task.dart';
 /// 下载进度回调
 typedef ProgressCallback =
     void Function(int current, int total, String message);
+
+// Only transferable bytes enter the worker isolate. EPUB's mimetype must be
+// the first ZIP entry and must not be compressed.
+List<int> _encodeEpub(List<Map<String, Object>> entries) {
+  final archive = Archive();
+  for (final entry in entries) {
+    final name = entry['name'] as String;
+    final bytes = entry['bytes'] as List<int>;
+    archive.addFile(
+      name == 'mimetype'
+          ? ArchiveFile.noCompress(name, bytes.length, bytes)
+          : ArchiveFile(name, bytes.length, bytes),
+    );
+  }
+  return ZipEncoder().encode(archive);
+}
+
+class VerifiedDownloadInfo {
+  final String format;
+  final String filePath;
+  final String? contentUri;
+  final int fileSize;
+  final DateTime? downloadTime;
+  final Set<String> availableFormats;
+
+  const VerifiedDownloadInfo({
+    required this.format,
+    required this.filePath,
+    this.contentUri,
+    required this.fileSize,
+    this.downloadTime,
+    required this.availableFormats,
+  });
+
+  String get formattedFileSize {
+    if (fileSize >= 1024 * 1024) {
+      return '${(fileSize / (1024 * 1024)).toStringAsFixed(2)} MB';
+    } else if (fileSize >= 1024) {
+      return '${(fileSize / 1024).toStringAsFixed(1)} KB';
+    }
+    return '$fileSize B';
+  }
+}
+
+class _SavedFileResult {
+  final String path;
+  final String? contentUri;
+  final int fileSize;
+  const _SavedFileResult({
+    required this.path,
+    this.contentUri,
+    required this.fileSize,
+  });
+}
 
 /// 下载服务 - 支持后台异步并发下载与直连后端引擎
 class DownloadService extends ChangeNotifier {
@@ -90,7 +145,7 @@ class DownloadService extends ChangeNotifier {
   bool _persistenceBlocked = false;
   int _sequence = 0;
   String? queueError;
-  bool get _persistent => _forcePersistence || ReaderPlatform.isMacOS;
+  bool get _persistent => _forcePersistence || ReaderPlatform.isDesktop;
   List<DownloadTask> get tasks => List.unmodifiable(_tasks);
 
   List<DownloadTask> get activeTasks =>
@@ -319,6 +374,164 @@ class DownloadService extends ChangeNotifier {
     return getActiveTask(bookId) != null;
   }
 
+  /// 检查书籍是否已经下载过，并且确认导出的本地文件依然存在且有效
+  Future<VerifiedDownloadInfo?> checkVerifiedDownload(Book book) async {
+    final candidates =
+        <
+          ({
+            String format,
+            String filePath,
+            String? contentUri,
+            int fileSize,
+            DateTime? downloadTime,
+          })
+        >[];
+    final seenPaths = <String>{};
+
+    void addCandidate({
+      required String format,
+      required String filePath,
+      String? contentUri,
+      required int fileSize,
+      DateTime? downloadTime,
+    }) {
+      final key =
+          '${format.toUpperCase()}|${filePath.isEmpty ? contentUri : filePath}';
+      if (filePath.isEmpty && (contentUri == null || contentUri.isEmpty)) {
+        return;
+      }
+      if (seenPaths.add(key)) {
+        candidates.add((
+          format: format.toUpperCase(),
+          filePath: filePath,
+          contentUri: contentUri,
+          fileSize: fileSize,
+          downloadTime: downloadTime,
+        ));
+      }
+    }
+
+    // 1. 优先检查持久化下载历史记录
+    final history = await _historyService.getHistoryByBookId(book.bookId);
+    if (history != null) {
+      addCandidate(
+        format: history.format,
+        filePath: history.filePath,
+        contentUri: history.contentUri,
+        fileSize: history.fileSize,
+        downloadTime: history.downloadTime,
+      );
+    }
+
+    // 2. 检查当前任务列表中的已完成任务（支持同书多格式下载检测）
+    for (final task in _tasks) {
+      if (task.book.bookId == book.bookId &&
+          task.status == DownloadTaskStatus.completed &&
+          task.filePath != null &&
+          task.filePath!.isNotEmpty) {
+        addCandidate(
+          format: task.format,
+          filePath: task.filePath!,
+          contentUri: null,
+          fileSize: 0,
+          downloadTime: null,
+        );
+      }
+    }
+
+    if (candidates.isEmpty) return null;
+
+    VerifiedDownloadInfo? primary;
+    final availableFormats = <String>{};
+
+    for (final item in candidates) {
+      final checked = await verifyDownloadedFile(
+        filePath: item.filePath,
+        contentUri: item.contentUri,
+      );
+      if (checked.exists) {
+        availableFormats.add(item.format);
+        primary ??= VerifiedDownloadInfo(
+          format: item.format,
+          filePath: checked.path.isNotEmpty ? checked.path : item.filePath,
+          contentUri: checked.contentUri ?? item.contentUri,
+          fileSize: checked.size > 0 ? checked.size : item.fileSize,
+          downloadTime: item.downloadTime,
+          availableFormats: availableFormats,
+        );
+      }
+    }
+
+    if (primary == null) return null;
+    return VerifiedDownloadInfo(
+      format: primary.format,
+      filePath: primary.filePath,
+      contentUri: primary.contentUri,
+      fileSize: primary.fileSize,
+      downloadTime: primary.downloadTime,
+      availableFormats: Set.unmodifiable(availableFormats),
+    );
+  }
+
+  /// 校验指定路径或 Android MediaStore URI 对应的已下载文件是否真实存在
+  Future<({bool exists, int size, String path, String? contentUri})>
+  verifyDownloadedFile({required String filePath, String? contentUri}) async {
+    if (filePath.isEmpty && (contentUri == null || contentUri.isEmpty)) {
+      return (exists: false, size: 0, path: filePath, contentUri: contentUri);
+    }
+
+    if (defaultTargetPlatform == TargetPlatform.android) {
+      try {
+        final res = await platform.invokeMapMethod<String, dynamic>(
+          'checkDownloadedFile',
+          {'filePath': filePath, 'contentUri': contentUri ?? ''},
+        );
+        if (res != null) {
+          final exists = res['exists'] == true;
+          final size = res['size'] is int
+              ? res['size'] as int
+              : int.tryParse(res['size']?.toString() ?? '0') ?? 0;
+          final resolvedPath = res['path']?.toString() ?? filePath;
+          final resolvedUri = res['uri']?.toString() ?? contentUri;
+          return (
+            exists: exists && size > 0,
+            size: size,
+            path: resolvedPath,
+            contentUri: resolvedUri,
+          );
+        }
+      } on MissingPluginException {
+        // A path-only record may use local verification below.
+      } catch (e) {
+        if (kDebugMode) debugPrint('checkDownloadedFile platform error: $e');
+      }
+    }
+
+    if (contentUri?.isNotEmpty == true || filePath.startsWith('content://')) {
+      // Never validate a reused display path on behalf of an unverified URI.
+      return (exists: false, size: 0, path: filePath, contentUri: contentUri);
+    }
+
+    if (filePath.isNotEmpty && !filePath.startsWith('content://')) {
+      try {
+        final file = File(filePath);
+        if (await file.exists()) {
+          final size = await file.length();
+          if (size > 0) {
+            return (
+              exists: true,
+              size: size,
+              path: filePath,
+              contentUri: contentUri,
+            );
+          }
+        }
+      } catch (_) {}
+    }
+
+    return (exists: false, size: 0, path: filePath, contentUri: contentUri);
+  }
+
   /// 启动后台下载任务（非阻塞 UI，下载在后台执行）
   DownloadTask startBackgroundDownload({
     required Book book,
@@ -403,7 +616,7 @@ class DownloadService extends ChangeNotifier {
         : DownloadTaskStatus.cancelled;
     task.message = paused ? '已暂停，已下载章节会保留' : '已取消，已下载章节仍保留';
     task.nextRetryAt = null;
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       unawaited(
         ReaderPlatform.invoke('cancelExport', {
           'id': task.id,
@@ -603,7 +816,7 @@ class DownloadService extends ChangeNotifier {
 
       // A saved native result is authoritative: cancellation after the atomic
       // commit cannot turn an existing exported file into a cancelled task.
-      if (task.isCancelled && !(ReaderPlatform.isMacOS && filePath != null)) {
+      if (task.isCancelled && !(ReaderPlatform.isDesktop && filePath != null)) {
         if (task.status != DownloadTaskStatus.paused) {
           task.status = DownloadTaskStatus.cancelled;
           task.message = '导出已取消，已下载正文仍保留';
@@ -792,7 +1005,7 @@ class DownloadService extends ChangeNotifier {
       await sink.close();
       if (isCancelled?.call() == true) throw const FileExportCancelled();
 
-      final savedPath = await _saveFileViaPlatform(
+      final saved = await _saveFileViaPlatform(
         tempFile.path,
         safeFileName,
         'text/plain',
@@ -804,12 +1017,12 @@ class DownloadService extends ChangeNotifier {
         await tempFile.delete();
       }
 
-      if (savedPath != null) {
-        if (!ReaderPlatform.isMacOS && isCancelled?.call() == true) {
+      if (saved != null) {
+        if (!ReaderPlatform.isDesktop && isCancelled?.call() == true) {
           throw const FileExportCancelled();
         }
-        int fileSize = 0;
-        final file = File(savedPath);
+        int fileSize = saved.fileSize;
+        final file = File(saved.path);
         if (await file.exists()) {
           fileSize = await file.length();
         }
@@ -825,11 +1038,12 @@ class DownloadService extends ChangeNotifier {
             wordNumber: book.wordNumber,
             downloadTime: DateTime.now(),
             format: 'TXT',
-            filePath: savedPath,
+            filePath: saved.path,
+            contentUri: saved.contentUri,
             fileSize: fileSize,
           ),
         );
-        return savedPath;
+        return saved.path;
       }
     } catch (e) {
       if (e is FileExportCancelled) rethrow;
@@ -1024,11 +1238,19 @@ $tocLinks</div>
         );
         for (final image in images) {
           final asset = image.asset;
-          if (asset == null || image.error != null || !imageAssets.add(asset)) {
-            continue;
+          if (asset == null || image.error != null) {
+            throw const FormatException('插图未完整下载，未生成不完整 EPUB');
           }
+          if (!imageAssets.add(asset)) continue;
           final file = File('${offlineDir.path}/$asset');
+          if (await FileSystemEntity.isLink(file.parent.path) ||
+              await FileSystemEntity.type(file.path, followLinks: false) !=
+                  FileSystemEntityType.file ||
+              await file.length() > BookImageFetcher.maxBytes) {
+            throw const FileSystemException('已下载插图文件缺失或无效');
+          }
           final bytes = await file.readAsBytes();
+          await BookImageFetcher.validate(bytes);
           archive.addFile(ArchiveFile('OEBPS/$asset', bytes.length, bytes));
           final extension = asset.split('.').last;
           final mime = extension == 'jpg' ? 'jpeg' : extension;
@@ -1057,6 +1279,7 @@ $paragraphs
         navPoints.writeln(
           _generateNavPoint(chapterId, title, i + 3, chapterFile),
         );
+        if (i % 40 == 39) await Future<void>.delayed(Duration.zero);
       }
 
       final coverMeta = hasCoverImage
@@ -1114,7 +1337,10 @@ $navPoints  </navMap>
         ),
       );
 
-      final zipData = ZipEncoder().encode(archive);
+      final zipData = await compute(_encodeEpub, [
+        for (final file in archive.files)
+          <String, Object>{'name': file.name, 'bytes': file.content},
+      ]);
 
       Directory tempDir;
       try {
@@ -1127,7 +1353,7 @@ $navPoints  </navMap>
       await tempFile.writeAsBytes(zipData);
       if (isCancelled?.call() == true) throw const FileExportCancelled();
 
-      final savedPath = await _saveFileViaPlatform(
+      final saved = await _saveFileViaPlatform(
         tempFile.path,
         safeFileName,
         'application/epub+zip',
@@ -1139,12 +1365,12 @@ $navPoints  </navMap>
         await tempFile.delete();
       }
 
-      if (savedPath != null) {
-        if (!ReaderPlatform.isMacOS && isCancelled?.call() == true) {
+      if (saved != null) {
+        if (!ReaderPlatform.isDesktop && isCancelled?.call() == true) {
           throw const FileExportCancelled();
         }
-        final file = File(savedPath);
-        int fileSize = 0;
+        final file = File(saved.path);
+        int fileSize = saved.fileSize;
         if (await file.exists()) {
           fileSize = await file.length();
         }
@@ -1160,11 +1386,12 @@ $navPoints  </navMap>
             wordNumber: book.wordNumber,
             downloadTime: DateTime.now(),
             format: 'EPUB',
-            filePath: savedPath,
+            filePath: saved.path,
+            contentUri: saved.contentUri,
             fileSize: fileSize,
           ),
         );
-        return savedPath;
+        return saved.path;
       }
     } catch (e) {
       if (e is FileExportCancelled) rethrow;
@@ -1178,14 +1405,37 @@ $navPoints  </navMap>
   }
 
   /// 通过平台通道将临时文件保存到 Android 的 Downloads/fanqie，非 Android 环境保存到文档目录
-  Future<String?> _saveFileViaPlatform(
+  Future<_SavedFileResult?> _saveFileViaPlatform(
     String tempFilePath,
     String safeFileName,
     String mimeType, {
     String? requestId,
     bool Function()? isCancelled,
   }) async {
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isWindows) {
+      // Downloads never pop a panel at the end of a task; they commit into the
+      // configured output directory with automatic name numbering.
+      final result = await DesktopDownloadOutput.commit(
+        File(tempFilePath),
+        safeFileName,
+        requestId: requestId,
+        isCancelled: isCancelled,
+      );
+      if (result.status == FileExportStatus.cancelled) {
+        throw const FileExportCancelled();
+      }
+      if (result.status == FileExportStatus.failed) {
+        throw FileSystemException(result.error ?? '导出保存失败');
+      }
+      final path = result.path;
+      return path == null
+          ? null
+          : _SavedFileResult(
+              path: path,
+              fileSize: await File(tempFilePath).length(),
+            );
+    }
+    if (ReaderPlatform.isDesktop) {
       final result = await FileExportService().save(
         File(tempFilePath),
         name: safeFileName,
@@ -1199,20 +1449,34 @@ $navPoints  </navMap>
       if (result.status == FileExportStatus.failed) {
         throw FileSystemException(result.error ?? '导出保存失败');
       }
-      return result.path;
-    } else if (Platform.isAndroid) {
-      try {
-        final bool success = await platform.invokeMethod('saveToDownloads', {
+      final path = result.path;
+      return path == null
+          ? null
+          : _SavedFileResult(
+              path: path,
+              fileSize: await File(tempFilePath).length(),
+            );
+    } else if (defaultTargetPlatform == TargetPlatform.android) {
+      final res = await platform.invokeMapMethod<String, dynamic>(
+        'saveToDownloadsDetailed',
+        {
           'filePath': tempFilePath,
           'fileName': safeFileName,
           'mimeType': mimeType,
-        });
-        if (success) {
-          return '/storage/emulated/0/Download/fanqie/$safeFileName';
-        }
-      } catch (e) {
-        if (kDebugMode) debugPrint('saveToDownloads platform error: $e');
+        },
+      );
+      if (res == null || res['saved'] != true) {
+        throw FileSystemException(
+          res?['error']?.toString() ?? 'Android 导出未获确认，请更新原生模块',
+        );
       }
+      final uri = res['uri']?.toString();
+      final path = res['path']?.toString() ?? uri ?? '';
+      final size = int.tryParse(res['size']?.toString() ?? '') ?? 0;
+      if (path.isEmpty || size <= 0) {
+        throw const FileSystemException('Android 未返回有效的已保存位置与大小');
+      }
+      return _SavedFileResult(path: path, contentUri: uri, fileSize: size);
     } else {
       try {
         final docDir = await AppStorage.documents();
@@ -1223,7 +1487,10 @@ $navPoints  </navMap>
         final target = File('${saveDir.path}/$safeFileName');
         final src = File(tempFilePath);
         await src.copy(target.path);
-        return target.path;
+        return _SavedFileResult(
+          path: target.path,
+          fileSize: await target.length(),
+        );
       } catch (e) {
         if (kDebugMode) debugPrint('Non-android file save error: $e');
       }

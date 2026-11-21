@@ -58,7 +58,7 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
     final screenHeight = MediaQuery.of(context).size.height;
 
     return Container(
-      height: ReaderPlatform.isMacOS ? null : screenHeight * 0.75,
+      height: ReaderPlatform.isDesktop ? null : screenHeight * 0.75,
       decoration: const BoxDecoration(
         color: Colors.white,
         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
@@ -141,7 +141,7 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
       padding: const EdgeInsets.fromLTRB(20, 10, 12, 12),
       child: Column(
         children: [
-          if (!ReaderPlatform.isMacOS)
+          if (!ReaderPlatform.isDesktop)
             Center(
               child: Container(
                 width: 38,
@@ -181,7 +181,7 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
               ),
             ],
           ),
-          if (ReaderPlatform.isMacOS)
+          if (ReaderPlatform.isDesktop)
             Wrap(
               spacing: 8,
               crossAxisAlignment: WrapCrossAlignment.center,

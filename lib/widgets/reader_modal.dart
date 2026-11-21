@@ -38,7 +38,7 @@ Future<T?> showReaderModal<T>({
   double heightFactor = .85,
   double desktopWidth = 640,
 }) {
-  if (ReaderPlatform.isMacOS) {
+  if (ReaderPlatform.isDesktop) {
     return showDialog<T>(
       context: context,
       barrierColor: Colors.black.withValues(alpha: .12),

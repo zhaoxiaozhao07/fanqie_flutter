@@ -7,6 +7,7 @@ import 'package:flutter/services.dart';
 
 import '../models/chapter.dart';
 import '../models/reader_theme.dart';
+import '../services/reader_platform.dart';
 
 /// A virtualized, non-modal desktop directory. Its query and scroll state
 /// survive docking, window resizing and entering/exiting reading immersion.
@@ -310,7 +311,9 @@ class _DesktopReaderDirectoryState extends State<DesktopReaderDirectory> {
                       ),
                       const Spacer(),
                       IconButton(
-                        tooltip: '跳转章节（⌘J）',
+                        tooltip: ReaderPlatform.isWindows
+                            ? '跳转章节（Ctrl+J）'
+                            : '跳转章节（⌘J）',
                         onPressed: widget.onJump,
                         icon: const Icon(Icons.last_page, size: 20),
                       ),

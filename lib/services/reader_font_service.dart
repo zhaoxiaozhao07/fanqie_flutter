@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/painting.dart';
 import 'package:flutter/services.dart';
 import 'external_reader_fonts.dart';
+import 'reader_platform.dart';
 
 /// 先完成字体注册，再更新排版参数，避免回退字体与真实字体之间二次重排。
 class ReaderFontService {
@@ -43,10 +45,51 @@ class ReaderFontService {
     });
   }
 
-  static String? familyFor(String preference) => switch (preference) {
-    'kaiti' => 'ReaderKaiTi',
-    'serif' => 'ReaderSongTi',
-    'sans-serif' => 'sans-serif',
-    _ => ExternalReaderFonts().familyFor(preference),
-  };
+  static String? familyFor(String preference) {
+    final family = switch (preference) {
+      'kaiti' => 'ReaderKaiTi',
+      'serif' => 'ReaderSongTi',
+      'sans-serif' => 'sans-serif',
+      _ => ExternalReaderFonts().familyFor(preference),
+    };
+    // Windows' default UI face (Segoe UI) and generic sans-serif resolve CJK
+    // glyphs independently. Use the same CJK/Latin face in every reader preview,
+    // body and title, including the fallback for an unavailable imported font.
+    if (ReaderPlatform.isWindows &&
+        (family == null || family == 'sans-serif')) {
+      return 'Microsoft YaHei';
+    }
+    return family;
+  }
+
+  static TextStyle bodyStyle({
+    required String fontFamily,
+    required double fontSize,
+    required double lineHeight,
+    double letterSpacing = 0,
+    String displayScript = 'original',
+    Color? color,
+  }) => TextStyle(
+    inherit: false,
+    color: color,
+    fontSize: fontSize,
+    height: lineHeight,
+    leadingDistribution: TextLeadingDistribution.even,
+    fontWeight: FontWeight.normal,
+    textBaseline: TextBaseline.alphabetic,
+    letterSpacing: letterSpacing,
+    wordSpacing: 0,
+    fontFamily: familyFor(fontFamily) ?? 'Roboto',
+    fontFamilyFallback: ReaderPlatform.isWindows
+        ? const [
+            'Microsoft YaHei',
+            'Microsoft YaHei UI',
+            'sans-serif',
+            'Roboto',
+          ]
+        : const ['sans-serif', 'Roboto'],
+    locale: displayScript == 'traditional'
+        ? const Locale('zh', 'TW')
+        : const Locale('zh', 'CN'),
+  );
 }

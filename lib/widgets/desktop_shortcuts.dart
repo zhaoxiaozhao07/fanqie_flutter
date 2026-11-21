@@ -24,20 +24,28 @@ class _DesktopShortcutsState extends State<DesktopShortcuts> {
     SingleActivator(LogicalKeyboardKey.f3, shift: true, includeRepeats: false):
         'findPrevious',
     SingleActivator(LogicalKeyboardKey.keyO, meta: true): 'import',
+    SingleActivator(LogicalKeyboardKey.keyO, control: true): 'import',
     SingleActivator(LogicalKeyboardKey.comma, meta: true): 'settings',
+    SingleActivator(LogicalKeyboardKey.comma, control: true): 'settings',
     SingleActivator(LogicalKeyboardKey.equal, meta: true): 'fontIncrease',
+    SingleActivator(LogicalKeyboardKey.equal, control: true): 'fontIncrease',
     SingleActivator(LogicalKeyboardKey.equal, meta: true, shift: true):
         'fontIncrease',
+    SingleActivator(LogicalKeyboardKey.equal, control: true, shift: true):
+        'fontIncrease',
     SingleActivator(LogicalKeyboardKey.add, meta: true): 'fontIncrease',
+    SingleActivator(LogicalKeyboardKey.add, control: true): 'fontIncrease',
     SingleActivator(LogicalKeyboardKey.minus, meta: true): 'fontDecrease',
+    SingleActivator(LogicalKeyboardKey.minus, control: true): 'fontDecrease',
     SingleActivator(LogicalKeyboardKey.digit0, meta: true): 'fontReset',
+    SingleActivator(LogicalKeyboardKey.digit0, control: true): 'fontReset',
     SingleActivator(LogicalKeyboardKey.f1, includeRepeats: false): 'shortcuts',
   };
 
   @override
   void initState() {
     super.initState();
-    if (ReaderPlatform.isMacOS) unawaited(_preferences.load());
+    if (ReaderPlatform.isDesktop) unawaited(_preferences.load());
   }
 
   KeyEventResult _key(FocusNode _, KeyEvent event) {
@@ -73,7 +81,7 @@ class _DesktopShortcutsState extends State<DesktopShortcuts> {
   }
 
   @override
-  Widget build(BuildContext context) => !ReaderPlatform.isMacOS
+  Widget build(BuildContext context) => !ReaderPlatform.isDesktop
       ? widget.child
       : Focus(autofocus: true, onKeyEvent: _key, child: widget.child);
 }

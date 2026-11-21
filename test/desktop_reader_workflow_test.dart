@@ -421,6 +421,18 @@ void main() {
       await shortcut(tester, LogicalKeyboardKey.pageDown);
       final before = await savedPosition();
       await shortcut(tester, LogicalKeyboardKey.equal, meta: true);
+      expect(
+        tester
+            .widget<DesktopSelectableParagraph>(
+              find.byType(DesktopSelectableParagraph).hitTestable().first,
+            )
+            .style
+            .fontSize,
+        19,
+      );
+      // pumpAndSettle drains animation frames, not the 250ms durable-write
+      // debounce. A stable page controller no longer supplies incidental frames.
+      await ReaderSystemService.flushParticipants();
       expect((await ReaderSettingsRepository().load()).settings.fontSize, 19);
       expectAnchor(await savedPosition(), before);
       await shortcut(tester, LogicalKeyboardKey.minus, meta: true);

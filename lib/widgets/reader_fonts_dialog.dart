@@ -2,6 +2,7 @@ import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import '../services/external_reader_fonts.dart';
+import '../services/reader_font_service.dart';
 
 class ReaderFontsDialog extends StatefulWidget {
   final String selected;
@@ -73,11 +74,11 @@ class _ReaderFontsDialogState extends State<ReaderFontsDialog> {
               '閱讀是一段安靜而悠長的旅程。\n'
               '「中文标点」——（测试）！？\n'
               'The quick brown fox. 0123456789\n👨‍👩‍👧‍👦 é',
-              style: TextStyle(
-                fontFamily: _library.familyFor(font.id),
+              style: ReaderFontService.bodyStyle(
+                fontFamily: font.id,
                 fontSize: 22,
-                height: 1.8,
-                fontFamilyFallback: const ['sans-serif', 'Roboto'],
+                lineHeight: 1.8,
+                color: Theme.of(context).colorScheme.onSurface,
               ),
             ),
           ),

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:fanqie_flutter/widgets/reader_page_view.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
@@ -28,6 +30,7 @@ class _WheelReaderState extends State<_WheelReader> {
   late int page = widget.initialPage;
   int userTurns = 0;
   int boundaries = 0;
+  void Function(int)? onSettled;
 
   @override
   void dispose() {
@@ -63,10 +66,13 @@ class _WheelReaderState extends State<_WheelReader> {
         backgroundColor: Colors.white,
         isDark: false,
         selection: selection,
-        onPageSettled: (item) => setState(() {
-          page = item.id as int;
-          settled.add(page);
-        }),
+        onPageSettled: (item) {
+          setState(() {
+            page = item.id as int;
+            settled.add(page);
+          });
+          onSettled?.call(page);
+        },
         onPreviousBoundary: () => boundaries++,
         onNextBoundary: () => boundaries++,
         onCenterTap: () {},
@@ -81,9 +87,13 @@ class _WheelReaderState extends State<_WheelReader> {
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
-  void desktopTest(String name, WidgetTesterCallback body) {
+  void desktopTest(
+    String name,
+    WidgetTesterCallback body, {
+    TargetPlatform platform = TargetPlatform.macOS,
+  }) {
     testWidgets(name, (tester) async {
-      debugDefaultTargetPlatformOverride = TargetPlatform.macOS;
+      debugDefaultTargetPlatformOverride = platform;
       try {
         await body(tester);
       } finally {
@@ -135,6 +145,109 @@ void main() {
   }
 
   for (final mode in ['cover', 'slide', 'fade', 'none', 'simulation']) {
+    desktopTest(
+      'Windows $mode keeps wheel ownership until the page commit finishes',
+      (tester) async {
+        final reader = await open(tester, mode);
+        var injected = false;
+        reader.onSettled = (_) {
+          if (injected) return;
+          injected = true;
+          void signal() => GestureBinding.instance.handlePointerEvent(
+            const PointerScrollEvent(
+              timeStamp: Duration(milliseconds: 1500),
+              kind: PointerDeviceKind.mouse,
+              position: Offset(400, 350),
+              scrollDelta: Offset(0, -120),
+            ),
+          );
+          // A jump settles inside the first pointer-signal resolver. Real
+          // subsequent events arrive afterward, before the next commit frame.
+          if (mode == 'none') {
+            scheduleMicrotask(signal);
+          } else {
+            signal();
+          }
+        };
+        await wheel(
+          tester,
+          const Offset(0, 120),
+          timeStamp: const Duration(seconds: 1),
+        );
+        await tester.pumpAndSettle();
+        expect(reader.settled, [2, 1]);
+        await close(tester);
+      },
+      platform: TargetPlatform.windows,
+    );
+
+    desktopTest(
+      'Windows $mode sustained mouse notches continue after the previous turn',
+      (tester) async {
+        final reader = await open(tester, mode);
+        await wheel(
+          tester,
+          const Offset(0, 120),
+          timeStamp: const Duration(seconds: 1),
+        );
+        // Keep one continuous event stream, including after the first turn.
+        for (var index = 1; index <= 7; index++) {
+          await tester.pump(const Duration(milliseconds: 70));
+          await wheel(
+            tester,
+            const Offset(0, 120),
+            timeStamp: Duration(milliseconds: 1000 + index * 70),
+          );
+        }
+        await tester.pumpAndSettle();
+        expect(reader.settled.take(2), [2, 3]);
+        expect(reader.settled.length, lessThanOrEqualTo(3));
+        expect(reader.pager.currentState!.isBusy, isFalse);
+        await close(tester);
+      },
+      platform: TargetPlatform.windows,
+    );
+
+    desktopTest(
+      'Windows $mode wheel reversal is not mistaken for trailing momentum',
+      (tester) async {
+        final reader = await open(tester, mode);
+        await wheel(
+          tester,
+          const Offset(0, 120),
+          timeStamp: const Duration(seconds: 1),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 60));
+        await wheel(
+          tester,
+          const Offset(0, -120),
+          timeStamp: const Duration(milliseconds: 1060),
+        );
+        await tester.pumpAndSettle();
+        expect(reader.settled, [2, 1]);
+        await close(tester);
+      },
+      platform: TargetPlatform.windows,
+    );
+
+    desktopTest('Windows $mode decaying momentum still turns only one page', (
+      tester,
+    ) async {
+      final reader = await open(tester, mode);
+      for (var index = 0; index < 12; index++) {
+        await wheel(
+          tester,
+          Offset(0, index == 0 ? 120 : 12 - index.toDouble()),
+          timeStamp: Duration(milliseconds: 1000 + index * 70),
+        );
+        await tester.pump(const Duration(milliseconds: 70));
+      }
+      await tester.pumpAndSettle();
+      expect(reader.settled, [2]);
+      await close(tester);
+    }, platform: TargetPlatform.windows);
+
     desktopTest(
       '$mode delayed native wheel dispatch keeps the source gesture',
       (tester) async {
@@ -249,6 +362,167 @@ void main() {
     expect(reader.settled, [1]);
     await close(tester);
   });
+
+  desktopTest(
+    'Windows a reversal during queue draining supersedes the obsolete intent',
+    (tester) async {
+      final reader = await open(tester, 'cover');
+      var injected = false;
+      reader.onSettled = (_) {
+        if (injected) return;
+        injected = true;
+        // Register before the pager's first commit callback, then run on the
+        // following frame immediately before its existing queue drain.
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            GestureBinding.instance.handlePointerEvent(
+              const PointerScrollEvent(
+                timeStamp: Duration(milliseconds: 1800),
+                kind: PointerDeviceKind.mouse,
+                position: Offset(400, 350),
+                scrollDelta: Offset(0, -120),
+              ),
+            );
+          });
+        });
+      };
+      await wheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(seconds: 1),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      await wheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(milliseconds: 1200),
+      );
+      await tester.pumpAndSettle();
+      expect(reader.settled, [2, 1]);
+      await close(tester);
+    },
+    platform: TargetPlatform.windows,
+  );
+
+  desktopTest(
+    'Windows sustained notches do not repeatedly request an unavailable chapter',
+    (tester) async {
+      final reader = await open(tester, 'none', initialPage: 0);
+      for (var index = 0; index < 10; index++) {
+        await wheel(
+          tester,
+          const Offset(0, -120),
+          timeStamp: Duration(milliseconds: 1000 + index * 70),
+        );
+        await tester.pump(const Duration(milliseconds: 70));
+      }
+      await tester.pumpAndSettle();
+      expect(reader.boundaries, 1);
+      expect(reader.settled, isEmpty);
+      await close(tester);
+    },
+    platform: TargetPlatform.windows,
+  );
+
+  desktopTest(
+    'Windows delayed full notches use source time instead of delivery time',
+    (tester) async {
+      final reader = await open(tester, 'cover');
+      await wheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(seconds: 1),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 260));
+      await wheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(milliseconds: 1070),
+      );
+      await tester.pumpAndSettle();
+      expect(reader.settled, [2]);
+      await close(tester);
+    },
+    platform: TargetPlatform.windows,
+  );
+
+  desktopTest('Windows small reverse jitter does not undo a wheel turn', (
+    tester,
+  ) async {
+    final reader = await open(tester, 'cover');
+    await wheel(
+      tester,
+      const Offset(0, 60),
+      timeStamp: const Duration(seconds: 1),
+    );
+    await tester.pump(const Duration(milliseconds: 60));
+    await wheel(
+      tester,
+      const Offset(0, -4),
+      timeStamp: const Duration(milliseconds: 1060),
+    );
+    await tester.pumpAndSettle();
+    expect(reader.settled, [2]);
+    await close(tester);
+  }, platform: TargetPlatform.windows);
+
+  desktopTest(
+    'Windows normal 60px notches continue without using accelerated deltas',
+    (tester) async {
+      final reader = await open(tester, 'cover');
+      for (var index = 0; index < 8; index++) {
+        await wheel(
+          tester,
+          const Offset(0, 60),
+          timeStamp: Duration(milliseconds: 1000 + index * 70),
+        );
+        await tester.pump(const Duration(milliseconds: 70));
+      }
+      await tester.pumpAndSettle();
+      expect(reader.settled, [2, 3]);
+      await close(tester);
+    },
+    platform: TargetPlatform.windows,
+  );
+
+  desktopTest(
+    'Windows distinct wheel gestures retain one request during a wheel turn',
+    (tester) async {
+      final reader = await open(tester, 'cover');
+      await wheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(seconds: 1),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 200));
+      await wheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(milliseconds: 1200),
+      );
+      await tester.pumpAndSettle();
+      expect(reader.settled, [2, 3]);
+      await close(tester);
+    },
+    platform: TargetPlatform.windows,
+  );
+
+  desktopTest(
+    'Windows wheel during a keyboard turn does not queue another page',
+    (tester) async {
+      final reader = await open(tester, 'cover');
+      reader.pager.currentState!.turnToNextPage();
+      await tester.pump(const Duration(milliseconds: 50));
+      await wheel(tester, const Offset(0, 120));
+      await tester.pumpAndSettle();
+      expect(reader.settled, [2]);
+      await close(tester);
+    },
+    platform: TargetPlatform.windows,
+  );
 
   desktopTest(
     'wheel input during a keyboard turn does not queue a second turn',

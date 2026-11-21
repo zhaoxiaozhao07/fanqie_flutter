@@ -109,7 +109,9 @@ Future<int> turn() async {
   state.turnToNextPage();
   await nextFrame();
   submitted.stop();
-  await until(() => !state.isBusy);
+  // An asynchronous chapter boundary can be idle while its target is still
+  // being prepared. Wait for the actual page commit, not just idle motion.
+  await until(() => !state.isBusy && state.currentPageId != before);
   require(state.currentPageId != before, 'Profile page turn did not commit');
   return submitted.elapsedMicroseconds;
 }

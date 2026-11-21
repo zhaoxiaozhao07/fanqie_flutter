@@ -90,14 +90,16 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     String method,
     Map<String, Object?>? args,
   ) async {
-    if (ReaderPlatform.isMacOS && !ReaderPlatform.capabilities.tts) return null;
+    if (ReaderPlatform.isDesktop && !ReaderPlatform.capabilities.tts) {
+      return null;
+    }
     return _channel.invokeMethod<Object?>(method, args);
   }
 
   final bool _testInvoker;
   bool get isAvailable =>
       _testInvoker ||
-      !ReaderPlatform.isMacOS ||
+      !ReaderPlatform.isDesktop ||
       ReaderPlatform.capabilities.tts;
   final TtsInvoker _invoke;
   final http.Client _http;
@@ -287,7 +289,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<List<Map<String, dynamic>>> nativeVoices() async {
-    if (!ReaderPlatform.isMacOS || !nativeSpeechAvailable) return [];
+    if (!ReaderPlatform.isDesktop || !nativeSpeechAvailable) return [];
     final raw = await _safe('getNativeTtsVoices');
     return raw is List
         ? raw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
@@ -684,7 +686,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
             'text': chunk.text,
             'filePath': audio,
             'rate': audio == null ? _speechRate : 1.0,
-            if (ReaderPlatform.isMacOS) 'voice': _nativeVoice,
+            if (ReaderPlatform.isDesktop) 'voice': _nativeVoice,
           }).timeout(const Duration(seconds: 30));
       if (!_current(session, token)) return;
       if (accepted != true) {
@@ -765,7 +767,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
       try {
         root = await _temporary();
       } catch (_) {
-        if (ReaderPlatform.isMacOS && !_testInvoker) rethrow;
+        if (ReaderPlatform.isDesktop && !_testInvoker) rethrow;
         root = Directory.systemTemp;
       }
       final file = File(

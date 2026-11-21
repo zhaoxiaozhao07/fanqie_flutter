@@ -36,7 +36,7 @@ class AppLifecycleService {
       await ReaderBackupService.flushCreates();
       final tts = TtsService();
       if (tts.isAvailable && tts.isActive) await tts.stop();
-      await (ReaderPlatform.isMacOS
+      await (ReaderPlatform.isDesktop
               ? DownloadService().prepareToQuit()
               : DownloadService().cancelAllAndWait())
           .timeout(const Duration(seconds: 6));

@@ -29,6 +29,14 @@ class DesktopReaderSelectionController extends ChangeNotifier {
   final Set<_DesktopReaderSelectionState> _areas = {};
   _DesktopReaderSelectionState? _active;
   bool _closed = false, _notificationPending = false;
+  // 按下时落在交互控件（段评气泡、章节评论、插图）上的指针。
+  // 这类按压的抬起绝不能被当成阅读面空白点击，否则会误翻页。
+  final Set<int> _interactivePresses = {};
+
+  void _markInteractivePress(int pointer) => _interactivePresses.add(pointer);
+
+  bool _consumeInteractivePress(int pointer) =>
+      _interactivePresses.remove(pointer);
 
   List<DesktopReaderSelectionSegment> get segments =>
       _active?._segments() ?? const [];
@@ -201,107 +209,159 @@ class _DesktopReaderSelectionState extends State<DesktopReaderSelection> {
   }
 
   @override
-  Widget build(BuildContext context) => Actions(
-    actions: {
-      CopySelectionTextIntent: CallbackAction<CopySelectionTextIntent>(
-        onInvoke: (_) {
-          unawaited(widget.controller.copy());
-          return null;
-        },
-      ),
-    },
-    child: Listener(
-      onPointerDown: (event) {
-        _blankHadSelection = widget.controller.hasSelection;
-        _blankPointerStart =
-            event.buttons == kPrimaryButton && _textPointer != event.pointer
-            ? event.position
-            : null;
+  Widget build(BuildContext context) => DesktopReaderSelectionScope(
+    controller: widget.controller,
+    child: Actions(
+      actions: {
+        CopySelectionTextIntent: CallbackAction<CopySelectionTextIntent>(
+          onInvoke: (_) {
+            unawaited(widget.controller.copy());
+            return null;
+          },
+        ),
       },
-      onPointerMove: (event) {
-        final start = _blankPointerStart;
-        if (start != null && (event.position - start).distance > kTouchSlop) {
+      child: Listener(
+        onPointerDown: (event) {
+          _blankHadSelection = widget.controller.hasSelection;
+          _blankPointerStart =
+              event.buttons == kPrimaryButton && _textPointer != event.pointer
+              ? event.position
+              : null;
+        },
+        onPointerMove: (event) {
+          final start = _blankPointerStart;
+          if (start != null && (event.position - start).distance > kTouchSlop) {
+            _blankPointerStart = null;
+          }
+        },
+        onPointerCancel: (event) {
+          widget.controller._consumeInteractivePress(event.pointer);
           _blankPointerStart = null;
-        }
-      },
-      onPointerCancel: (_) {
-        _blankPointerStart = null;
-        _textPointer = null;
-      },
-      onPointerUp: (event) {
-        if (_blankPointerStart != null && !_blankHadSelection) {
-          widget.onBlankTap(event.position);
-        }
-        _blankPointerStart = null;
-        _textPointer = null;
-      },
-      child: SelectionArea(
-        key: _region,
-        onSelectionChanged: _changed,
-        contextMenuBuilder: (context, region) {
-          final ranges = _segments();
-          if (ranges.isEmpty) return const SizedBox.shrink();
-          void dismiss() => widget.controller.clear();
-          if (ranges.length == 1) {
-            return widget.singleSelectionMenu(
-              context,
-              region.contextMenuAnchors,
-              ranges.single,
-              dismiss,
-            );
-          }
-          final anchors = region.contextMenuAnchors;
-          if (widget.multipleSelectionMenu != null) {
-            return widget.multipleSelectionMenu!(
-              context,
-              anchors,
-              ranges,
-              dismiss,
-            );
-          }
-          return TextSelectionToolbar(
-            anchorAbove: anchors.primaryAnchor,
-            anchorBelow: anchors.secondaryAnchor ?? anchors.primaryAnchor,
-            children: [
-              Container(
-                decoration: BoxDecoration(
-                  color: const Color(0xFF232326),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 4,
-                ),
-                child: Wrap(
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  spacing: 8,
-                  children: [
-                    TextButton.icon(
-                      key: const ValueKey('desktop-copy-paragraphs'),
-                      style: TextButton.styleFrom(
-                        foregroundColor: Colors.white,
-                      ),
-                      onPressed: () async {
-                        await widget.controller.copy();
-                        dismiss();
-                      },
-                      icon: const Icon(Icons.copy, size: 16),
-                      label: const Text('复制'),
-                    ),
-                    const Text(
-                      '跨段选区仅支持复制',
-                      style: TextStyle(color: Colors.white70, fontSize: 12),
-                    ),
-                  ],
-                ),
-              ),
-            ],
-          );
+          _textPointer = null;
         },
-        child: _DesktopSelectionScope(owner: this, child: widget.child),
+        onPointerUp: (event) {
+          // 交互控件上的按压不视为阅读面空白点击：否则点击段评、章节评论
+          // 或插图时会顺带触发翻页热区。
+          final interactive = widget.controller._consumeInteractivePress(
+            event.pointer,
+          );
+          if (!interactive && _blankPointerStart != null && !_blankHadSelection) {
+            widget.onBlankTap(event.position);
+          }
+          _blankPointerStart = null;
+          _textPointer = null;
+        },
+        child: SelectionArea(
+          key: _region,
+          onSelectionChanged: _changed,
+          contextMenuBuilder: (context, region) {
+            final ranges = _segments();
+            if (ranges.isEmpty) return const SizedBox.shrink();
+            void dismiss() => widget.controller.clear();
+            if (ranges.length == 1) {
+              return widget.singleSelectionMenu(
+                context,
+                region.contextMenuAnchors,
+                ranges.single,
+                dismiss,
+              );
+            }
+            final anchors = region.contextMenuAnchors;
+            if (widget.multipleSelectionMenu != null) {
+              return widget.multipleSelectionMenu!(
+                context,
+                anchors,
+                ranges,
+                dismiss,
+              );
+            }
+            return TextSelectionToolbar(
+              anchorAbove: anchors.primaryAnchor,
+              anchorBelow: anchors.secondaryAnchor ?? anchors.primaryAnchor,
+              children: [
+                Container(
+                  decoration: BoxDecoration(
+                    color: const Color(0xFF232326),
+                    borderRadius: BorderRadius.circular(20),
+                  ),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 4,
+                  ),
+                  child: Wrap(
+                    crossAxisAlignment: WrapCrossAlignment.center,
+                    spacing: 8,
+                    children: [
+                      TextButton.icon(
+                        key: const ValueKey('desktop-copy-paragraphs'),
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.white,
+                        ),
+                        onPressed: () async {
+                          await widget.controller.copy();
+                          dismiss();
+                        },
+                        icon: const Icon(Icons.copy, size: 16),
+                        label: const Text('复制'),
+                      ),
+                      const Text(
+                        '跨段选区仅支持复制',
+                        style: TextStyle(color: Colors.white70, fontSize: 12),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+          child: _DesktopSelectionScope(owner: this, child: widget.child),
+        ),
       ),
     ),
   );
+}
+
+/// Exposes the active selection controller to interactive regions.
+class DesktopReaderSelectionScope extends InheritedWidget {
+  final DesktopReaderSelectionController controller;
+
+  const DesktopReaderSelectionScope({
+    super.key,
+    required this.controller,
+    required super.child,
+  });
+
+  @override
+  bool updateShouldNotify(DesktopReaderSelectionScope oldWidget) =>
+      controller != oldWidget.controller;
+}
+
+/// Marks a subtree as interactive for the desktop reading surface.
+///
+/// The blank-tap detection runs on raw pointer events, so it also sees
+/// presses that belong to buttons inside the reading text. Wrapping those
+/// controls keeps a click on them (comment bubbles, chapter comments,
+/// illustrations) from also turning the page.
+class DesktopInteractiveRegion extends StatelessWidget {
+  final Widget child;
+
+  const DesktopInteractiveRegion({super.key, required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    final scope = context.dependOnInheritedWidgetOfExactType<
+      DesktopReaderSelectionScope
+    >();
+    if (scope == null) return child;
+    return Listener(
+      behavior: HitTestBehavior.translucent,
+      onPointerDown: (event) =>
+          scope.controller._markInteractivePress(event.pointer),
+      onPointerCancel: (event) =>
+          scope.controller._consumeInteractivePress(event.pointer),
+      child: child,
+    );
+  }
 }
 
 class _DesktopSelectionScope extends InheritedWidget {

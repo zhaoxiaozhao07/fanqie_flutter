@@ -40,7 +40,7 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       DesktopCommands.register(this, _desktopCommand);
       _externalImports.addListener(_onExternalImports);
       _onExternalImports();
@@ -197,11 +197,11 @@ class _MainScreenState extends State<MainScreen> {
           },
         ),
         HistoryScreen(key: _historyKey),
-        if (ReaderPlatform.isMacOS)
+        if (ReaderPlatform.isDesktop)
           NotesWorkspaceScreen(key: _notesKey, isActive: _currentIndex == 3),
       ],
     );
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       return Scaffold(
         bottomNavigationBar: TtsPlayerPanel(onClose: () {}),
         body: LayoutBuilder(

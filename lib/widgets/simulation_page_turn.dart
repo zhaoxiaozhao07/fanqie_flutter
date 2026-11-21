@@ -13,6 +13,7 @@ class SimulationPageTurn extends StatefulWidget {
   final int totalPages;
   final int currentPageIndex;
   final Widget Function(BuildContext context, int pageIndex) pageBuilder;
+  final Object Function(int pageIndex)? pageIdentity;
   final Object? pageSetKey;
   final Object? contentVersion;
   final Listenable? pageContentChanges;
@@ -42,6 +43,7 @@ class SimulationPageTurn extends StatefulWidget {
     required this.totalPages,
     required this.currentPageIndex,
     required this.pageBuilder,
+    this.pageIdentity,
     this.pageSetKey,
     this.contentVersion,
     this.pageContentChanges,
@@ -75,8 +77,8 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   late final AnimationController _animController;
   Animation<Offset>? _dragAnimation;
   final ValueNotifier<_CurlGeometry?> _geometry = ValueNotifier(null);
-  final Map<int, GlobalKey> _pageKeys = {};
-  final Map<int, Widget> _pageWidgets = {};
+  final Map<Object, GlobalKey> _pageKeys = {};
+  final Map<Object, Widget> _pageWidgets = {};
   ui.Image? _backImage;
   ui.Image? _preparedBackImage;
   bool _snapshotDirty = true;
@@ -125,14 +127,21 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
       widget.pageContentChanges?.addListener(_invalidateSnapshot);
     }
     final selectionActive = widget.isSelectionActive?.call() == true;
-    if (oldWidget.pageSetKey != widget.pageSetKey ||
+    final legacyPageSetChanged =
+        widget.pageIdentity == null &&
+        oldWidget.pageSetKey != widget.pageSetKey;
+    if (legacyPageSetChanged ||
         oldWidget.contentVersion != widget.contentVersion ||
         oldWidget.backgroundColor != widget.backgroundColor) {
       _pageWidgets.clear();
-      _pageKeys.clear();
+      if (legacyPageSetChanged) _pageKeys.clear();
       _invalidateSnapshot();
     }
-    if (oldWidget.currentPageIndex != widget.currentPageIndex) {
+    final oldIdentity =
+        oldWidget.pageIdentity?.call(oldWidget.currentPageIndex) ??
+        oldWidget.currentPageIndex;
+    final identity = _identityFor(widget.currentPageIndex);
+    if (oldIdentity != identity) {
       _invalidateSnapshot();
     }
     if (_snapshotSelectionActive != selectionActive) _invalidateSnapshot();
@@ -154,7 +163,6 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   void didChangeDependencies() {
     super.didChangeDependencies();
     _pageWidgets.clear();
-    _pageKeys.clear();
     _invalidateSnapshot();
   }
 
@@ -238,7 +246,8 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       _snapshotPending = false;
       if (!mounted || _isTurning || !_snapshotDirty) return;
-      final boundary = _pageKeys[widget.currentPageIndex]?.currentContext
+      final boundary = _pageKeys[_identityFor(widget.currentPageIndex)]
+          ?.currentContext
           ?.findRenderObject();
       if (boundary is! RenderRepaintBoundary ||
           !boundary.attached ||
@@ -567,7 +576,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
   Widget _buildCachedPage(BuildContext context, int index) {
     if (index >= 0 && index < widget.totalPages) {
       return _pageWidgets.putIfAbsent(
-        index,
+        _identityFor(index),
         () => widget.pageBuilder(context, index),
       );
     }
@@ -577,8 +586,12 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
         ColoredBox(color: widget.backgroundColor);
   }
 
+  Object _identityFor(int index) => index < 0 || index >= widget.totalPages
+      ? (#pageBoundary, index < 0)
+      : widget.pageIdentity?.call(index) ?? index;
+
   GlobalKey _keyForPage(int index) =>
-      _pageKeys.putIfAbsent(index, GlobalKey.new);
+      _pageKeys.putIfAbsent(_identityFor(index), GlobalKey.new);
 
   @override
   Widget build(BuildContext context) {
@@ -588,13 +601,16 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
           if (_isTurning) _resetTurn();
           _viewSize = constraints.biggest;
           _pageWidgets.clear();
-          _pageKeys.clear();
           _invalidateSnapshot();
         }
         _scheduleBackImage();
         final sourceIndex = _turnSourceIndex ?? widget.currentPageIndex;
-        _pageWidgets.removeWhere((index, _) => (index - sourceIndex).abs() > 1);
-        _pageKeys.removeWhere((index, _) => (index - sourceIndex).abs() > 1);
+        final visibleIdentities = {
+          for (final index in [sourceIndex - 1, sourceIndex, sourceIndex + 1])
+            _identityFor(index),
+        };
+        _pageWidgets.removeWhere((id, _) => !visibleIdentities.contains(id));
+        _pageKeys.removeWhere((id, _) => !visibleIdentities.contains(id));
         final frontPage = RepaintBoundary(
           key: _keyForPage(sourceIndex),
           child: _buildCachedPage(context, sourceIndex),
@@ -638,7 +654,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
                               sourceIndex + 1,
                             ])
                               Offstage(
-                                key: ValueKey(index),
+                                key: ValueKey<Object>(_identityFor(index)),
                                 offstage: index != _turnTargetIndex,
                                 child: RepaintBoundary(
                                   key: _keyForPage(index),

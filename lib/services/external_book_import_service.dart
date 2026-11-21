@@ -46,7 +46,7 @@ class ExternalBookImportService extends ChangeNotifier {
   bool get hasActiveRequest => _active != null;
   bool get _enabled =>
       _testing ||
-      (ReaderPlatform.isMacOS && ReaderPlatform.capabilities.fileImport);
+      (ReaderPlatform.isDesktop && ReaderPlatform.capabilities.fileImport);
 
   Future<void> initialize() async {
     if (_initialized || !_enabled) return;

@@ -58,7 +58,7 @@ class TtsPlayerPanel extends StatelessWidget {
         final isPlaying = ttsService.isPlaying;
         final isBuffering = ttsService.state == TtsPlayState.buffering;
         final curIdx = ttsService.currentIndex;
-        if (ReaderPlatform.isMacOS) return _desktop(context, ttsService);
+        if (ReaderPlatform.isDesktop) return _desktop(context, ttsService);
 
         return Container(
           decoration: BoxDecoration(
@@ -561,7 +561,7 @@ class TtsPlayerPanel extends StatelessWidget {
                         ),
                         if (!tts.nativeSpeechAvailable)
                           const Text('未检测到可用系统声音；请使用兼容接口或在系统设置中下载声音。'),
-                        if (ReaderPlatform.isMacOS &&
+                        if (ReaderPlatform.isDesktop &&
                             selectedEngine == TtsEngineType.native)
                           DropdownButton<String>(
                             isExpanded: true,

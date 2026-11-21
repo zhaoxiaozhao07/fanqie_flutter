@@ -81,6 +81,7 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
   late bool _bookOverride = widget.bookOverride;
   bool _advanced = false;
   bool _busy = false;
+  bool _fontPreviewReady = false;
   Map<String, ReaderSettings> _presets = {};
   Timer? _themeClock;
 
@@ -117,10 +118,16 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
   Future<void> _loadFonts() async {
     try {
       await ExternalReaderFonts().reload();
-      if (mounted) setState(() {});
     } catch (_) {
       // Damaged font metadata is preserved; built-in fonts remain usable.
     }
+    try {
+      // The global panel may open before any book has registered this font.
+      await ReaderFontService.ensureLoaded(_settings.fontFamily);
+    } catch (_) {
+      // Keep an unavailable font preference; use the same fallback as the body.
+    }
+    if (mounted) setState(() => _fontPreviewReady = true);
   }
 
   Future<void> _fontsDialog() async {
@@ -359,27 +366,24 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                             color: palette.highlightColor,
                             borderRadius: BorderRadius.circular(10),
                           ),
-                          child: Text(
-                            ReaderDisplayText.convert(
-                              '春风轻拂书页，故事从这里继续。',
-                              _settings.displayScript,
-                            ),
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: TextStyle(
-                              fontSize: _settings.fontSize,
-                              height: _settings.lineHeight,
-                              letterSpacing: _settings.letterSpacing,
-                              color: palette.textColor,
-                              fontFamily: ReaderFontService.familyFor(
-                                _settings.fontFamily,
-                              ),
-                              fontFamilyFallback: const [
-                                'sans-serif',
-                                'Roboto',
-                              ],
-                            ),
-                          ),
+                          child: !_fontPreviewReady
+                              ? const Text('正在加载字体…')
+                              : Text(
+                                  ReaderDisplayText.convert(
+                                    '春风轻拂书页，故事从这里继续。',
+                                    _settings.displayScript,
+                                  ),
+                                  maxLines: 2,
+                                  overflow: TextOverflow.ellipsis,
+                                  style: ReaderFontService.bodyStyle(
+                                    fontFamily: _settings.fontFamily,
+                                    fontSize: _settings.fontSize,
+                                    lineHeight: _settings.lineHeight,
+                                    letterSpacing: _settings.letterSpacing,
+                                    displayScript: _settings.displayScript,
+                                    color: palette.textColor,
+                                  ),
+                                ),
                         ),
                         if (widget.allowBookOverride)
                           SwitchListTile(
@@ -568,10 +572,18 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                                             themeIndex: index,
                                             clearCustomColors: true,
                                             themeMode: ReaderThemeMode.manual,
-                                            dayThemeIndex: index < 3
+                                            dayThemeIndex:
+                                                ReaderTheme
+                                                        .presets[index]
+                                                        .systemBrightness ==
+                                                    Brightness.light
                                                 ? index
                                                 : _settings.dayThemeIndex,
-                                            nightThemeIndex: index >= 3
+                                            nightThemeIndex:
+                                                ReaderTheme
+                                                        .presets[index]
+                                                        .systemBrightness ==
+                                                    Brightness.dark
                                                 ? index
                                                 : _settings.nightThemeIndex,
                                           ),
@@ -684,7 +696,7 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                             ),
                           ),
                         ),
-                        if (ReaderPlatform.isMacOS)
+                        if (ReaderPlatform.isDesktop)
                           _section(
                             '桌面阅读栏数',
                             Column(
@@ -777,7 +789,7 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                             const Text(
                               '简繁为离线逐字显示转换，复制、搜索、批注和听书仍使用原文；多义字可能需要人工判断。',
                             ),
-                            if (ReaderPlatform.isMacOS)
+                            if (ReaderPlatform.isDesktop)
                               _section(
                                 '动画速度',
                                 _choices(
@@ -799,7 +811,7 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                                       _settings.copyWith(tapToTurn: value),
                                     ),
                             ),
-                            if (ReaderPlatform.isMacOS)
+                            if (ReaderPlatform.isDesktop)
                               TextButton.icon(
                                 onPressed: () => _dialog(
                                   (_) => const ReaderShortcutsDialog(),

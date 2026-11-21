@@ -62,11 +62,14 @@ class OnlineIllustrationStore {
     String chapter,
     OnlineChapter document, {
     bool replace = false,
+    bool permanent = false,
   }) async {
     if (book.startsWith('local_')) return;
     final existing = await _read(book, chapter, document.text);
     if (existing != null && !replace) return;
-    final file = existing?.$1 ?? await _file(book, chapter, false);
+    final file = permanent
+        ? await _file(book, chapter, true)
+        : existing?.$1 ?? await _file(book, chapter, false);
     await AtomicFile.writeString(
       file,
       jsonEncode({
@@ -87,6 +90,19 @@ class OnlineIllustrationStore {
 
   Future<bool> hasSources(String book, String chapter, String text) async =>
       await _read(book, chapter, text) != null;
+
+  /// Only image-free, text-bound permanent metadata bypasses hydration.
+  /// Illustrated chapters always use the byte-validating repair path.
+  Future<bool> isPermanentReady(
+    String book,
+    String chapter,
+    String text,
+  ) async {
+    final record = await _read(book, chapter, text);
+    return record != null &&
+        record.$1.path == (await _file(book, chapter, true)).path &&
+        (record.$2['images'] as List).isEmpty;
+  }
 
   Future<List<ReaderIllustration>> read(
     String book,
@@ -177,12 +193,25 @@ class OnlineIllustrationStore {
           }
           if (validated != null) {
             final destination = File('${target.parent.path}/$asset');
-            if (target.path != record.$1.path && !await destination.exists()) {
-              if (total + validated.bytes.length > 128 * 1024 * 1024) {
+            if (target.path != record.$1.path) {
+              final type = await FileSystemEntity.type(
+                destination.path,
+                followLinks: false,
+              );
+              if (type == FileSystemEntityType.link) {
+                throw const FileSystemException('插图文件不安全');
+              }
+              final previousSize = type == FileSystemEntityType.file
+                  ? await destination.length()
+                  : 0;
+              if (total - previousSize + validated.bytes.length >
+                  128 * 1024 * 1024) {
                 throw const FormatException('本书插图超过 128 MB');
               }
+              // A valid temporary asset does not prove that an existing
+              // destination is valid. Promote the validated bytes atomically.
               await AtomicFile.writeBytes(destination, validated.bytes);
-              total += validated.bytes.length;
+              total += validated.bytes.length - previousSize;
             }
             raw.remove('error');
             continue;

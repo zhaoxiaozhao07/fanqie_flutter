@@ -1,18 +1,72 @@
 #include "reader_file_exporter.h"
 #include <thread>
 namespace {
-// Closes the thread's visible common-dialog window (#32770). IFileDialog has
-// no programmatic Cancel on this SDK, but the save dialog owns our message
-// loop while shown, so WM_CLOSE dismisses exactly the active panel.
-BOOL CALLBACK CloseDialogWindow(HWND hwnd, LPARAM) {
-  wchar_t class_name[32]{};
-  if (IsWindowVisible(hwnd) && GetClassNameW(hwnd, class_name, 32) > 0 &&
-      wcscmp(class_name, L"#32770") == 0) {
-    PostMessageW(hwnd, WM_CLOSE, 0, 0);
-    return FALSE;  // Only one modal dialog can be active at a time.
+class DialogApartment {
+ public:
+  DialogApartment()
+      : status_(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED |
+                                           COINIT_DISABLE_OLE1DDE)) {}
+  ~DialogApartment() {
+    if (SUCCEEDED(status_)) CoUninitialize();
   }
-  return TRUE;
-}
+  HRESULT status() const { return status_; }
+
+ private:
+  HRESULT status_;
+};
+
+// The thread timer and dialog pointer belong exclusively to the dialog STA.
+// Use a thread timer (no unrelated HWND) that Show's modal loop dispatches.
+// A latched cancellation is retried until Show returns: unlike a single scan this
+// also covers cancellation while the shell is still constructing the panel.
+// No COM pointer or queue state is shared with the platform thread.
+class DialogCancellation {
+ public:
+  DialogCancellation(IFileDialog* dialog, std::function<bool()> cancelled)
+      : dialog_(dialog),
+        cancelled_(std::move(cancelled)),
+        previous_(current_) {
+    current_ = this;
+    timer_ = SetTimer(nullptr, 0, 25, TimerProc);
+  }
+  ~DialogCancellation() {
+    if (timer_ != 0) KillTimer(nullptr, timer_);
+    // KillTimer does not remove already queued WM_TIMER messages. Clear/restore
+    // TLS before releasing the dialog: a late callback checks both context and
+    // timer ID. Each worker has one panel and exits after its completion post.
+    current_ = previous_;
+  }
+  DialogCancellation(const DialogCancellation&) = delete;
+  DialogCancellation& operator=(const DialogCancellation&) = delete;
+  bool ready() const { return timer_ != 0; }
+
+ private:
+  static void CALLBACK TimerProc(HWND, UINT, UINT_PTR timer, DWORD) {
+    auto* context = current_;
+    if (context != nullptr && context->timer_ == timer &&
+        context->cancelled_()) {
+      // IFileDialog::Close must be called on its own COM apartment.
+      context->dialog_->Close(HRESULT_FROM_WIN32(ERROR_CANCELLED));
+      // Some shell versions acknowledge Close without unwinding Show when
+      // called from a timer callback. Target only this COM dialog's own HWND,
+      // retrying while it is being created; never enumerate arbitrary windows.
+      Microsoft::WRL::ComPtr<IOleWindow> window;
+      HWND hwnd = nullptr;
+      if (SUCCEEDED(context->dialog_->QueryInterface(IID_PPV_ARGS(&window))) &&
+          SUCCEEDED(window->GetWindow(&hwnd)) && hwnd != nullptr &&
+          GetWindowThreadProcessId(hwnd, nullptr) == GetCurrentThreadId()) {
+        PostMessageW(hwnd, WM_CLOSE, 0, 0);
+      }
+    }
+  }
+
+  static thread_local DialogCancellation* current_;
+  IFileDialog* const dialog_;
+  const std::function<bool()> cancelled_;
+  DialogCancellation* const previous_;
+  UINT_PTR timer_ = 0;
+};
+thread_local DialogCancellation* DialogCancellation::current_ = nullptr;
 std::wstring Utf8ToWide(const std::string& value) {
   if (value.empty()) return std::wstring();
   const int size = MultiByteToWideChar(
@@ -259,32 +313,22 @@ void ReaderFileExporter::SaveAs(const flutter::EncodableMap& args,
       Utf8ToWide(StringArg(args, "fileName", "export.txt")));
   request.mime = StringArg(args, "mimeType", "text/plain");
   request.result = std::move(result);
-  {
-    std::scoped_lock guard(lock_);
-    queue_.push_back(std::move(request));
-  }
+  queue_.push_back(std::move(request));
   PresentNext();
 }
 void ReaderFileExporter::Cancel(const std::string& id) {
+  // This channel handler never waits for Show. The dialog STA polls this
+  // thread-safe latch, and copies continue using the same cancellation checks.
   MarkCancelled(id);
-  // Dismiss an active modal dialog on our platform thread; a queued request
-  // reports cancellation when it is dequeued.
-  if (active_id_ == id) {
-    EnumThreadWindows(GetCurrentThreadId(), CloseDialogWindow, 0);
-  }
 }
 void ReaderFileExporter::PresentNext() {
   Request request;
-  {
-    std::scoped_lock guard(lock_);
-    if (active_id_.empty() && !queue_.empty()) {
-      request = std::move(queue_.front());
-      queue_.erase(queue_.begin());
-      active_id_ = request.id;
-    } else {
-      return;
-    }
-  }
+  // Request queue and active slot are platform-thread-only, including the
+  // completion that starts copying or presents the next serialized panel.
+  if (!active_id_.empty() || queue_.empty()) return;
+  request = std::move(queue_.front());
+  queue_.erase(queue_.begin());
+  active_id_ = request.id;
   if (IsCancelled(request.id)) {
     Outcome outcome;
     outcome.cancelled = true;
@@ -294,67 +338,124 @@ void ReaderFileExporter::PresentNext() {
   try {
     ValidateRegularFile(request.source);
     ensure_window_();
-    Microsoft::WRL::ComPtr<IFileDialog> dialog;
-    HRESULT hr = CoCreateInstance(CLSID_FileSaveDialog, nullptr,
-                                  CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&dialog));
-    if (FAILED(hr)) {
-      throw CopyError(CopyError::Kind::failed);
-    }
-    DWORD options = 0;
-    dialog->GetOptions(&options);
-    dialog->SetOptions(options | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST |
-                               FOS_OVERWRITEPROMPT | FOS_NOCHANGEDIR);
-    dialog->SetTitle(L"保存导出文件");
-    dialog->SetFileName(request.name.c_str());
-    if (const wchar_t* extension = DefaultExtensionFor(request.mime)) {
-      dialog->SetDefaultExtension(extension);
-    }
-    const HRESULT shown = dialog->Show(nullptr);
-    if (FAILED(shown)) {
-      Outcome outcome;
-      if (shown == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
-        outcome.cancelled = true;
-      } else {
-        outcome.error = "无法打开保存对话框";
-      }
-      FinishRequest(std::move(request), outcome);
-      return;
-    }
-    if (IsCancelled(request.id)) {
-      Outcome outcome;
-      outcome.cancelled = true;
-      FinishRequest(std::move(request), outcome);
-      return;
-    }
-    Microsoft::WRL::ComPtr<IShellItem> item;
-    wchar_t* raw = nullptr;
-    if (SUCCEEDED(dialog->GetResult(&item)) && item != nullptr &&
-        SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &raw)) &&
-        raw != nullptr) {
-      const std::wstring destination(raw);
-      CoTaskMemFree(raw);
-      const std::string id = request.id;
-      const std::wstring source = request.source;
-      Finish finish = request.result;
-      // The dialog slot stays occupied until the copy completes, matching the
-      // macOS serialized-panel contract.
-      RunCopy(id, source, destination, /*allow_overwrite=*/true,
-              std::move(finish));
-      return;
-    }
-    Outcome outcome;
-    outcome.error = "系统未返回已保存文件的位置";
-    FinishRequest(std::move(request), outcome);
   } catch (const CopyError& error) {
     Outcome outcome;
     outcome.error = error.kind == CopyError::Kind::invalidInput
                         ? "导出文件不可用"
                         : "文件保存失败，请检查权限与存储空间";
     FinishRequest(std::move(request), outcome);
+    return;
   } catch (...) {
     Outcome outcome;
     outcome.error = "文件保存失败，请检查权限与存储空间";
     FinishRequest(std::move(request), outcome);
+    return;
+  }
+  RunDialog(std::move(request));
+}
+void ReaderFileExporter::RunDialog(Request request) {
+  auto self = shared_from_this();
+  // Keep the callback available even if constructing the worker fails.
+  auto pending = std::make_shared<Request>(std::move(request));
+  try {
+    std::thread([self, pending] {
+      Outcome outcome;
+      {
+        // Destruction order: cancellation timer/TLS scope, dialog/items, then
+        // CoUninitialize, all on this STA before posting any main completion.
+        DialogApartment apartment;
+        try {
+          if (self->IsCancelled(pending->id)) {
+            outcome.cancelled = true;
+          } else {
+            if (FAILED(apartment.status())) {
+              throw CopyError(CopyError::Kind::failed);
+            }
+            Microsoft::WRL::ComPtr<IFileDialog> dialog;
+            HRESULT hr = CoCreateInstance(CLSID_FileSaveDialog, nullptr,
+                                          CLSCTX_INPROC_SERVER,
+                                          IID_PPV_ARGS(&dialog));
+            if (FAILED(hr)) throw CopyError(CopyError::Kind::failed);
+            DWORD options = 0;
+            dialog->GetOptions(&options);
+            dialog->SetOptions(options | FOS_FORCEFILESYSTEM |
+                                       FOS_PATHMUSTEXIST | FOS_OVERWRITEPROMPT |
+                                       FOS_NOCHANGEDIR);
+            dialog->SetTitle(L"保存导出文件");
+            dialog->SetFileName(pending->name.c_str());
+            if (const wchar_t* extension = DefaultExtensionFor(pending->mime)) {
+              dialog->SetDefaultExtension(extension);
+            }
+            DialogCancellation cancellation(
+                dialog.Get(), [self, pending] {
+                  return self->IsCancelled(pending->id);
+                });
+            if (!cancellation.ready()) {
+              throw CopyError(CopyError::Kind::failed);
+            }
+            // Recheck after COM/panel setup. Cancellation after this check is
+            // observed by the STA timer inside Show, even before a HWND exists.
+            const HRESULT shown =
+                self->IsCancelled(pending->id)
+                    ? HRESULT_FROM_WIN32(ERROR_CANCELLED)
+                    : dialog->Show(nullptr);
+            if (self->IsCancelled(pending->id) ||
+                shown == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+              outcome.cancelled = true;
+            } else if (FAILED(shown)) {
+              outcome.error = "无法打开保存对话框";
+            } else {
+              Microsoft::WRL::ComPtr<IShellItem> item;
+              wchar_t* raw = nullptr;
+              if (SUCCEEDED(dialog->GetResult(&item)) && item != nullptr &&
+                  SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &raw)) &&
+                  raw != nullptr) {
+                // This is a selection, NOT an authoritative saved outcome.
+                outcome.path = raw;
+              } else {
+                outcome.error = "系统未返回已保存文件的位置";
+              }
+              if (raw != nullptr) CoTaskMemFree(raw);
+            }
+          }
+        } catch (...) {
+          outcome.error = "无法打开保存对话框";
+        }
+      }
+      self->post_main_([self, pending, outcome = std::move(outcome)]() mutable {
+        self->DialogCompleted(std::move(*pending), std::move(outcome));
+      });
+    }).detach();
+  } catch (...) {
+    Outcome outcome;
+    outcome.error = "文件保存失败，请检查权限与存储空间";
+    FinishRequest(std::move(*pending), outcome);
+  }
+}
+void ReaderFileExporter::DialogCompleted(Request request, Outcome outcome) {
+  // Platform-thread-only: no shell interface or dialog pointer crosses here.
+  // Cancellation during handoff must prevent copy, not rewrite committed saved.
+  if (IsCancelled(request.id)) {
+    outcome = Outcome{};
+    outcome.cancelled = true;
+  }
+  if (outcome.cancelled || !outcome.error.empty() || outcome.path.empty()) {
+    FinishRequest(std::move(request), outcome);
+    return;
+  }
+  // The dialog slot stays occupied until RunCopy's main completion.
+  try {
+    // Copy the finish into the worker, retaining this request's callback until
+    // launch succeeds. A failed launch destroys its worker closure without
+    // consuming the only callback or escaping the noexcept window handler.
+    RunCopy(request.id, request.source, outcome.path,
+            /*allow_overwrite=*/true, request.result);
+  } catch (...) {
+    Outcome failed;
+    failed.error = "文件保存失败，请检查权限与存储空间";
+    // No worker accepted the request: fail exactly once on main, erase its
+    // cancellation latch, release the active slot and continue the queue.
+    FinishRequest(std::move(request), failed);
   }
 }
 void ReaderFileExporter::RunCopy(const std::string& id,
@@ -362,7 +463,7 @@ void ReaderFileExporter::RunCopy(const std::string& id,
                                  const std::wstring& destination,
                                  bool allow_overwrite, Finish result) {
   auto self = shared_from_this();
-  std::thread([self, id, source, destination, allow_overwrite,
+  auto worker = [self, id, source, destination, allow_overwrite,
                result = std::move(result)]() mutable {
     const auto cancelled = [&self, &id] { return self->IsCancelled(id); };
     Outcome outcome;
@@ -393,7 +494,12 @@ void ReaderFileExporter::RunCopy(const std::string& id,
         self->PresentNext();
       }
     });
-  }).detach();
+  };
+  if (launch_copy_) {
+    launch_copy_(std::move(worker));
+  } else {
+    std::thread(std::move(worker)).detach();
+  }
 }
 void ReaderFileExporter::CommitDownload(const flutter::EncodableMap& args,
                                         Finish result) {

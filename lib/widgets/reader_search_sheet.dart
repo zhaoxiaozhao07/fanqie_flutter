@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 
 import '../models/chapter.dart';
 import '../models/reader_theme.dart';
+import '../services/reader_platform.dart';
 import '../services/reader_search_service.dart';
 import '../services/desktop_shortcut_preferences.dart';
 
@@ -412,7 +413,9 @@ class _ReaderSearchSheetState extends State<ReaderSearchSheet> {
                     Expanded(
                       child: Text(
                         _hits.isEmpty
-                            ? 'Enter 跳转 · ⌘G 下一处'
+                            ? (ReaderPlatform.isWindows
+                                  ? 'Enter 跳转 · Ctrl+G 下一处'
+                                  : 'Enter 跳转 · ⌘G 下一处')
                             : '${_selected + 1} / ${_hits.length} 处匹配',
                         style: TextStyle(
                           fontSize: 12,
@@ -421,14 +424,18 @@ class _ReaderSearchSheetState extends State<ReaderSearchSheet> {
                       ),
                     ),
                     IconButton(
-                      tooltip: '上一处匹配（⌘⇧G）',
+                      tooltip: ReaderPlatform.isWindows
+                          ? '上一处匹配（Ctrl+Shift+G）'
+                          : '上一处匹配（⌘⇧G）',
                       onPressed: _hits.isEmpty
                           ? null
                           : () => _openRelative(backwards: true),
                       icon: const Icon(Icons.keyboard_arrow_up),
                     ),
                     IconButton(
-                      tooltip: '下一处匹配（⌘G）',
+                      tooltip: ReaderPlatform.isWindows
+                          ? '下一处匹配（Ctrl+G）'
+                          : '下一处匹配（⌘G）',
                       onPressed: _hits.isEmpty ? null : _openRelative,
                       icon: const Icon(Icons.keyboard_arrow_down),
                     ),

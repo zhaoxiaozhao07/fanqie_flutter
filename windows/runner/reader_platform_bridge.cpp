@@ -8,9 +8,12 @@
 #include <iphlpapi.h>
 #include <Netlistmgr.h>
 #include <powrprof.h>
+#include <shellapi.h>
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cwctype>
+#include <filesystem>
 #include <memory>
 #include <thread>
 #include <vector>
@@ -125,16 +128,86 @@ std::string StringArg(const flutter::EncodableMap& args, const char* key,
   return fallback;
 }
 
+std::optional<std::string> OptionalStringArg(const flutter::EncodableMap& args,
+                                             const char* key) {
+  const auto* value = FindArg(args, key);
+  if (value != nullptr && std::holds_alternative<std::string>(*value)) {
+    return std::get<std::string>(*value);
+  }
+  return std::nullopt;
+}
+
+double DoubleArg(const flutter::EncodableMap& args, const char* key,
+                 double fallback = 0.0) {
+  const auto* value = FindArg(args, key);
+  if (value == nullptr) return fallback;
+  if (std::holds_alternative<double>(*value)) return std::get<double>(*value);
+  if (std::holds_alternative<int32_t>(*value)) {
+    return static_cast<double>(std::get<int32_t>(*value));
+  }
+  if (std::holds_alternative<int64_t>(*value)) {
+    return static_cast<double>(std::get<int64_t>(*value));
+  }
+  return fallback;
+}
+
+int64_t Int64Arg(const flutter::EncodableMap& args, const char* key,
+                 int64_t fallback = 0) {
+  const auto* value = FindArg(args, key);
+  if (value == nullptr) return fallback;
+  if (std::holds_alternative<int64_t>(*value)) return std::get<int64_t>(*value);
+  if (std::holds_alternative<int32_t>(*value)) {
+    return static_cast<int64_t>(std::get<int32_t>(*value));
+  }
+  return fallback;
+}
+
+bool BoolArg(const flutter::EncodableMap& args, const char* key,
+             bool fallback = false) {
+  const auto* value = FindArg(args, key);
+  if (value != nullptr && std::holds_alternative<bool>(*value)) {
+    return std::get<bool>(*value);
+  }
+  return fallback;
+}
+
+constexpr uint64_t kMaxExternalFileBytes = 128ULL * 1024ULL * 1024ULL;
+constexpr uint64_t kMaxExternalStagedBytes = 512ULL * 1024ULL * 1024ULL;
+constexpr size_t kMaxExternalFiles = 16;
+
+std::wstring ToLowerWide(std::wstring value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](wchar_t c) { return static_cast<wchar_t>(std::towlower(c)); });
+  return value;
+}
+
+bool AcceptsExternalFile(const std::filesystem::path& path) {
+  const std::wstring ext = ToLowerWide(path.extension().wstring());
+  return ext == L".txt" || ext == L".epub";
+}
+
+std::filesystem::path ExternalImportRoot() {
+  wchar_t temp[MAX_PATH + 1]{};
+  const DWORD len = GetTempPathW(MAX_PATH, temp);
+  std::filesystem::path base =
+      len > 0 ? std::filesystem::path(temp) : std::filesystem::temp_directory_path();
+  return base / L"ReaderExternalImports";
+}
+
 }  // namespace
 
 ReaderPlatformBridge::ReaderPlatformBridge(
     flutter::BinaryMessenger* messenger, std::function<Win32Window*()> window)
-    : window_(std::move(window)) {
+    : window_(std::move(window)),
+      imports_(std::make_shared<ExternalImportState>()) {
   // The poster captures only the HWND: posting after destruction checks a
   // raw window handle instead of member state, and destroyed-window posts
   // are dropped by the message loop itself.
   const HWND task_hwnd = window_() ? window_()->GetHandle() : nullptr;
-  const auto post_main = [task_hwnd](std::function<void()> task) {
+  if (task_hwnd != nullptr) {
+    DragAcceptFiles(task_hwnd, TRUE);
+  }
+  post_main_ = [task_hwnd](std::function<void()> task) {
     if (task_hwnd == nullptr || !IsWindow(task_hwnd)) return;
     auto* boxed = new std::function<void()>(std::move(task));
     if (PostMessageW(task_hwnd, kPostTaskMessage, 0,
@@ -142,9 +215,9 @@ ReaderPlatformBridge::ReaderPlatformBridge(
       delete boxed;
     }
   };
-  decoder_ = std::make_shared<ReaderTextDecoder>(post_main);
+  decoder_ = std::make_shared<ReaderTextDecoder>(post_main_);
   exporter_ = std::make_shared<ReaderFileExporter>(
-      post_main,
+      post_main_,
       [this] {
         Win32Window* window = window_();
         return window != nullptr && window->GetHandle() != nullptr &&
@@ -154,6 +227,14 @@ ReaderPlatformBridge::ReaderPlatformBridge(
   channel_ = std::make_unique<flutter::MethodChannel<flutter::EncodableValue>>(
       messenger, "com.fanqie.fanqie_flutter/download",
       &flutter::StandardMethodCodec::GetInstance());
+  playback_ = std::make_shared<ReaderPlayback>(
+      post_main_, [this](const std::string& method,
+                         const flutter::EncodableMap& payload) {
+        if (channel_ != nullptr) {
+          channel_->InvokeMethod(
+              method, std::make_unique<flutter::EncodableValue>(payload));
+        }
+      });
   channel_->SetMethodCallHandler([this](const auto& call, auto result) {
     HandleMethodCall(call, std::move(result));
   });
@@ -165,6 +246,27 @@ bool ReaderPlatformBridge::HandleMessage(HWND hwnd, UINT message,
     case WM_CLOSE:
       BeginQuitHandshake(hwnd);
       return true;
+    case WM_DROPFILES: {
+      const HDROP drop = reinterpret_cast<HDROP>(wparam);
+      const UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+      std::vector<std::wstring> paths;
+      paths.reserve(count);
+      for (UINT i = 0; i < count; ++i) {
+        const UINT chars = DragQueryFileW(drop, i, nullptr, 0);
+        if (chars == 0) continue;
+        std::wstring buffer(chars + 1, L'\0');
+        if (DragQueryFileW(drop, i, buffer.data(), chars + 1) > 0) {
+          buffer.resize(chars);
+          paths.push_back(std::move(buffer));
+        }
+      }
+      DragFinish(drop);
+      if (!paths.empty()) {
+        EnqueueExternalFiles(paths);
+        ShowMainWindow();
+      }
+      return true;
+    }
     case WM_TIMER:
       if (wparam == kQuitTimerId && quit_pending_) {
         FinishQuitHandshake(false);
@@ -175,6 +277,8 @@ bool ReaderPlatformBridge::HandleMessage(HWND hwnd, UINT message,
       window_activated_ = wparam != 0;
       RefreshPowerRequest();
       return false;
+    case WM_APPCOMMAND:
+      return playback_ != nullptr && playback_->HandleAppCommand(lparam);
     case WM_SIZE:
       if (wparam == SIZE_MINIMIZED) {
         window_minimized_ = true;
@@ -205,11 +309,15 @@ flutter::EncodableValue ReaderPlatformBridge::Capabilities() {
   const HWND hwnd = window ? window->GetHandle() : nullptr;
   flutter::EncodableMap values;
   const int battery = QueryBatteryLevel();
-  values[flutter::EncodableValue("tts")] = flutter::EncodableValue(false);
+  values[flutter::EncodableValue("tts")] = flutter::EncodableValue(true);
+  values[flutter::EncodableValue("nativeSpeech")] =
+      flutter::EncodableValue(ReaderPlayback::NativeSpeechAvailable());
   values[flutter::EncodableValue("mediaPlayback")] =
-      flutter::EncodableValue(false);
+      flutter::EncodableValue(true);
   values[flutter::EncodableValue("secureStorage")] =
-      flutter::EncodableValue(false);
+      flutter::EncodableValue(true);
+  values[flutter::EncodableValue("audioOutput")] =
+      flutter::EncodableValue(ReaderPlayback::HasOutputDevice());
   values[flutter::EncodableValue("windowBrightnessControl")] =
       flutter::EncodableValue(false);
   values[flutter::EncodableValue("volumeKeys")] = flutter::EncodableValue(false);
@@ -221,6 +329,7 @@ flutter::EncodableValue ReaderPlatformBridge::Capabilities() {
       flutter::EncodableValue(true);
   values[flutter::EncodableValue("textDecoder")] = flutter::EncodableValue(true);
   values[flutter::EncodableValue("fileExport")] = flutter::EncodableValue(true);
+  values[flutter::EncodableValue("fileImport")] = flutter::EncodableValue(true);
   values[flutter::EncodableValue("platform")] =
       flutter::EncodableValue("windows");
   values[flutter::EncodableValue("architecture")] =
@@ -351,6 +460,9 @@ void ReaderPlatformBridge::FinishQuitHandshake(bool allowed) {
 }
 
 void ReaderPlatformBridge::SaveWindowStateAndClose(HWND hwnd) {
+  if (playback_ != nullptr) {
+    playback_->Release();
+  }
   // Never persist the borderless full-screen geometry; restore the durable
   // normal placement first.
   if (Win32Window* window = window_(); window != nullptr &&
@@ -376,6 +488,101 @@ void ReaderPlatformBridge::HandleMethodCall(
   const std::string& method = call.method_name();
   if (method == "getReaderCapabilities") {
     result->Success(Capabilities());
+    return;
+  }
+  if (method == "readTtsSecret") {
+    std::optional<std::string> secret;
+    std::string error;
+    if (!ReaderPlayback::ReadSecret(&secret, &error)) {
+      result->Error("secureStorage", error);
+      return;
+    }
+    if (secret.has_value()) {
+      result->Success(flutter::EncodableValue(*secret));
+    } else {
+      result->Success();
+    }
+    return;
+  }
+  if (method == "writeTtsSecret") {
+    const auto value = OptionalStringArg(args, "value");
+    std::string error;
+    if (!value.has_value() || !ReaderPlayback::WriteSecret(*value, &error)) {
+      result->Error("secureStorage",
+                    error.empty() ? "密钥未写入系统安全存储" : error);
+      return;
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+  if (method == "initNativeTts") {
+    result->Success(
+        flutter::EncodableValue(ReaderPlayback::NativeSpeechAvailable()));
+    return;
+  }
+  if (method == "getNativeTtsVoices") {
+    result->Success(flutter::EncodableValue(ReaderPlayback::Voices()));
+    return;
+  }
+  if (method == "speakNativeTts") {
+    result->Success(flutter::EncodableValue(playback_->Speak(
+        StringArg(args, "id"), StringArg(args, "text"),
+        DoubleArg(args, "rate", 1.0), StringArg(args, "voice"))));
+    return;
+  }
+  if (method == "playAudioFile") {
+    result->Success(flutter::EncodableValue(playback_->Play(
+        StringArg(args, "id"), StringArg(args, "filePath"))));
+    return;
+  }
+  if (method == "stopPlayback") {
+    result->Success(
+        flutter::EncodableValue(playback_->Stop(OptionalStringArg(args, "id"))));
+    return;
+  }
+  if (method == "stopNativeTts") {
+    result->Success(flutter::EncodableValue(playback_->StopNative()));
+    return;
+  }
+  if (method == "stopAudio") {
+    result->Success(flutter::EncodableValue(playback_->StopAudio()));
+    return;
+  }
+  if (method == "pauseAudio") {
+    result->Success(flutter::EncodableValue(
+        playback_->PauseAudio(OptionalStringArg(args, "id"))));
+    return;
+  }
+  if (method == "resumeAudio") {
+    result->Success(flutter::EncodableValue(
+        playback_->ResumeAudio(OptionalStringArg(args, "id"))));
+    return;
+  }
+  if (method == "setAudioVolume") {
+    result->Success(flutter::EncodableValue(
+        playback_->SetVolume(DoubleArg(args, "volume", 1.0))));
+    return;
+  }
+  if (method == "setSleepDeadline") {
+    result->Success(flutter::EncodableValue(
+        playback_->SetDeadline(Int64Arg(args, "milliseconds", 0))));
+    return;
+  }
+  if (method == "getPlaybackState") {
+    result->Success(flutter::EncodableValue(playback_->PlaybackState()));
+    return;
+  }
+  if (method == "updateMediaPlaybackState") {
+    playback_->UpdateMedia(StringArg(args, "title"),
+                           StringArg(args, "subtitle"),
+                           BoolArg(args, "isPlaying", false),
+                           BoolArg(args, "isActive", false));
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+  if (method == "releasePlaybackService") {
+    playback_->Release();
+    result->Success(flutter::EncodableValue(true));
     return;
   }
   if (method == "getNetworkType") {
@@ -498,6 +705,19 @@ void ReaderPlatformBridge::HandleMethodCall(
     result->Success(flutter::EncodableValue(true));
     return;
   }
+  if (method == "takeExternalImports") {
+    result->Success(flutter::EncodableValue(TakeExternalImports()));
+    return;
+  }
+  if (method == "releaseExternalImport") {
+    ReleaseExternalImport(StringArg(args, "id"));
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+  if (method == "externalImportsBusy") {
+    result->Success(flutter::EncodableValue(ExternalImportsBusy()));
+    return;
+  }
   if (method == "setReaderCommandsEnabled") {
     bool enabled = false;
     if (const auto* value = FindArg(args, "enabled");
@@ -505,6 +725,10 @@ void ReaderPlatformBridge::HandleMethodCall(
       enabled = std::get<bool>(*value);
     }
     reader_commands_enabled_ = enabled;
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+  if (method == "setReaderShortcuts") {
     result->Success(flutter::EncodableValue(true));
     return;
   }
@@ -532,6 +756,20 @@ void ReaderPlatformBridge::HandleMethodCall(
     return;
   }
 #ifndef NDEBUG
+  if (method == "stageTestExternalFiles") {
+    std::vector<std::wstring> paths;
+    if (const auto* list = FindArg(args, "paths");
+        list != nullptr && std::holds_alternative<flutter::EncodableList>(*list)) {
+      for (const auto& item : std::get<flutter::EncodableList>(*list)) {
+        if (std::holds_alternative<std::string>(item)) {
+          paths.push_back(Utf8ToWide(std::get<std::string>(item)));
+        }
+      }
+    }
+    EnqueueExternalFiles(paths);
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
   if (method == "setTestWindowSize") {
     Win32Window* window = window_();
     double width = 0;
@@ -619,4 +857,210 @@ void ReaderPlatformBridge::HandleMethodCall(
   }
 #endif
   result->NotImplemented();
+}
+
+void ReaderPlatformBridge::EnqueueExternalFiles(
+    const std::vector<std::wstring>& paths) {
+  const auto imports = imports_;
+  const auto post_main = post_main_;
+  auto notify_ready = [this, post_main] {
+    post_main([this] {
+      if (channel_ != nullptr) {
+        channel_->InvokeMethod("onExternalImportsAvailable", nullptr);
+      }
+    });
+  };
+
+  size_t count = 0;
+  for (const auto& raw_path : paths) {
+    if (count >= kMaxExternalFiles) break;
+    ++count;
+    const std::filesystem::path source_path(raw_path);
+    const std::wstring normalized_key = ToLowerWide(source_path.lexically_normal().wstring());
+    std::string id;
+    {
+      std::lock_guard<std::mutex> lock(imports->mutex);
+      bool duplicate = false;
+      for (const auto& entry : imports->source_keys) {
+        if (entry.second == normalized_key) {
+          duplicate = true;
+          break;
+        }
+      }
+      if (duplicate) continue;
+      if (imports->source_keys.size() >= kMaxExternalFiles) {
+        if (imports->pending.size() < kMaxExternalFiles) {
+          flutter::EncodableMap limit_record;
+          limit_record[flutter::EncodableValue("id")] =
+              flutter::EncodableValue("limit_" + std::to_string(imports->next_id++));
+          limit_record[flutter::EncodableValue("name")] =
+              flutter::EncodableValue("批量导入");
+          limit_record[flutter::EncodableValue("error")] = flutter::EncodableValue(
+              "一次最多接收 16 个文件；暂存总量最多 512 MB，未接收的文件请稍后重试。");
+          imports->pending.push_back(flutter::EncodableValue(limit_record));
+          notify_ready();
+        }
+        break;
+      }
+      id = "ext_" + std::to_string(imports->next_id++);
+      imports->source_keys[id] = normalized_key;
+      imports->transfers.insert(id);
+    }
+
+    std::thread([imports, notify_ready, id, source_path] {
+      flutter::EncodableMap record;
+      record[flutter::EncodableValue("id")] = flutter::EncodableValue(id);
+      const std::wstring filename = source_path.filename().wstring();
+      record[flutter::EncodableValue("name")] =
+          flutter::EncodableValue(WideToUtf8(filename.empty() ? L"文件导入" : filename));
+
+      std::wstring staged_dir;
+      uint64_t staged_bytes = 0;
+      std::string error;
+
+      uint64_t limit = kMaxExternalFileBytes;
+      {
+        std::lock_guard<std::mutex> lock(imports->mutex);
+        uint64_t used = 0;
+        for (const auto& item : imports->staged_sizes) used += item.second;
+        const uint64_t remaining =
+            used < kMaxExternalStagedBytes ? (kMaxExternalStagedBytes - used) : 0;
+        limit = std::min(kMaxExternalFileBytes, remaining);
+      }
+
+      if (!AcceptsExternalFile(source_path)) {
+        error = "仅支持本地 TXT / EPUB 文件。";
+      } else {
+        const DWORD attrs = GetFileAttributesW(source_path.c_str());
+        if (attrs == INVALID_FILE_ATTRIBUTES ||
+            (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+            (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+          error = "文件为空、不是普通文件或超过导入容量限制（单文件 128 MB）。";
+        } else {
+          HANDLE input = CreateFileW(
+              source_path.c_str(), GENERIC_READ,
+              FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+              OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+              nullptr);
+          if (input == INVALID_HANDLE_VALUE) {
+            error = "无法读取所选文件。";
+          } else {
+            BY_HANDLE_FILE_INFORMATION info{};
+            LARGE_INTEGER file_size{};
+            if (!GetFileInformationByHandle(input, &info) ||
+                (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+                (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0 ||
+                !GetFileSizeEx(input, &file_size) || file_size.QuadPart <= 0 ||
+                static_cast<uint64_t>(file_size.QuadPart) > limit) {
+              CloseHandle(input);
+              error = "文件为空、不是普通文件或超过导入容量限制（单文件 128 MB）。";
+            } else {
+              const std::filesystem::path dir =
+                  ExternalImportRoot() / Utf8ToWide(id);
+              std::error_code ec;
+              std::filesystem::create_directories(dir, ec);
+              const std::filesystem::path pending_file = dir / L"source.pending";
+              const std::filesystem::path target_file = dir / source_path.filename();
+              HANDLE output = CreateFileW(
+                  pending_file.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                  FILE_ATTRIBUTE_NORMAL, nullptr);
+              if (output == INVALID_HANDLE_VALUE) {
+                CloseHandle(input);
+                std::filesystem::remove_all(dir, ec);
+                error = "无法创建导入暂存文件。";
+              } else {
+                std::vector<char> buffer(64 * 1024);
+                uint64_t copied = 0;
+                bool ok = true;
+                for (;;) {
+                  DWORD read_bytes = 0;
+                  if (!ReadFile(input, buffer.data(),
+                                static_cast<DWORD>(buffer.size()), &read_bytes,
+                                nullptr)) {
+                    ok = false;
+                    break;
+                  }
+                  if (read_bytes == 0) break;
+                  copied += read_bytes;
+                  if (copied > limit) {
+                    ok = false;
+                    break;
+                  }
+                  DWORD written = 0;
+                  if (!WriteFile(output, buffer.data(), read_bytes, &written,
+                                 nullptr) ||
+                      written != read_bytes) {
+                    ok = false;
+                    break;
+                  }
+                }
+                FlushFileBuffers(output);
+                CloseHandle(output);
+                CloseHandle(input);
+                if (!ok ||
+                    copied != static_cast<uint64_t>(file_size.QuadPart) ||
+                    !MoveFileExW(pending_file.c_str(), target_file.c_str(),
+                                 MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+                  std::filesystem::remove_all(dir, ec);
+                  error = "复制外部导入文件失败。";
+                } else {
+                  staged_dir = dir.wstring();
+                  staged_bytes = copied;
+                  record[flutter::EncodableValue("path")] =
+                      flutter::EncodableValue(WideToUtf8(target_file.wstring()));
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (!error.empty()) {
+        record[flutter::EncodableValue("error")] =
+            flutter::EncodableValue(error);
+      }
+      {
+        std::lock_guard<std::mutex> lock(imports->mutex);
+        imports->transfers.erase(id);
+        if (!staged_dir.empty()) {
+          imports->owned_dirs[id] = staged_dir;
+          imports->staged_sizes[id] = staged_bytes;
+        }
+        imports->pending.push_back(flutter::EncodableValue(record));
+      }
+      notify_ready();
+    }).detach();
+  }
+}
+
+flutter::EncodableList ReaderPlatformBridge::TakeExternalImports() {
+  std::lock_guard<std::mutex> lock(imports_->mutex);
+  flutter::EncodableList out = std::move(imports_->pending);
+  imports_->pending.clear();
+  return out;
+}
+
+void ReaderPlatformBridge::ReleaseExternalImport(const std::string& id) {
+  std::wstring dir;
+  {
+    std::lock_guard<std::mutex> lock(imports_->mutex);
+    imports_->source_keys.erase(id);
+    imports_->staged_sizes.erase(id);
+    const auto it = imports_->owned_dirs.find(id);
+    if (it != imports_->owned_dirs.end()) {
+      dir = it->second;
+      imports_->owned_dirs.erase(it);
+    }
+  }
+  if (!dir.empty()) {
+    std::thread([dir] {
+      std::error_code ec;
+      std::filesystem::remove_all(std::filesystem::path(dir), ec);
+    }).detach();
+  }
+}
+
+bool ReaderPlatformBridge::ExternalImportsBusy() {
+  std::lock_guard<std::mutex> lock(imports_->mutex);
+  return !imports_->transfers.empty();
 }

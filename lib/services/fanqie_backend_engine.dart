@@ -16,6 +16,7 @@ import 'online_illustration_store.dart';
 import 'book_directory_cache.dart';
 import 'book_directory_parser.dart';
 import 'reader_platform.dart';
+import 'atomic_file.dart';
 
 class ChapterDownloadIncomplete extends StateError {
   final int failures, downloaded;
@@ -95,11 +96,11 @@ class FanqieBackendEngine {
   Future<Directory> _getChapterCacheDir() async {
     Directory baseDir;
     try {
-      baseDir = ReaderPlatform.isMacOS
+      baseDir = ReaderPlatform.isDesktop
           ? await readerCache.documents()
           : await getTemporaryDirectory();
     } catch (_) {
-      if (ReaderPlatform.isMacOS) rethrow;
+      if (ReaderPlatform.isDesktop) rethrow;
       baseDir = Directory.systemTemp;
     }
     final dir = Directory('${baseDir.path}/fanqie_cache/chapters');
@@ -602,13 +603,19 @@ class FanqieBackendEngine {
 
   final FanqieMobileGateway _mobileGateway = FanqieMobileGateway();
 
-  Future<OnlineChapter?> _fetchDocument(String id) async {
+  Future<OnlineChapter?> _fetchDocument(
+    String id, {
+    bool useSessionPool = false,
+  }) async {
     if (_chapterDocumentLoader != null) return _chapterDocumentLoader(id);
     if (_chapterLoader != null) {
       final text = await _chapterLoader(id);
       return text == null ? null : OnlineChapter(text);
     }
-    return _mobileGateway.fetchChapterDocument(id);
+    return _mobileGateway.fetchChapterDocument(
+      id,
+      useSessionPool: useSessionPool,
+    );
   }
 
   /// Bypass *all* text caches only to recover missing image metadata. Never
@@ -626,7 +633,12 @@ class FanqieBackendEngine {
       if (document.text.trim() != text.trim()) {
         throw const FormatException('线上正文已变化，未改动原书，请勿删除阅读数据');
       }
-      await onlineImages.saveSources(bookId, chapterId, document);
+      await onlineImages.saveSources(
+        bookId,
+        chapterId,
+        document,
+        permanent: permanent,
+      );
     }
     final protect =
         permanent ||
@@ -638,7 +650,13 @@ class FanqieBackendEngine {
       // Refresh only from the same full chapter and keep the old text intact.
       final fresh = await _fetchDocument(chapterId);
       if (fresh == null || fresh.text.trim() != text.trim()) rethrow;
-      await onlineImages.saveSources(bookId, chapterId, fresh, replace: true);
+      await onlineImages.saveSources(
+        bookId,
+        chapterId,
+        fresh,
+        replace: true,
+        permanent: protect,
+      );
       await onlineImages.hydrate(bookId, chapterId, text, permanent: protect);
     }
   }
@@ -706,95 +724,155 @@ class FanqieBackendEngine {
     if (isCancelled?.call() == true) return;
     await directoryCache.saveDownloaded(bookId, chapters);
     final offlineDir = await getOfflineBookDir(bookId);
+    // Pool sessions are acquired lazily only after protected, temporary and
+    // legacy caches have failed. Filenames alone cannot establish network need.
     int completed = 0;
-    int nextIndex = 0;
     final failures = <String>{};
     var diskFailure = false;
 
-    Future<void> worker() async {
-      while (true) {
-        if (isCancelled?.call() == true) return;
-
-        int currentIndex;
-        if (nextIndex >= total) return;
-        currentIndex = nextIndex++;
-
-        final chapter = chapters[currentIndex];
-        final offlineFile = File(
-          '${offlineDir.path}/${ReaderCacheService.segment(chapter.itemId)}.txt',
-        );
-
-        // 检查是否已有离线文件
-        bool hasCached = false;
-        try {
-          if (await offlineFile.exists()) {
-            hasCached = ReaderCacheService.isReadable(
-              await offlineFile.readAsString(),
-            );
+    Future<bool> processChapter(Chapter chapter) async {
+      final offlineFile = File(
+        '${offlineDir.path}/${ReaderCacheService.segment(chapter.itemId)}.txt',
+      );
+      try {
+        // Validate type, symlinks and size; read protected text before temp.
+        String? text = await readerCache.read(bookId, chapter.itemId);
+        OnlineChapter? fetched;
+        if (text == null && !bookId.startsWith('local_')) {
+          final legacy = await _getChapterCacheFile(chapter.itemId);
+          if (await FileSystemEntity.type(legacy.path, followLinks: false) ==
+                  FileSystemEntityType.file &&
+              !await FileSystemEntity.isLink(legacy.parent.path) &&
+              await legacy.length() <= ReaderCacheService.maxChapterBytes) {
+            final cached = await legacy.readAsString();
+            if (cached.length > 50 && ReaderCacheService.isReadable(cached)) {
+              text = cached;
+            }
           }
-        } catch (_) {}
-
-        if (!hasCached) {
-          String? content;
-          for (int retry = 0; retry < 2; retry++) {
-            if (isCancelled?.call() == true) return;
-            try {
-              content = await getChapterContent(chapter.itemId, bookId: bookId);
-              if (ReaderCacheService.isReadable(content)) {
-                break;
+          if (text == null) {
+            for (var attempt = 0; attempt < 2; attempt++) {
+              if (isCancelled?.call() == true) return false;
+              try {
+                final doc = await _fetchDocument(
+                  chapter.itemId,
+                  useSessionPool: true,
+                );
+                if (doc != null && ReaderCacheService.isReadable(doc.text)) {
+                  fetched = doc;
+                  text = doc.text;
+                  break;
+                }
+              } catch (e) {
+                if (e is FileSystemException) rethrow;
               }
-            } catch (_) {}
-            if (retry < 1) {
-              await Future.delayed(Duration(milliseconds: 100 * (retry + 1)));
+              if (attempt == 0) {
+                await Future<void>.delayed(const Duration(milliseconds: 120));
+              }
             }
-          }
-
-          if (isCancelled?.call() == true) return;
-          if (ReaderCacheService.isReadable(content)) {
-            try {
-              final staged = File('${offlineFile.path}.pending');
-              await staged.writeAsString(content!, flush: true);
-              await staged.rename(offlineFile.path);
-            } catch (_) {
-              failures.add(chapter.itemId);
-              diskFailure = true;
-            }
-          } else {
-            failures.add(chapter.itemId);
           }
         }
-
-        // Even already downloaded text may be from pre-image versions.
-        // A missing image is a retryable failure, not a completed download.
-        if (isCancelled?.call() == true) return;
-        try {
-          if (await offlineFile.exists()) {
-            final text = await offlineFile.readAsString();
-            if (ReaderCacheService.isReadable(text)) {
-              await repairChapterImages(
-                bookId,
-                chapter.itemId,
-                text,
-                permanent: true,
-              );
-            }
-          }
-        } catch (e) {
-          failures.add(chapter.itemId);
-          if (e is FileSystemException) diskFailure = true;
+        if (isCancelled?.call() == true ||
+            !ReaderCacheService.isReadable(text)) {
+          return false;
         }
-        completed++;
-        onProgress?.call(completed, total, '正在下载: ${chapter.title}');
+        if (await FileSystemEntity.isLink(offlineDir.path) ||
+            await FileSystemEntity.isLink(offlineDir.parent.path) ||
+            await FileSystemEntity.isLink(offlineFile.path)) {
+          throw const FileSystemException('离线目录不安全');
+        }
+        if (!await offlineFile.exists()) {
+          await AtomicFile.writeString(offlineFile, text!);
+        } else {
+          if (await offlineFile.length() > ReaderCacheService.maxChapterBytes) {
+            throw const FormatException('离线正文过大，原文件已保留');
+          }
+          final bytes = await offlineFile.readAsBytes();
+          String? old;
+          try {
+            old = utf8.decode(bytes);
+          } on FormatException {
+            // Preserve rejected bytes before atomically replacing them with the
+            // validated fallback. Do not mistake a decoding failure for disk IO.
+            final rejected = File(
+              '${offlineFile.path}.rejected-${DateTime.now().microsecondsSinceEpoch}',
+            );
+            await AtomicFile.writeBytes(rejected, bytes);
+          }
+          if (!ReaderCacheService.isReadable(old)) {
+            await AtomicFile.writeString(offlineFile, text!);
+          }
+        }
+        if (isCancelled?.call() == true) return false;
+        if (fetched != null) {
+          await onlineImages.saveSources(
+            bookId,
+            chapter.itemId,
+            fetched,
+            permanent: true,
+          );
+        }
+        if (!bookId.startsWith('local_') &&
+            !await onlineImages.isPermanentReady(
+              bookId,
+              chapter.itemId,
+              text!,
+            )) {
+          await repairChapterImages(
+            bookId,
+            chapter.itemId,
+            text,
+            permanent: true,
+          );
+        }
+        return isCancelled?.call() != true;
+      } catch (e) {
+        if (e is FileSystemException) diskFailure = true;
+        return false;
       }
     }
 
-    final workerCount = concurrency.clamp(1, total);
-    final workers = List.generate(workerCount, (_) => worker());
-    await Future.wait(workers);
+    Future<void> run(
+      List<Chapter> pending,
+      int workers, {
+      bool sweep = false,
+    }) async {
+      var index = 0;
+      Future<void> worker() async {
+        while (index < pending.length && isCancelled?.call() != true) {
+          final chapter = pending[index++];
+          final ok = await processChapter(chapter);
+          if (isCancelled?.call() == true) return;
+          if (ok) {
+            completed++;
+          } else {
+            failures.add(chapter.itemId);
+          }
+          onProgress?.call(
+            completed,
+            total,
+            '${sweep ? '正在补齐' : '正在下载'}: ${chapter.title}',
+          );
+        }
+      }
+
+      await Future.wait(
+        List.generate(workers.clamp(1, pending.length), (_) => worker()),
+      );
+    }
+
+    await run(chapters, concurrency);
+    // One bounded, lower-concurrency sweep; disk errors never auto-retry.
+    if (failures.isNotEmpty && !diskFailure && isCancelled?.call() != true) {
+      final pending = chapters
+          .where((c) => failures.contains(c.itemId))
+          .toList();
+      failures.clear();
+      await run(pending, concurrency.clamp(1, 4), sweep: true);
+    }
     if (failures.isNotEmpty && isCancelled?.call() != true) {
       throw ChapterDownloadIncomplete(
         failures.length,
-        total - failures.length,
+        completed,
         failures.take(20).toList(),
         diskFailure: diskFailure,
       );

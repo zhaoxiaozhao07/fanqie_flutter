@@ -218,6 +218,32 @@ void main() {
   );
 
   test(
+    'promotion repairs a corrupt permanent destination even when temporary image is valid',
+    () async {
+      final text = (await engine.getChapterContent('one', bookId: 'book'))!;
+      await engine.repairChapterImages('book', 'one', text);
+      final image = (await engine.onlineImages.read('book', 'one', text)).first;
+      final destination = File(
+        '${root.path}/offline_books/book/${image.asset}',
+      );
+      await destination.parent.create(recursive: true);
+      await destination.writeAsBytes(imagePng().sublist(0, 24));
+      await engine.downloadChapters(
+        bookId: 'book',
+        chapters: [Chapter(itemId: 'one', title: '第一章')],
+      );
+      expect(await destination.readAsBytes(), imagePng());
+      expect(
+        await (await engine.getOfflineChapterFile(
+          'book',
+          'one',
+        )).readAsString(),
+        text,
+      );
+    },
+  );
+
+  test(
     'failed images do not report successful download; retry heals corrupt/missing files',
     () async {
       final chapters = [Chapter(itemId: 'one', title: '第一章')];
@@ -237,13 +263,18 @@ void main() {
       final asset = File(
         '${root.path}/offline_books/book/${images.first.asset}',
       );
-      for (final corrupt in [true, false]) {
-        if (corrupt) {
-          await asset.writeAsString('HTML error page${'x' * 200}');
+      for (final corrupt in [
+        <int>[],
+        imagePng().sublist(0, 24),
+        utf8.encode('HTML error page${'x' * 200}'),
+        null,
+      ]) {
+        if (corrupt != null) {
+          await asset.writeAsBytes(corrupt);
         } else {
           await asset.delete();
         }
-        await engine.repairChapterImages('book', 'one', text);
+        await engine.downloadChapters(bookId: 'book', chapters: chapters);
         images = await engine.onlineImages.read('book', 'one', text);
         expect(images.every((i) => i.error == null), true);
         expect(await asset.readAsBytes(), imagePng());

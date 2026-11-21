@@ -4,8 +4,8 @@ library;
 import 'dart:io';
 
 import 'package:flutter/gestures.dart';
-import 'package:flutter/rendering.dart';
 
+import 'helpers/desktop_selection.dart';
 import 'package:fanqie_flutter/models/book.dart';
 import 'package:fanqie_flutter/models/chapter.dart';
 import 'package:fanqie_flutter/models/reader_settings.dart';
@@ -22,6 +22,7 @@ import 'package:fanqie_flutter/services/reader_position_service.dart';
 import 'package:fanqie_flutter/services/reader_route_observer.dart';
 import 'package:fanqie_flutter/services/reader_settings_repository.dart';
 import 'package:fanqie_flutter/services/reader_system_service.dart';
+import 'package:fanqie_flutter/widgets/desktop_shortcuts.dart';
 import 'package:fanqie_flutter/widgets/reader_page_view.dart';
 import 'package:fanqie_flutter/widgets/reader_settings_sheet.dart';
 import 'package:flutter/foundation.dart';
@@ -387,6 +388,17 @@ void main() {
       );
       expect(DesktopCommands.dispatch('find'), true);
       await tester.pumpAndSettle();
+      expect(FocusManager.instance.primaryFocus!.debugLabel, 'shelf-search');
+      expect(
+        tester.state(find.byType(BookshelfScreen, skipOffstage: false)),
+        same(shelf),
+      );
+      tester
+          .widget<NavigationRail>(find.byType(NavigationRail))
+          .onDestinationSelected!(0);
+      await tester.pumpAndSettle();
+      expect(DesktopCommands.dispatch('find'), true);
+      await tester.pumpAndSettle();
       expect(
         FocusManager.instance.primaryFocus!.debugLabel,
         'desktop-library-search',
@@ -407,6 +419,7 @@ void main() {
       const ReaderSettings(
         pageMode: true,
         pageAnimation: 'none',
+        desktopColumns: 'single',
         commentBubbles: false,
         pureMode: true,
       ),
@@ -419,26 +432,29 @@ void main() {
     expect(find.byIcon(Icons.arrow_back_ios_new), findsNothing);
 
     Future<void> mouseTap(Offset global) async {
-      final gesture = await tester.startGesture(
-        global,
-        kind: PointerDeviceKind.mouse,
-      );
-      await gesture.up();
+      await tester.tapAt(global, kind: PointerDeviceKind.mouse);
+      await tester.pump(const Duration(milliseconds: 350));
       await tester.pumpAndSettle();
     }
 
-    // 右侧热区：点击段落文字本身也要翻页（SelectableText 在手势竞技场获胜）。
-    var rect = tester.getRect(find.byType(SelectableText).first);
+    // 右侧热区：点击段落文字本身翻页（DesktopSelectableParagraph 区分单击与双击选词）。
+    var rect = tester.getRect(
+      find.byType(DesktopSelectableParagraph).hitTestable().first,
+    );
     await mouseTap(Offset(rect.right - 24, rect.top + 8));
     expect(pageState.currentPageId, isNot(first));
 
     // 左侧热区翻回上一页。
-    rect = tester.getRect(find.byType(SelectableText).first);
+    rect = tester.getRect(
+      find.byType(DesktopSelectableParagraph).hitTestable().first,
+    );
     await mouseTap(Offset(rect.left + 24, rect.top + 8));
     expect(pageState.currentPageId, first);
 
     // 中部点击展开上下栏，出现返回主页按钮。
-    rect = tester.getRect(find.byType(SelectableText).first);
+    rect = tester.getRect(
+      find.byType(DesktopSelectableParagraph).hitTestable().first,
+    );
     await mouseTap(Offset(rect.center.dx, rect.top + 8));
     expect(find.byIcon(Icons.arrow_back_ios_new), findsOneWidget);
 
@@ -464,12 +480,14 @@ void main() {
       ),
     );
     expect(find.byIcon(Icons.arrow_back_ios_new), findsNothing);
-    final rect = tester.getRect(find.byType(SelectableText).first);
-    final gesture = await tester.startGesture(
+    final rect = tester.getRect(
+      find.byType(DesktopSelectableParagraph).hitTestable().first,
+    );
+    await tester.tapAt(
       Offset(rect.center.dx, rect.top + 8),
       kind: PointerDeviceKind.mouse,
     );
-    await gesture.up();
+    await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
     expect(find.byIcon(Icons.arrow_back_ios_new), findsOneWidget);
     expect(tester.takeException(), isNull);
@@ -487,28 +505,24 @@ void main() {
       const ReaderSettings(
         pageMode: true,
         pageAnimation: 'none',
-        dualColumn: true,
+        desktopColumns: 'double',
         commentBubbles: false,
         pureMode: true,
       ),
     );
     expect(
-      find.byKey(const ValueKey('reader-dual-columns')),
+      find.byKey(const ValueKey('reader-double-column-spread')),
       findsOneWidget,
     );
-    // 两栏并排：同一段落层级的可编辑文本横向分布在不同左缘。
-    final columns = find
-        .byKey(const ValueKey('reader-dual-columns'));
-    final dualRow = tester.renderObject<RenderFlex>(columns);
-    final childWidths = <double>[];
-    dualRow.visitChildren((child) {
-      childWidths.add((child as RenderBox).size.width);
-    });
-    // [左栏, 32 间距, 右栏]
-    expect(childWidths.length, 3);
-    expect(childWidths[1], 32);
-    expect(childWidths[0], moreOrLessEquals(childWidths[2], epsilon: 1));
-    expect(childWidths[0], greaterThan(300));
+    final leftBox = tester.getRect(
+      find.byKey(const ValueKey('reader-column-c0-0')),
+    );
+    final rightBox = tester.getRect(
+      find.byKey(const ValueKey('reader-column-c0-1')),
+    );
+    expect(leftBox.width, moreOrLessEquals(rightBox.width, epsilon: 1));
+    expect(leftBox.width, greaterThan(360));
+    expect(rightBox.left - leftBox.right, moreOrLessEquals(24, epsilon: 1));
     // 窄屏自动回退单栏，锚点不丢。
     await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
     await tester.pumpAndSettle();
@@ -518,7 +532,7 @@ void main() {
     tester.view.physicalSize = const Size(560, 540);
     await tester.pumpAndSettle();
     expect(
-      find.byKey(const ValueKey('reader-dual-columns')),
+      find.byKey(const ValueKey('reader-double-column-spread')),
       findsNothing,
     );
     await ReaderSystemService.flushParticipants();
@@ -528,54 +542,57 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  windowsWidgets(
-    'windows paged mode supports keys, 840px viewport and anchor resize',
-    (tester) async {
-      tester.view.devicePixelRatio = 1;
-      tester.view.physicalSize = const Size(1400, 900);
-      addTearDown(tester.view.reset);
-      await mountReader(
-        tester,
-        'paged',
-        const ReaderSettings(
-          pageMode: true,
-          pageAnimation: 'slide',
-          commentBubbles: false,
-          pureMode: true,
-        ),
-      );
-      expect(
-        tester
-            .getSize(find.byKey(const ValueKey('desktop-reader-viewport')))
-            .width,
-        840,
-      );
-      final pageState = tester.state<ReaderPageViewState>(
-        find.byType(ReaderPageView),
-      );
-      final first = pageState.currentPageId;
-      await tester.sendEventToBinding(
-        PointerScrollEvent(
-          position: tester.getCenter(find.byType(ReaderPageView)),
-          scrollDelta: const Offset(0, 120),
-        ),
-      );
-      await tester.pumpAndSettle();
-      expect(pageState.currentPageId, isNot(first));
-      await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
-      await tester.pumpAndSettle();
-      await ReaderSystemService.flushParticipants();
-      final before = await ReaderPositionService().load('win_paged');
-      expect(before, isNotNull);
-      tester.view.physicalSize = const Size(720, 540);
-      await tester.pumpAndSettle();
-      await ReaderSystemService.flushParticipants();
-      final after = await ReaderPositionService().load('win_paged');
-      expect(after!.chapterId, before!.chapterId);
-      expect(after.paragraphIndex, lessThanOrEqualTo(before.paragraphIndex));
-      expect(tester.takeException(), isNull);
-    },
-  );
+  for (final mode in ['cover', 'simulation', 'slide', 'fade', 'none']) {
+    windowsWidgets(
+      'windows $mode supports keys, 840px viewport and anchor resize',
+      (tester) async {
+        tester.view.devicePixelRatio = 1;
+        tester.view.physicalSize = const Size(1400, 900);
+        addTearDown(tester.view.reset);
+        await mountReader(
+          tester,
+          'paged_$mode',
+          ReaderSettings(
+            pageMode: true,
+            pageAnimation: mode,
+            desktopColumns: 'single',
+            commentBubbles: false,
+            pureMode: true,
+          ),
+        );
+        expect(
+          tester
+              .getSize(find.byKey(const ValueKey('desktop-reader-viewport')))
+              .width,
+          840,
+        );
+        final pageState = tester.state<ReaderPageViewState>(
+          find.byType(ReaderPageView),
+        );
+        final first = pageState.currentPageId;
+        await tester.sendEventToBinding(
+          PointerScrollEvent(
+            position: tester.getCenter(find.byType(ReaderPageView)),
+            scrollDelta: const Offset(0, 120),
+          ),
+        );
+        await tester.pumpAndSettle();
+        expect(pageState.currentPageId, isNot(first));
+        await tester.sendKeyEvent(LogicalKeyboardKey.pageDown);
+        await tester.pumpAndSettle();
+        await ReaderSystemService.flushParticipants();
+        final before = await ReaderPositionService().load('win_paged_$mode');
+        expect(before, isNotNull);
+        tester.view.physicalSize = const Size(720, 540);
+        await tester.pumpAndSettle();
+        await ReaderSystemService.flushParticipants();
+        final after = await ReaderPositionService().load('win_paged_$mode');
+        expect(after!.chapterId, before!.chapterId);
+        expect(after.paragraphIndex, lessThanOrEqualTo(before.paragraphIndex));
+        expect(tester.takeException(), isNull);
+      },
+    );
+  }
 
   windowsWidgets('Ctrl+arrow chapter navigation stays within bounds', (
     tester,
@@ -623,7 +640,7 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
-  windowsWidgets('F11 toggles native full-screen and Esc leaves it first', (
+  windowsWidgets('F11 toggles reading immersion and Esc leaves it first', (
     tester,
   ) async {
     tester.view.devicePixelRatio = 1;
@@ -638,16 +655,43 @@ void main() {
         pureMode: true,
       ),
     );
-    calls.clear();
+    expect(
+      find.byKey(const ValueKey('desktop-reader-toolbar')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('desktop-immersive-chapter-title')),
+      findsNothing,
+    );
     await tester.sendKeyEvent(LogicalKeyboardKey.f11);
     await tester.pumpAndSettle();
-    expect(ReaderSystemService.isFullScreen, true);
-    expect(calls.map((c) => c.method), contains('toggleFullScreen'));
-    calls.clear();
+    expect(find.byKey(const ValueKey('desktop-reader-toolbar')), findsNothing);
+    expect(
+      find.byKey(const ValueKey('reader-immersive-toolbar-edge')),
+      findsOneWidget,
+    );
+    // 全屏阅读时左下角常驻当前章节名称。
+    final badge = find.byKey(
+      const ValueKey('desktop-immersive-chapter-title'),
+    );
+    expect(badge, findsOneWidget);
+    expect(tester.widget<Text>(badge).data, '第1章');
+    final viewport = tester.getRect(
+      find.byKey(const ValueKey('desktop-reader-viewport')),
+    );
+    final badgeRect = tester.getRect(badge);
+    expect(badgeRect.left, closeTo(viewport.left + 24, 1));
+    expect(badgeRect.bottom, closeTo(viewport.bottom - 16, 1));
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
-    expect(ReaderSystemService.isFullScreen, false);
-    expect(calls.map((c) => c.method), contains('toggleFullScreen'));
+    expect(
+      find.byKey(const ValueKey('desktop-reader-toolbar')),
+      findsOneWidget,
+    );
+    expect(
+      find.byKey(const ValueKey('desktop-immersive-chapter-title')),
+      findsNothing,
+    );
     expect(tester.takeException(), isNull);
   });
 
@@ -671,18 +715,13 @@ void main() {
       find.byKey(const ValueKey('desktop-reader-viewport')),
       warnIfMissed: false,
     );
+    await tester.pump(const Duration(milliseconds: 350));
     await tester.pumpAndSettle();
     // Esc should be consumed by the menu/page layer without popping the route.
-    expect(
-      find.byWidgetPredicate((w) => w is ReaderScreen),
-      findsOneWidget,
-    );
+    expect(find.byWidgetPredicate((w) => w is ReaderScreen), findsOneWidget);
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
-    expect(
-      find.byWidgetPredicate((w) => w is ReaderScreen),
-      findsOneWidget,
-    );
+    expect(find.byWidgetPredicate((w) => w is ReaderScreen), findsOneWidget);
     expect(tester.takeException(), isNull);
   });
 
@@ -708,7 +747,7 @@ void main() {
       await ReaderSystemService.flushParticipants();
       final before = await ReaderPositionService().load('win_scroll');
       expect(before!.paragraphIndex, greaterThan(0));
-      final text = find.byType(SelectableText).hitTestable().first;
+      final text = find.byType(DesktopSelectableParagraph).hitTestable().first;
       final rect = tester.getRect(text);
       final point = Offset(rect.left + 120, rect.top + 12);
       final gesture = await tester.startGesture(
@@ -718,8 +757,7 @@ void main() {
       await gesture.moveTo(point + const Offset(60, 0));
       await gesture.up();
       await tester.pumpAndSettle();
-      final editable = tester.widgetList<EditableText>(find.byType(EditableText));
-      expect(editable.any((e) => !e.controller.selection.isCollapsed), true);
+      expect(hasDesktopSelection(tester), true);
       final secondary = await tester.startGesture(
         point,
         kind: PointerDeviceKind.mouse,
@@ -768,6 +806,81 @@ void main() {
       expect(tester.takeException(), isNull);
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
+    },
+  );
+
+  windowsWidgets(
+    'windows Ctrl shortcuts open search sidebar, directory and chapter jump',
+    (tester) async {
+      tester.view.devicePixelRatio = 1;
+      tester.view.physicalSize = const Size(1280, 800);
+      addTearDown(tester.view.reset);
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorObservers: [readerRouteObserver],
+          builder: (context, child) =>
+              DesktopShortcuts(child: child ?? const SizedBox.shrink()),
+          home: ReaderScreen(
+            book: Book(
+              bookId: 'win_shortcuts',
+              bookName: '快捷键测试',
+              author: '测试',
+            ),
+            chapters: List.generate(
+              5,
+              (index) => Chapter(
+                itemId: 'c$index',
+                title: '第${index + 1}章',
+                content: '第${index + 1}章正文内容。' * 30,
+              ),
+            ),
+            resumeSavedPosition: false,
+            bookDocuments: () async => directory,
+            initialSettings: const ReaderSettingsRecord(
+              ReaderSettings(
+                pageMode: true,
+                commentBubbles: false,
+                pureMode: true,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      // Ctrl+Shift+D 打开停靠目录
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyD);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('desktop-reader-directory')),
+        findsOneWidget,
+      );
+
+      // Ctrl+F 切换到正文搜索侧栏
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyF);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const ValueKey('desktop-search-panel')),
+        findsOneWidget,
+      );
+
+      // Esc 关闭搜索侧栏，然后 Ctrl+J 打开跳转章节弹窗
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.keyJ);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+      await tester.pumpAndSettle();
+      expect(find.text('跳转章节'), findsOneWidget);
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+      expect(tester.takeException(), isNull);
     },
   );
 }

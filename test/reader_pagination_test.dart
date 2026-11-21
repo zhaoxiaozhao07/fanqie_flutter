@@ -99,6 +99,105 @@ void main() {
     expect(identical(prepare(original), prepare(dark)), true);
   });
 
+  test(
+    'long measurement windows retain graphemes and the real chapter end',
+    () {
+      final paragraphs = [
+        '中文，English words 123。👨‍👩‍👧‍👦' * 350,
+        '${'a' * 2500} ${'e\u0301 ' * 500}尾段。',
+      ];
+      final pages = ReaderPaginationCache().paginate(
+        chapterId: 'long-measurement',
+        title: '测量窗口',
+        content: paragraphs.join('\n\n'),
+        layout: layout(1.4, chapterEndHeight: 130),
+        indent: true,
+      );
+      for (var paragraph = 0; paragraph < paragraphs.length; paragraph++) {
+        final fragments = pages.pages
+            .expand((page) => page.fragments)
+            .where((fragment) => fragment.paragraphIndex == paragraph)
+            .toList();
+        var offset = 0;
+        final boundaries = <int>{0};
+        for (final character in paragraphs[paragraph].characters) {
+          offset += character.length;
+          boundaries.add(offset);
+        }
+        expect(fragments.first.startOffset, 0);
+        expect(fragments.last.endOffset, paragraphs[paragraph].length);
+        expect(
+          fragments
+              .map(
+                (fragment) => fragment.startOffset == 0
+                    ? fragment.text.substring(2)
+                    : fragment.text,
+              )
+              .join(),
+          paragraphs[paragraph],
+        );
+        for (var index = 0; index < fragments.length; index++) {
+          expect(boundaries.contains(fragments[index].startOffset), isTrue);
+          expect(boundaries.contains(fragments[index].endOffset), isTrue);
+          if (index > 0) {
+            expect(
+              fragments[index].startOffset,
+              fragments[index - 1].endOffset,
+            );
+          }
+        }
+      }
+      expect(pages.pages.last.chapterEndHeight, 130);
+      for (final page in pages.pages) {
+        final height =
+            page.fragments.fold<double>(
+              0,
+              (height, fragment) => height + fragment.height,
+            ) +
+            (page.fragments.length - 1) * 14;
+        expect(height, lessThanOrEqualTo(page.availableHeight + .01));
+      }
+    },
+  );
+
+  test(
+    'a wide page fills even when a paragraph needs a larger measurement window',
+    () {
+      final pages = ReaderPaginationCache().paginate(
+        chapterId: 'wide-measurement',
+        title: '宽页面',
+        content: 'a' * 20000,
+        layout: layout(.7, width: 1600, comments: false),
+        indent: false,
+      );
+      expect(pages.pages.length, greaterThan(3));
+      for (final page in pages.pages.skip(1).take(pages.pages.length - 2)) {
+        expect(
+          page.fragments.single.height,
+          greaterThan(page.availableHeight * .9),
+        );
+      }
+      expect(pages.pages.map((page) => page.text).join(), 'a' * 20000);
+    },
+  );
+
+  test('a grapheme larger than the measurement window is never split', () {
+    final cluster = 'a${'\u0301' * 2048}';
+    final content = '$cluster尾句。';
+    final pages = ReaderPaginationCache().paginate(
+      chapterId: 'large-grapheme',
+      title: '完整字素',
+      content: content,
+      layout: layout(1, comments: false),
+      indent: false,
+    );
+    final fragments = pages.pages.expand((page) => page.fragments).toList();
+    expect(fragments.map((fragment) => fragment.text).join(), content);
+    expect(fragments.first.startOffset, 0);
+    expect(fragments.first.endOffset, greaterThanOrEqualTo(cluster.length));
+    expect(fragments.last.endOffset, content.length);
+  });
+
   for (final scale in [1.0, 1.4, 2.0]) {
     test('scaled $scale chapter ending fits without losing source text', () {
       for (final content in [

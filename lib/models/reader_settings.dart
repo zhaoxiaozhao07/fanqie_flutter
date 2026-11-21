@@ -1,3 +1,7 @@
+import 'package:flutter/material.dart' show Brightness;
+
+import 'reader_theme.dart';
+
 enum ReaderThemeMode { manual, system, scheduled }
 
 /// Layout preferences are independent of viewport size and reading position.
@@ -147,6 +151,19 @@ class ReaderSettings {
         choices.contains(json[key]) ? json[key] as String : fallback;
     final day = number('dayStartMinutes', 420, 0, 1439).toInt();
     final night = number('nightStartMinutes', 1320, 0, 1439).toInt();
+    int palette(String key, int fallback, [Brightness? brightness]) {
+      final index = number(
+        key,
+        fallback.toDouble(),
+        0,
+        ReaderTheme.presets.length - 1.0,
+      ).toInt();
+      return brightness == null ||
+              ReaderTheme.presets[index].systemBrightness == brightness
+          ? index
+          : fallback;
+    }
+
     return ReaderSettings(
       fontSize: number('fontSize', 18, 13, 36),
       lineHeight: number('lineHeight', 1.8, 1.2, 2.6),
@@ -178,9 +195,9 @@ class ReaderSettings {
         'single',
         'double',
       }, 'auto'),
-      themeIndex: number('themeIndex', 1, 0, 4).toInt(),
-      dayThemeIndex: number('dayThemeIndex', 1, 0, 2).toInt(),
-      nightThemeIndex: number('nightThemeIndex', 3, 3, 4).toInt(),
+      themeIndex: palette('themeIndex', 1),
+      dayThemeIndex: palette('dayThemeIndex', 1, Brightness.light),
+      nightThemeIndex: palette('nightThemeIndex', 3, Brightness.dark),
       themeMode: ReaderThemeMode.values.firstWhere(
         (mode) => mode.name == json['themeMode'],
         orElse: () => ReaderThemeMode.manual,

@@ -336,10 +336,6 @@ class _ReaderScreenState extends State<ReaderScreen>
   double _autoScrollSpeed = 40.0; // px/s
   Ticker? _autoScrollTicker;
 
-  String? _resolveFontFamily(String font) {
-    return ReaderFontService.familyFor(font);
-  }
-
   List<ReaderTheme> get _themes =>
       _readerPreferences.customBackground == null &&
           _readerPreferences.customText == null
@@ -475,7 +471,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   @override
   void initState() {
     super.initState();
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       DesktopCommands.register(this, _desktopCommand);
       ReaderSystemService.registerSaveParticipant(this, _flushForExit);
     }
@@ -643,7 +639,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     if (key == _ttsPaintKey) return;
     _ttsPaintKey = key;
-    if (ReaderPlatform.isMacOS && _ttsLayoutActive != _ttsService.isActive) {
+    if (ReaderPlatform.isDesktop && _ttsLayoutActive != _ttsService.isActive) {
       _applyReaderSetting(
         () => _ttsLayoutActive = _ttsService.isActive,
         layoutChanged: true,
@@ -1140,7 +1136,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _loadPreferences() async {
     _cachePolicy = await ReaderCachePolicy.load();
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       final workspace = await DesktopReaderPreferences.load();
       if (!mounted) return;
       _desktopDirectoryOpen = workspace.directoryOpen;
@@ -1214,7 +1210,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _updateDesktopCommands() {
-    if (!ReaderPlatform.isMacOS) return;
+    if (!ReaderPlatform.isDesktop) return;
     unawaited(
       ReaderPlatform.invoke('setReaderCommandsEnabled', {
         'enabled': _readerRouteActive && _readerPanels == 0,
@@ -1306,9 +1302,28 @@ class _ReaderScreenState extends State<ReaderScreen>
       return KeyEventResult.handled;
     }
     if (event is KeyDownEvent &&
-        keyboard.isMetaPressed &&
-        !keyboard.isControlPressed &&
+        ((keyboard.isMetaPressed && !keyboard.isControlPressed) ||
+            (ReaderPlatform.isWindows &&
+                keyboard.isControlPressed &&
+                !keyboard.isMetaPressed)) &&
         !keyboard.isAltPressed) {
+      if (ReaderPlatform.isWindows &&
+          !keyboard.isShiftPressed &&
+          !_desktopTextHasFocus &&
+          (key == LogicalKeyboardKey.arrowLeft ||
+              key == LogicalKeyboardKey.arrowRight)) {
+        final target =
+            _currentActiveIndex +
+            (key == LogicalKeyboardKey.arrowRight ? 1 : -1);
+        if (target >= 0 && target < widget.chapters.length) {
+          unawaited(
+            _navigateTo(
+              ReadingPosition(chapterId: widget.chapters[target].itemId),
+            ),
+          );
+        }
+        return KeyEventResult.handled;
+      }
       final command = switch (key) {
         LogicalKeyboardKey.bracketLeft when !keyboard.isShiftPressed => 'back',
         LogicalKeyboardKey.bracketRight when !keyboard.isShiftPressed =>
@@ -1497,6 +1512,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<void> _showDesktopShortcutHelp() async {
     if (_readerPanels > 0) return;
     _beginReaderPanel();
+    final mod = ReaderPlatform.isWindows ? 'Ctrl+' : '⌘';
+    final modShift = ReaderPlatform.isWindows ? 'Ctrl+Shift+' : '⌘⇧';
     try {
       await showDialog<void>(
         context: context,
@@ -1509,20 +1526,20 @@ class _ReaderScreenState extends State<ReaderScreen>
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    for (final entry in const {
+                    for (final entry in {
                       'Space / ⇧Space': '下一屏 / 上一屏',
                       'Page Down / Page Up': '下一屏 / 上一屏',
                       '← / →': '分页模式：上一页 / 下一页',
                       '↑ / ↓': '滚动模式：逐行滚动',
                       'Home / End': '本章开头 / 结尾',
-                      '⌘J': '按序号跳转章节',
-                      '⌘⇧D': '显示 / 隐藏目录',
-                      '⌘F': '正文搜索',
-                      '⌘G / ⌘⇧G / F3': '下一处 / 上一处正文匹配',
-                      '⌘[ / ⌘]': '后退 / 前进到阅读位置',
-                      '⌘D': '添加 / 移除书签',
-                      '⌘+ / ⌘− / ⌘0': '增大 / 缩小 / 重置字号',
-                      '⌘,': '阅读设置',
+                      '${mod}J': '按序号跳转章节',
+                      '${modShift}D': '显示 / 隐藏目录',
+                      '${mod}F': '正文搜索',
+                      '${mod}G / ${modShift}G / F3': '下一处 / 上一处正文匹配',
+                      '$mod[ / $mod]': '后退 / 前进到阅读位置',
+                      '${mod}D': '添加 / 移除书签',
+                      '$mod+ / $mod− / ${mod}0': '增大 / 缩小 / 重置字号',
+                      '$mod,': '阅读设置',
                       'F11 / Esc': '切换 / 退出沉浸阅读',
                     }.entries)
                       Padding(
@@ -1700,7 +1717,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     // A resized viewport can move the saved line away from the fixed 24px
     // sampling line. Keep the original character anchor while the reader is
     // idle, just as paged mode does; actual scrolling resumes normal sampling.
-    if (ReaderPlatform.isMacOS &&
+    if (ReaderPlatform.isDesktop &&
         _desktopRestoredScrollOffset != null &&
         _scrollController.hasClients &&
         (_scrollController.offset - _desktopRestoredScrollOffset!).abs() < .5) {
@@ -1776,7 +1793,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   double get _textWidthInset =>
-      ReaderPlatform.isMacOS ? ReaderLayout.selectableTextInset : 0;
+      ReaderPlatform.isDesktop ? ReaderLayout.selectableTextInset : 0;
 
   TextPainter _paragraphPainter(String text, double width) => TextPainter(
     text: TextSpan(
@@ -1787,22 +1804,18 @@ class _ReaderScreenState extends State<ReaderScreen>
     textScaler: MediaQuery.textScalerOf(context),
   )..layout(maxWidth: math.max(1, width - _textWidthInset).toDouble());
 
-  TextStyle _readerBodyStyle({Color? color}) => TextStyle(
-    inherit: false,
+  TextStyle _readerBodyStyle({Color? color}) => ReaderFontService.bodyStyle(
+    fontFamily: _fontFamily,
     color: color,
     fontSize: _fontSize,
-    height: _lineHeight,
-    leadingDistribution: TextLeadingDistribution.even,
-    fontWeight: FontWeight.normal,
-    textBaseline: TextBaseline.alphabetic,
+    lineHeight: _lineHeight,
     letterSpacing: _letterSpacing,
-    wordSpacing: 0,
-    fontFamily: _resolveFontFamily(_fontFamily) ?? 'Roboto',
-    fontFamilyFallback: const ['sans-serif', 'Roboto'],
-    locale: _readerPreferences.displayScript == 'traditional'
-        ? const Locale('zh', 'TW')
-        : const Locale('zh', 'CN'),
+    displayScript: _readerPreferences.displayScript,
   );
+
+  TextStyle _readerTitleStyle({Color? color}) => _readerBodyStyle(
+    color: color,
+  ).copyWith(fontSize: _fontSize + 4, height: 1.4, fontWeight: FontWeight.bold);
 
   double _estimatedParagraphHeight(int chapterIndex, int paragraphIndex) {
     final key = '${widget.chapters[chapterIndex].itemId}_$paragraphIndex';
@@ -2009,7 +2022,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _lastDetectPixels = _scrollController.hasClients
             ? _scrollController.offset
             : 0;
-        if (ReaderPlatform.isMacOS && _scrollController.hasClients) {
+        if (ReaderPlatform.isDesktop && _scrollController.hasClients) {
           _desktopRestoredScrollOffset = _scrollController.offset;
         }
         _dropRestorationImage();
@@ -2404,7 +2417,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Future<void> _showReaderSearch() async {
     if (_readerPanels > 0) return;
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       if (!_desktopSearchOpen || _readingFullScreen) {
         _pauseAutoScroll();
         _applyReaderSetting(() {
@@ -2460,6 +2473,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     bool preservePosition = false,
     ReadingPosition? position,
     String? locateText,
+    bool fromWheel = false,
   }) async {
     if (index < 0 ||
         index >= widget.chapters.length ||
@@ -2582,9 +2596,9 @@ class _ReaderScreenState extends State<ReaderScreen>
           if (_chapterTransition!.isBefore(
             actualSource is _ReaderPageAddress ? actualSource : source,
           )) {
-            _pageViewKey.currentState?.turnToPreviousPage();
+            _pageViewKey.currentState?.turnToPreviousPage(fromWheel: fromWheel);
           } else {
-            _pageViewKey.currentState?.turnToNextPage();
+            _pageViewKey.currentState?.turnToNextPage(fromWheel: fromWheel);
           }
         });
       } else {
@@ -3225,7 +3239,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _pageViewKey.currentState?.clearQueuedTurns();
     if (_readerPanels++ == 0) _panelsClosed = Completer<void>();
     _updateDesktopCommands();
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       _pauseAutoScroll();
       ReaderSystemService.setKeepScreenOn(false, owner: this);
     }
@@ -3236,7 +3250,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (_readerPanels > 0) _readerPanels--;
     _updateDesktopCommands();
     if (_readerPanels == 0) {
-      if (ReaderPlatform.isMacOS) {
+      if (ReaderPlatform.isDesktop) {
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted &&
               _readerPanels == 0 &&
@@ -3249,7 +3263,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         _panelsClosed!.complete();
       }
       if (mounted) {
-        if (ReaderPlatform.isMacOS &&
+        if (ReaderPlatform.isDesktop &&
             _readerRouteActive &&
             WidgetsBinding.instance.lifecycleState ==
                 AppLifecycleState.resumed) {
@@ -3280,12 +3294,12 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _dismissReaderSelection() {
-    if (ReaderPlatform.isMacOS) _desktopSelectionController.clear();
+    if (ReaderPlatform.isDesktop) _desktopSelectionController.clear();
     _activeSelectableParaNotifier.value = null;
   }
 
   Widget _desktopSelection(Widget child, {Key? key}) {
-    if (!ReaderPlatform.isMacOS) return child;
+    if (!ReaderPlatform.isDesktop) return child;
     return DesktopReaderSelection(
       key: key,
       controller: _desktopSelectionController,
@@ -3315,7 +3329,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  Widget _nonSelectable(Widget child) => ReaderPlatform.isMacOS
+  Widget _nonSelectable(Widget child) => ReaderPlatform.isDesktop
       ? SelectionContainer.disabled(child: child)
       : child;
 
@@ -3596,7 +3610,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   void _showDirectoryDrawer({int initialTab = 0}) {
     if (_readerPanels > 0) return;
-    if (ReaderPlatform.isMacOS && initialTab == 0) {
+    if (ReaderPlatform.isDesktop && initialTab == 0) {
       _toggleDesktopDirectory();
       return;
     }
@@ -3921,7 +3935,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         ),
       ),
     );
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       unawaited(
         showReaderModal<void>(
           context: context,
@@ -3999,7 +4013,7 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   Widget build(BuildContext context) {
-    if (!ReaderPlatform.isMacOS) return _buildReaderScaffold(context);
+    if (!ReaderPlatform.isDesktop) return _buildReaderScaffold(context);
     return LayoutBuilder(
       builder: (context, constraints) {
         final directoryVisible = _desktopDirectoryOpen && !_readingFullScreen;
@@ -4092,6 +4106,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                                   ],
                                 ),
                                 if (_readingFullScreen) _immersiveEdgeToolbar(),
+                                if (_readingFullScreen)
+                                  _immersiveChapterBadge(),
                               ],
                             ),
                           ),
@@ -4364,190 +4380,246 @@ class _ReaderScreenState extends State<ReaderScreen>
     ),
   );
 
+  /// 沉浸阅读时左下角常驻当前章节名，避免全屏下丢失阅读位置线索。
+  Widget _immersiveChapterBadge() {
+    final theme = _themes[_themeIndex];
+    return Positioned(
+      left: 0,
+      right: 0,
+      bottom: 0,
+      child: IgnorePointer(
+        child: AnimatedBuilder(
+          animation: Listenable.merge([
+            _activeChapterNotifier,
+            _positionVersion,
+          ]),
+          builder: (context, _) {
+            final index = _activeChapterNotifier.value;
+            final chapter = (index >= 0 && index < widget.chapters.length)
+                ? widget.chapters[index]
+                : widget.chapters.first;
+            return Padding(
+              padding: EdgeInsets.only(
+                left: 24,
+                right: 24,
+                // 听书播放条占据底部时，章节名上移避让。
+                bottom: _ttsLayoutActive
+                    ? TtsPlayerPanel.desktopHeight + 12
+                    : 16,
+              ),
+              child: Text(
+                chapter.title,
+                key: const ValueKey('desktop-immersive-chapter-title'),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(
+                  fontSize: 12,
+                  height: 1.2,
+                  letterSpacing: .2,
+                  color: theme.secondaryColor,
+                ),
+              ),
+            );
+          },
+        ),
+      ),
+    );
+  }
+
   Widget _desktopToolbar() {
     final theme = _themes[_themeIndex];
-    return Material(
-      key: const ValueKey('desktop-reader-toolbar'),
-      color: theme.backgroundColor,
-      child: SizedBox(
-        height: _desktopToolbarHeight,
-        child: Row(
-          children: [
-            IconButton(
-              tooltip: '返回书架',
-              visualDensity: VisualDensity.compact,
-              icon: Icon(Icons.arrow_back, color: theme.textColor, size: 18),
-              onPressed: () => Navigator.maybePop(context),
-            ),
-            IconButton(
-              key: const ValueKey('desktop-history-back'),
-              tooltip: '后退（⌘[）',
-              visualDensity: VisualDensity.compact,
-              onPressed: _jumpHistory.canGoBack && !_navigationLoading
-                  ? _returnFromJump
-                  : null,
-              icon: const Icon(Icons.chevron_left, size: 20),
-            ),
-            IconButton(
-              key: const ValueKey('desktop-history-forward'),
-              tooltip: '前进（⌘]）',
-              visualDensity: VisualDensity.compact,
-              onPressed: _jumpHistory.canGoForward && !_navigationLoading
-                  ? () => _traverseHistory(forward: true)
-                  : null,
-              icon: const Icon(Icons.chevron_right, size: 20),
-            ),
-            IconButton(
-              tooltip: '目录（⌘⇧D）',
-              isSelected: _desktopDirectoryOpen && !_readingFullScreen,
-              visualDensity: VisualDensity.compact,
-              icon: Icon(
-                Icons.view_sidebar_outlined,
-                color: theme.textColor,
-                size: 20,
+    final mod = ReaderPlatform.isWindows ? 'Ctrl+' : '⌘';
+    final modShift = ReaderPlatform.isWindows ? 'Ctrl+Shift+' : '⌘⇧';
+    return theme.wrap(
+      Material(
+        key: const ValueKey('desktop-reader-toolbar'),
+        color: theme.backgroundColor,
+        child: SizedBox(
+          height: _desktopToolbarHeight,
+          child: Row(
+            children: [
+              IconButton(
+                tooltip: '返回书架',
+                visualDensity: VisualDensity.compact,
+                icon: Icon(Icons.arrow_back, color: theme.textColor, size: 18),
+                onPressed: () => Navigator.maybePop(context),
               ),
-              onPressed: _toggleDesktopDirectory,
-            ),
-            Expanded(
-              child: Text(
-                widget.book.bookName,
-                style: TextStyle(color: theme.secondaryColor, fontSize: 12),
-                overflow: TextOverflow.ellipsis,
+              IconButton(
+                key: const ValueKey('desktop-history-back'),
+                tooltip: '后退（$mod[）',
+                visualDensity: VisualDensity.compact,
+                onPressed: _jumpHistory.canGoBack && !_navigationLoading
+                    ? _returnFromJump
+                    : null,
+                icon: const Icon(Icons.chevron_left, size: 20),
               ),
-            ),
-            IconButton(
-              tooltip: '正文搜索（⌘F）',
-              icon: Icon(Icons.search, color: theme.textColor, size: 20),
-              onPressed: _showReaderSearch,
-            ),
-            IconButton(
-              tooltip: '跳转章节（⌘J）',
-              icon: Icon(Icons.last_page, color: theme.textColor, size: 20),
-              onPressed: _showChapterJump,
-            ),
-            IconButton(
-              tooltip: _desktopColumns == 2 ? '切换单栏阅读' : '切换双栏阅读',
-              icon: Icon(
-                _desktopColumns == 2
-                    ? Icons.view_agenda_outlined
-                    : Icons.view_column_outlined,
-                color: theme.textColor,
-                size: 20,
+              IconButton(
+                key: const ValueKey('desktop-history-forward'),
+                tooltip: '前进（$mod]）',
+                visualDensity: VisualDensity.compact,
+                onPressed: _jumpHistory.canGoForward && !_navigationLoading
+                    ? () => _traverseHistory(forward: true)
+                    : null,
+                icon: const Icon(Icons.chevron_right, size: 20),
               ),
-              onPressed: () {
-                final value = _captureReaderSettings().copyWith(
-                  pageMode: true,
-                  desktopColumns: _desktopColumns == 2 ? 'single' : 'double',
-                );
-                _applyReaderSetting(() => _assignReaderSettings(value));
-              },
-            ),
-            IconButton(
-              tooltip: '阅读设置',
-              icon: Icon(Icons.tune, color: theme.textColor, size: 20),
-              onPressed: _showSettingsModal,
-            ),
-            PopupMenuButton<String>(
-              tooltip: '阅读操作',
-              icon: Icon(Icons.more_horiz, color: theme.textColor, size: 20),
-              color: theme.backgroundColor,
-              onSelected: (command) {
-                switch (command) {
-                  case 'previousChapter':
-                  case 'nextChapter':
-                    final index =
-                        _currentActiveIndex +
-                        (command == 'nextChapter' ? 1 : -1);
-                    if (index >= 0 && index < widget.chapters.length) {
-                      unawaited(
-                        _navigateTo(
-                          ReadingPosition(
-                            chapterId: widget.chapters[index].itemId,
+              IconButton(
+                tooltip: '目录（${modShift}D）',
+                isSelected: _desktopDirectoryOpen && !_readingFullScreen,
+                visualDensity: VisualDensity.compact,
+                icon: Icon(
+                  Icons.view_sidebar_outlined,
+                  color: theme.textColor,
+                  size: 20,
+                ),
+                onPressed: _toggleDesktopDirectory,
+              ),
+              Expanded(
+                child: Text(
+                  widget.book.bookName,
+                  style: TextStyle(color: theme.secondaryColor, fontSize: 12),
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              IconButton(
+                tooltip: '正文搜索（${mod}F）',
+                icon: Icon(Icons.search, color: theme.textColor, size: 20),
+                onPressed: _showReaderSearch,
+              ),
+              IconButton(
+                tooltip: '跳转章节（${mod}J）',
+                icon: Icon(Icons.last_page, color: theme.textColor, size: 20),
+                onPressed: _showChapterJump,
+              ),
+              IconButton(
+                tooltip: _desktopColumns == 2 ? '切换单栏阅读' : '切换双栏阅读',
+                icon: Icon(
+                  _desktopColumns == 2
+                      ? Icons.view_agenda_outlined
+                      : Icons.view_column_outlined,
+                  color: theme.textColor,
+                  size: 20,
+                ),
+                onPressed: () {
+                  final value = _captureReaderSettings().copyWith(
+                    pageMode: true,
+                    desktopColumns: _desktopColumns == 2 ? 'single' : 'double',
+                  );
+                  _applyReaderSetting(() => _assignReaderSettings(value));
+                },
+              ),
+              IconButton(
+                tooltip: '阅读设置',
+                icon: Icon(Icons.tune, color: theme.textColor, size: 20),
+                onPressed: _showSettingsModal,
+              ),
+              PopupMenuButton<String>(
+                tooltip: '阅读操作',
+                icon: Icon(Icons.more_horiz, color: theme.textColor, size: 20),
+                color: theme.backgroundColor,
+                onSelected: (command) {
+                  switch (command) {
+                    case 'previousChapter':
+                    case 'nextChapter':
+                      final index =
+                          _currentActiveIndex +
+                          (command == 'nextChapter' ? 1 : -1);
+                      if (index >= 0 && index < widget.chapters.length) {
+                        unawaited(
+                          _navigateTo(
+                            ReadingPosition(
+                              chapterId: widget.chapters[index].itemId,
+                            ),
                           ),
-                        ),
+                        );
+                      }
+                      break;
+                    case 'notes':
+                      unawaited(_showNotesManagement());
+                      break;
+                    case 'listen':
+                      unawaited(_startTtsReading());
+                      break;
+                    case 'ttsSettings':
+                      TtsPlayerPanel.showSettings(
+                        context,
+                        backgroundColor: theme.backgroundColor,
+                        textColor: theme.textColor,
+                        secondaryColor: theme.secondaryColor,
+                        onModalChanged: (opened) =>
+                            opened ? _beginReaderPanel() : _endReaderPanel(),
                       );
-                    }
-                    break;
-                  case 'notes':
-                    unawaited(_showNotesManagement());
-                    break;
-                  case 'listen':
-                    unawaited(_startTtsReading());
-                    break;
-                  case 'ttsSettings':
-                    TtsPlayerPanel.showSettings(
-                      context,
-                      backgroundColor: theme.backgroundColor,
-                      textColor: theme.textColor,
-                      secondaryColor: theme.secondaryColor,
-                      onModalChanged: (opened) =>
-                          opened ? _beginReaderPanel() : _endReaderPanel(),
-                    );
-                    break;
-                  default:
-                    _desktopCommand(command);
-                }
-              },
-              itemBuilder: (context) => [
-                PopupMenuItem(
-                  value: 'previousChapter',
-                  enabled: _currentActiveIndex > 0,
-                  child: Text('上一章', style: TextStyle(color: theme.textColor)),
-                ),
-                PopupMenuItem(
-                  value: 'nextChapter',
-                  enabled: _currentActiveIndex < widget.chapters.length - 1,
-                  child: Text('下一章', style: TextStyle(color: theme.textColor)),
-                ),
-                const PopupMenuDivider(),
-                if (_ttsService.isAvailable) ...[
+                      break;
+                    default:
+                      _desktopCommand(command);
+                  }
+                },
+                itemBuilder: (context) => [
                   PopupMenuItem(
-                    value: 'listen',
+                    value: 'previousChapter',
+                    enabled: _currentActiveIndex > 0,
                     child: Text(
-                      '听书 / 暂停',
+                      '上一章',
                       style: TextStyle(color: theme.textColor),
                     ),
                   ),
                   PopupMenuItem(
-                    value: 'ttsSettings',
+                    value: 'nextChapter',
+                    enabled: _currentActiveIndex < widget.chapters.length - 1,
                     child: Text(
-                      '系统语音与兼容 TTS 接口',
+                      '下一章',
+                      style: TextStyle(color: theme.textColor),
+                    ),
+                  ),
+                  const PopupMenuDivider(),
+                  if (_ttsService.isAvailable) ...[
+                    PopupMenuItem(
+                      value: 'listen',
+                      child: Text(
+                        '听书 / 暂停',
+                        style: TextStyle(color: theme.textColor),
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'ttsSettings',
+                      child: Text(
+                        '系统语音与兼容 TTS 接口',
+                        style: TextStyle(color: theme.textColor),
+                      ),
+                    ),
+                  ],
+                  PopupMenuItem(
+                    value: 'bookmark',
+                    child: Text(
+                      '添加 / 移除书签（${mod}D）',
+                      style: TextStyle(color: theme.textColor),
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'notes',
+                    child: Text(
+                      '笔记管理与导出',
+                      style: TextStyle(color: theme.textColor),
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'shortcuts',
+                    child: Text(
+                      '阅读快捷键（F1）',
                       style: TextStyle(color: theme.textColor),
                     ),
                   ),
                 ],
-                PopupMenuItem(
-                  value: 'bookmark',
-                  child: Text(
-                    '添加 / 移除书签（⌘D）',
-                    style: TextStyle(color: theme.textColor),
-                  ),
-                ),
-                PopupMenuItem(
-                  value: 'notes',
-                  child: Text(
-                    '笔记管理与导出',
-                    style: TextStyle(color: theme.textColor),
-                  ),
-                ),
-                PopupMenuItem(
-                  value: 'shortcuts',
-                  child: Text(
-                    '阅读快捷键（F1）',
-                    style: TextStyle(color: theme.textColor),
-                  ),
-                ),
-              ],
-            ),
-            IconButton(
-              tooltip: _readingFullScreen ? '退出阅读全屏' : '阅读全屏',
-              icon: Icon(
-                _readingFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                color: theme.textColor,
               ),
-              onPressed: () => _setReadingFullScreen(!_readingFullScreen),
-            ),
-          ],
+              IconButton(
+                tooltip: _readingFullScreen ? '退出阅读全屏' : '阅读全屏',
+                icon: Icon(
+                  _readingFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
+                  color: theme.textColor,
+                ),
+                onPressed: () => _setReadingFullScreen(!_readingFullScreen),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -4671,7 +4743,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                         _buildJumpBar(theme),
                       // 底部常驻微型状态栏（时间、电量、总进度）
                       if (_showReaderStatus) _buildBottomStatusBar(theme),
-                      if (ReaderPlatform.isMacOS && _ttsLayoutActive)
+                      if (ReaderPlatform.isDesktop && _ttsLayoutActive)
                         const SizedBox(height: TtsPlayerPanel.desktopHeight),
                     ],
                   ),
@@ -4830,7 +4902,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                   onNotification: _onVerticalScrollNotification,
                   child: Listener(
                     onPointerSignal: (event) {
-                      if (ReaderPlatform.isMacOS &&
+                      if (ReaderPlatform.isDesktop &&
                           event is PointerScrollEvent &&
                           event.scrollDelta.dy != 0) {
                         _cancelDesktopScroll();
@@ -4838,7 +4910,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                       }
                     },
                     onPointerPanZoomStart: (_) {
-                      if (ReaderPlatform.isMacOS) {
+                      if (ReaderPlatform.isDesktop) {
                         _cancelDesktopScroll();
                         _onUserPageTurn();
                       }
@@ -4849,7 +4921,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                       ).copyWith(scrollbars: false),
                       child: Scrollbar(
                         controller: _scrollController,
-                        thumbVisibility: ReaderPlatform.isMacOS,
+                        thumbVisibility: ReaderPlatform.isDesktop,
                         child: CustomScrollView(
                           controller: _scrollController,
                           center: afterAndCenterChapters.isNotEmpty
@@ -5094,9 +5166,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     final chapter = widget.chapters[chapterIndex];
     final paragraphs = _getChapterParagraphs(chapterIndex);
     final key = _chapterKeys[chapterIndex];
-    final isDark =
-        theme.backgroundColor == const Color(0xFF000000) ||
-        theme.backgroundColor == const Color(0xFF18181A);
+    final isDark = theme.systemBrightness == Brightness.dark;
 
     // 逻辑项：0 为章节标题头，1..paragraphs.length 为各正文段落，paragraphs.length + 1 为章节尾（本章完+章评）
     final totalItems = paragraphs.length + 2;
@@ -5131,13 +5201,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                           chapter.title,
                           _readerPreferences.displayScript,
                         ),
-                        style: TextStyle(
-                          fontSize: _fontSize + 4,
-                          fontWeight: FontWeight.bold,
-                          color: theme.textColor,
-                          height: 1.4,
-                          fontFamily: _resolveFontFamily(_fontFamily),
-                        ),
+                        style: _readerTitleStyle(color: theme.textColor),
                       ),
                     ),
                   ],
@@ -5244,20 +5308,23 @@ class _ReaderScreenState extends State<ReaderScreen>
     ReaderTheme theme,
     int chapterIndex,
   ) => _nonSelectable(
-    ReaderIllustrationView(
-      key: ValueKey(
-        'picture-$chapterIndex-${image.id}-${_imageRefreshVersions[chapterIndex] ?? 0}',
+    DesktopInteractiveRegion(
+      child: ReaderIllustrationView(
+        key: ValueKey(
+          'picture-$chapterIndex-${image.id}-${_imageRefreshVersions[chapterIndex] ?? 0}',
+        ),
+        bookId: widget.book.bookId,
+        image: image,
+        height: height,
+        textColor: theme.secondaryColor,
+        documents: widget.bookDocuments,
+        onTapDown: () => _lastBubbleTapTime = DateTime.now(),
+        onViewerChanged: (open) =>
+            open ? _beginReaderPanel() : _endReaderPanel(),
+        onRetry: _imageTexts.containsKey(chapterIndex)
+            ? () => _repairImages(chapterIndex)
+            : null,
       ),
-      bookId: widget.book.bookId,
-      image: image,
-      height: height,
-      textColor: theme.secondaryColor,
-      documents: widget.bookDocuments,
-      onTapDown: () => _lastBubbleTapTime = DateTime.now(),
-      onViewerChanged: (open) => open ? _beginReaderPanel() : _endReaderPanel(),
-      onRetry: _imageTexts.containsKey(chapterIndex)
-          ? () => _repairImages(chapterIndex)
-          : null,
     ),
   );
 
@@ -5425,7 +5492,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       children: [...inlineSpans, if (commentSpan != null) commentSpan],
     );
 
-    if (ReaderPlatform.isMacOS) {
+    if (ReaderPlatform.isDesktop) {
       final selectable = DesktopSelectableParagraph(
         key: ValueKey('desktop-paragraph-$paraKeyStr'),
         span: TextSpan(children: inlineSpans),
@@ -5841,54 +5908,56 @@ class _ReaderScreenState extends State<ReaderScreen>
         if (total > 0) ...[
           const SizedBox(height: 16),
           Center(
-            child: InkWell(
-              onTapDown: (_) => _lastBubbleTapTime = DateTime.now(),
-              onTap: () => _openChapterComments(chapter),
-              borderRadius: BorderRadius.circular(20),
-              child: Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 20,
-                  vertical: 10,
-                ),
-                decoration: BoxDecoration(
-                  color: isDark
-                      ? Colors.white.withValues(alpha: 0.08)
-                      : theme.highlightColor.withValues(alpha: 0.85),
-                  borderRadius: BorderRadius.circular(20),
-                  border: Border.all(
-                    color: theme.secondaryColor.withValues(alpha: 0.25),
-                    width: 0.8,
+            child: DesktopInteractiveRegion(
+              child: InkWell(
+                onTapDown: (_) => _lastBubbleTapTime = DateTime.now(),
+                onTap: () => _openChapterComments(chapter),
+                borderRadius: BorderRadius.circular(20),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 20,
+                    vertical: 10,
                   ),
-                ),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Icon(
-                      Icons.chat_bubble_outline,
-                      size: 16,
-                      color: isDark ? Colors.white70 : theme.secondaryColor,
+                  decoration: BoxDecoration(
+                    color: isDark
+                        ? Colors.white.withValues(alpha: 0.08)
+                        : theme.highlightColor.withValues(alpha: 0.85),
+                    borderRadius: BorderRadius.circular(20),
+                    border: Border.all(
+                      color: theme.secondaryColor.withValues(alpha: 0.25),
+                      width: 0.8,
                     ),
-                    const SizedBox(width: 8),
-                    Flexible(
-                      child: Text(
-                        '本章评论 ($total条讨论)',
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 13,
-                          height: 1.2,
-                          fontWeight: FontWeight.w600,
-                          color: isDark ? Colors.white : theme.textColor,
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.chat_bubble_outline,
+                        size: 16,
+                        color: isDark ? Colors.white70 : theme.secondaryColor,
+                      ),
+                      const SizedBox(width: 8),
+                      Flexible(
+                        child: Text(
+                          '本章评论 ($total条讨论)',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 13,
+                            height: 1.2,
+                            fontWeight: FontWeight.w600,
+                            color: isDark ? Colors.white : theme.textColor,
+                          ),
                         ),
                       ),
-                    ),
-                    const SizedBox(width: 4),
-                    Icon(
-                      Icons.arrow_forward_ios,
-                      size: 11,
-                      color: isDark ? Colors.white54 : theme.secondaryColor,
-                    ),
-                  ],
+                      const SizedBox(width: 4),
+                      Icon(
+                        Icons.arrow_forward_ios,
+                        size: 11,
+                        color: isDark ? Colors.white54 : theme.secondaryColor,
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
@@ -5953,7 +6022,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                   tooltip: '听书',
                   onPressed: _startTtsReading,
                 ),
-              if (ReaderPlatform.isMacOS && _readingFullScreen)
+              if (ReaderPlatform.isDesktop && _readingFullScreen)
                 IconButton(
                   tooltip: '退出阅读全屏',
                   icon: Icon(Icons.fullscreen_exit, color: theme.textColor),
@@ -6226,12 +6295,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   ReaderLayout _layoutFor(Size size) => ReaderLayout(
     size: size,
     bodyStyle: _readerBodyStyle(),
-    titleStyle: TextStyle(
-      fontSize: _fontSize + 4,
-      height: 1.4,
-      fontWeight: FontWeight.bold,
-      fontFamily: _resolveFontFamily(_fontFamily),
-    ),
+    titleStyle: _readerTitleStyle(),
     textScaler: MediaQuery.textScalerOf(context),
     horizontalPadding: _horizontalPadding,
     paragraphSpacing: _paragraphSpacing,
@@ -6328,7 +6392,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Widget _buildPageModeBody(ReaderTheme theme) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final columns = ReaderPlatform.isMacOS ? _desktopColumns : 1;
+        final columns = ReaderPlatform.isDesktop ? _desktopColumns : 1;
         final columnWidth = columns == 2
             ? (constraints.maxWidth - _readerPreferences.columnGap) / 2
             : constraints.maxWidth;
@@ -6439,6 +6503,10 @@ class _ReaderScreenState extends State<ReaderScreen>
                 contentVersion: (
                   _notesVersion,
                   _themeIndex,
+                  theme.backgroundColor,
+                  theme.textColor,
+                  theme.secondaryColor,
+                  theme.highlightColor,
                   layoutKey,
                   _highlightedParagraphKey,
                   _searchHighlight?.position.characterOffset,
@@ -6449,6 +6517,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                     : _pageTurnAnimation,
                 backgroundColor: theme.backgroundColor,
                 isDark: theme.systemBrightness == Brightness.dark,
+                foregroundColor: theme.textColor,
+                desktopEdgeWidth: _horizontalPadding,
                 selection: _activeSelectableParaNotifier,
                 pageContentChanges: _paragraphSignals,
                 onDismissSelection: _dismissReaderSelection,
@@ -6473,9 +6543,14 @@ class _ReaderScreenState extends State<ReaderScreen>
                 onPreviousBoundary: () => _startFromChapter(
                   _currentActiveIndex - 1,
                   toLastPage: true,
+                  fromWheel:
+                      _pageViewKey.currentState?.isWheelInteraction ?? false,
                 ),
-                onNextBoundary: () =>
-                    _startFromChapter(_currentActiveIndex + 1),
+                onNextBoundary: () => _startFromChapter(
+                  _currentActiveIndex + 1,
+                  fromWheel:
+                      _pageViewKey.currentState?.isWheelInteraction ?? false,
+                ),
                 onPageSettled: _onPageSettled,
                 onInteractionEnded: _onPageInteractionEnded,
               ),
@@ -6642,14 +6717,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                                       chapter.title,
                                       _readerPreferences.displayScript,
                                     ),
-                                    style: TextStyle(
-                                      fontSize: _fontSize + 4,
-                                      height: 1.4,
-                                      fontWeight: FontWeight.bold,
+                                    style: _readerTitleStyle(
                                       color: theme.textColor,
-                                      fontFamily: _resolveFontFamily(
-                                        _fontFamily,
-                                      ),
                                     ),
                                   ),
                                 ),
@@ -6737,20 +6806,22 @@ class _ReaderScreenState extends State<ReaderScreen>
   ) {
     final count =
         _chapterCommentStats[chapter.itemId]?.getCount(paragraphIndex) ?? 0;
-    return ReaderCommentBubble(
-      key: ValueKey('paragraph-comment-${chapter.itemId}-$paragraphIndex'),
-      count: count,
-      backgroundColor: theme.highlightColor,
-      foregroundColor: theme.secondaryColor,
-      onTapDown: () => _lastBubbleTapTime = DateTime.now(),
-      onTap: () {
-        _lastBubbleTapTime = DateTime.now();
-        _openParagraphComments(
-          chapter: chapter,
-          paraIndex: paragraphIndex,
-          paraText: originalText,
-        );
-      },
+    return DesktopInteractiveRegion(
+      child: ReaderCommentBubble(
+        key: ValueKey('paragraph-comment-${chapter.itemId}-$paragraphIndex'),
+        count: count,
+        backgroundColor: theme.highlightColor,
+        foregroundColor: theme.secondaryColor,
+        onTapDown: () => _lastBubbleTapTime = DateTime.now(),
+        onTap: () {
+          _lastBubbleTapTime = DateTime.now();
+          _openParagraphComments(
+            chapter: chapter,
+            paraIndex: paragraphIndex,
+            paraText: originalText,
+          );
+        },
+      ),
     );
   }
 
@@ -7493,7 +7564,7 @@ class _ReaderDirectoryViewportState extends State<_ReaderDirectoryViewport> {
   }
 
   @override
-  Widget build(BuildContext context) => ReaderPlatform.isMacOS
+  Widget build(BuildContext context) => ReaderPlatform.isDesktop
       ? widget.builder(context, _controller)
       : DraggableScrollableSheet(
           initialChildSize: .75,

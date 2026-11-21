@@ -91,8 +91,9 @@ class ReaderCacheService {
       (file.parent.uri.pathSegments.where((s) => s.isNotEmpty).last ==
               'images' &&
           RegExp(
+            // Match against the URI form: Windows paths use backslashes.
             r'/[a-f0-9]{64}\.(png|jpg|gif|webp|bmp)$',
-          ).hasMatch(file.path));
+          ).hasMatch(file.uri.path));
 
   Future<Directory> temporaryRoot() async =>
       Directory('${(await documents()).path}/reader_cache_v2');
@@ -202,6 +203,10 @@ class ReaderCacheService {
     return keys;
   }
 
+  // Directory listings return platform separators; compare a normalized form
+  // so Windows backslash paths match the pinned-book prefixes.
+  static String _normalizedPath(String value) => value.replaceAll('\\', '/');
+
   /// Returns bytes remaining. Pinned reading books can temporarily exceed the
   /// limit, but imported/downloaded books are never even enumerated.
   Future<int> trim(int maxBytes, {bool includePinned = false}) async {
@@ -219,8 +224,11 @@ class ReaderCacheService {
         final stat = await entry.stat();
         if (stat.type != FileSystemEntityType.file) continue;
         remaining += stat.size;
+        final path = _normalizedPath(entry.path);
         final pinned = pinnedBooks.any(
-          (book) => entry.path.startsWith('${root.path}/${segment(book)}/'),
+          (book) => path.startsWith(
+            '${_normalizedPath(root.path)}/${segment(book)}/',
+          ),
         );
         if (includePinned || !pinned) candidates.add((entry, stat));
       }

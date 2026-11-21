@@ -28,7 +28,7 @@ Future<void> initializeReaderApplication() async {
   } catch (_) {
     // A damaged optional font index must not prevent reading existing books.
   }
-  if (ReaderPlatform.isMacOS) await DownloadService().initialize();
+  if (ReaderPlatform.isDesktop) await DownloadService().initialize();
   await ExternalBookImportService().initialize();
 }
 
@@ -49,8 +49,10 @@ Future<void> main() async {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Text(
-                      error is StateError && ReaderPlatform.isMacOS
-                          ? 'macOS 客户端初始化失败，请重新构建或重试。原阅读数据未被清除。'
+                      error is StateError && ReaderPlatform.requiresNativeBridge
+                          ? (ReaderPlatform.isMacOS
+                                ? 'macOS 客户端初始化失败，请重新构建或重试。原阅读数据未被清除。'
+                                : 'Windows 客户端初始化失败，请重新构建或重试。原阅读数据未被清除。')
                           : '上次恢复尚未完成，原数据与恢复日志已保留。请检查存储空间后重试。',
                     ),
                     const SizedBox(height: 16),

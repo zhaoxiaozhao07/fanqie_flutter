@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
+import 'dart:typed_data' show BytesBuilder;
 import 'package:archive/archive.dart';
 import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter/foundation.dart';
@@ -11,29 +12,82 @@ import 'package:pointycastle/export.dart' as pc;
 import '../models/comment.dart';
 import 'discussion_post_content.dart';
 
+/// 单个设备会话信息（用于避免单设备高频触发服务端限流）
+class _GatewaySession {
+  final String deviceId;
+  final String installId;
+  Uint8List contentKey;
+  int keyVer;
+  int requestCount = 0;
+  int reservedRequests = 0;
+  bool throttled = false;
+  Future<bool>? _refreshingKey;
+
+  _GatewaySession({
+    required this.deviceId,
+    required this.installId,
+    required this.contentKey,
+    required this.keyVer,
+  });
+
+  bool isUsable(int maxRequests, {int requestBudget = 1}) =>
+      !throttled &&
+      requestCount + reservedRequests + requestBudget <= maxRequests;
+}
+
 /// 番茄小说移动端接口与解密网关 (Fanqie Mobile Gateway)
 /// 参考 Fanqie-novel-Downloader (POf-L) 及移动端协议实现：
 /// - 官方移动端正文读取；不把 Web 试读预览当作完整正文
 /// - 原生实现字节跳动移动端请求签名体系 (x-argus 551 + x-ladon + x-khronos + x-ss-req-ticket)
 /// - 原生实现正文动态 AES 密钥协商 (registerkey) 与全量章节内容解密
+/// - 支持动态匿名设备注册与多设备会话池轮换，防止单设备高频下载被限流返回空响应
 class FanqieMobileGateway {
   static final FanqieMobileGateway _instance = FanqieMobileGateway._internal();
-  factory FanqieMobileGateway({HttpClient? client}) => client == null
+  factory FanqieMobileGateway({
+    HttpClient? client,
+    bool? allowDynamicRegistration,
+    int maxRequestsPerSession = defaultMaxRequestsPerSession,
+    Duration requestTimeout = const Duration(seconds: 10),
+  }) =>
+      client == null &&
+          allowDynamicRegistration == null &&
+          maxRequestsPerSession == defaultMaxRequestsPerSession &&
+          requestTimeout == const Duration(seconds: 10)
       ? _instance
-      : FanqieMobileGateway._internal(client: client);
-  FanqieMobileGateway._internal({HttpClient? client}) : _sharedClient = client;
+      : FanqieMobileGateway._internal(
+          client: client,
+          allowDynamicRegistration: allowDynamicRegistration,
+          maxRequestsPerSession: maxRequestsPerSession,
+          requestTimeout: requestTimeout,
+        );
+  FanqieMobileGateway._internal({
+    HttpClient? client,
+    bool? allowDynamicRegistration,
+    this.maxRequestsPerSession = defaultMaxRequestsPerSession,
+    this.requestTimeout = const Duration(seconds: 10),
+  }) : _sharedClient = client,
+       _allowDynamicRegistration = allowDynamicRegistration ?? (client == null);
 
   static const String readingBaseUrl = 'https://reading.snssdk.com';
   static const String userAgent = 'com.dragon.read';
+  static const int defaultMaxRequestsPerSession = 75;
+  static const int defaultSessionPoolSize = 3;
 
   // 默认种子设备（与移动端对齐）
   final String _deviceId = '2187355326004404';
   final String _installId = '2187355326270644';
+  final bool _allowDynamicRegistration;
+  final int maxRequestsPerSession;
+  final Duration requestTimeout;
 
-  Map<String, String> _buildCommonParams({Map<String, String>? extra}) {
+  Map<String, String> _buildCommonParams({
+    Map<String, String>? extra,
+    String? deviceId,
+    String? installId,
+  }) {
     return {
-      'iid': _installId,
-      'device_id': _deviceId,
+      'iid': installId ?? _installId,
+      'device_id': deviceId ?? _deviceId,
       'ac': 'wifi',
       'channel': '43536163a',
       'aid': '1967',
@@ -74,7 +128,7 @@ class FanqieMobileGateway {
     46,
   ]);
 
-  // 当前正文解密密钥
+  // 当前种子设备正文解密密钥
   Uint8List? _contentKey;
   int _keyVer = 0;
   Completer<bool>? _refreshKeyCompleter;
@@ -82,12 +136,320 @@ class FanqieMobileGateway {
   final _forumIds = <String, ({String id, DateTime expires})>{};
   final _forumRequests = <String, Future<String?>>{};
 
+  // 多设备会话池，用于大批量下载分摊请求并规避单设备限流
+  final List<_GatewaySession> _sessionPool = [];
+  _GatewaySession? _seedSession;
+  int _sessionCursor = 0;
+  Future<void>? _poolPreparation;
+  int _registrationGeneration = 0;
+  DateTime? _registrationRetryAfter;
+
+  // A single wall-clock deadline includes connecting, headers and the entire
+  // body. Cancelling the subscription and aborting the request releases sockets
+  // even when headers arrive but the server never finishes sending data.
+  Future<({int status, Uint8List bytes})> _requestBytes(
+    Uri uri, {
+    bool post = false,
+    Map<String, String> headers = const {},
+    List<int>? body,
+    required int maxBytes,
+  }) {
+    final done = Completer<({int status, Uint8List bytes})>();
+    HttpClientRequest? request;
+    StreamSubscription<List<int>>? subscription;
+    final bytes = BytesBuilder(copy: false);
+    void fail(Object error, [StackTrace? stack]) {
+      if (done.isCompleted) return;
+      request?.abort(error, stack);
+      unawaited(subscription?.cancel());
+      done.completeError(error, stack);
+    }
+
+    final timer = Timer(requestTimeout, () {
+      fail(TimeoutException('移动接口响应超时', requestTimeout));
+    });
+    unawaited(() async {
+      try {
+        final opened = await (post
+            ? _client.postUrl(uri)
+            : _client.getUrl(uri));
+        request = opened;
+        if (done.isCompleted) {
+          opened.abort();
+          return;
+        }
+        opened.headers.set('User-Agent', userAgent);
+        for (final entry in headers.entries) {
+          opened.headers.set(entry.key, entry.value);
+        }
+        if (body != null) opened.add(body);
+        final response = await opened.close();
+        if (done.isCompleted) {
+          await response.listen((_) {}).cancel();
+          return;
+        }
+        if (response.statusCode != 200 || response.contentLength > maxBytes) {
+          await response.listen((_) {}).cancel();
+          if (response.contentLength > maxBytes) {
+            fail(const FormatException('移动接口响应过大'));
+          } else if (!done.isCompleted) {
+            done.complete((status: response.statusCode, bytes: Uint8List(0)));
+          }
+          return;
+        }
+        subscription = response.listen(
+          (chunk) {
+            if (done.isCompleted) return;
+            if (bytes.length + chunk.length > maxBytes) {
+              fail(const FormatException('移动接口响应过大'));
+              return;
+            }
+            bytes.add(chunk);
+          },
+          onError: (Object error, StackTrace stack) => fail(error, stack),
+          onDone: () {
+            if (!done.isCompleted) {
+              done.complete((
+                status: response.statusCode,
+                bytes: bytes.takeBytes(),
+              ));
+            }
+          },
+          cancelOnError: true,
+        );
+      } catch (error, stack) {
+        fail(error, stack);
+      }
+    }());
+    return done.future.whenComplete(timer.cancel);
+  }
+
   HttpClient get _client {
     _sharedClient ??= HttpClient()
       ..maxConnectionsPerHost = 32
       ..idleTimeout = const Duration(seconds: 30)
-      ..connectionTimeout = const Duration(seconds: 8);
+      ..connectionTimeout = const Duration(seconds: 10);
     return _sharedClient!;
+  }
+
+  /// 为批量下载预热多设备会话池，降低单设备触发 100 章限流的概率
+  Future<void> prepareDownloadSessionPool({
+    int desiredSize = defaultSessionPoolSize,
+  }) async {
+    if (!_allowDynamicRegistration) return;
+    // Prewarming and replenishment share one serialized registration budget.
+    final pending = _poolPreparation;
+    if (pending != null) {
+      await pending;
+      return;
+    }
+    final retryAfter = _registrationRetryAfter;
+    if (retryAfter != null && DateTime.now().isBefore(retryAfter)) return;
+    final work = _preparePool(desiredSize.clamp(1, 5));
+    _poolPreparation = work;
+    try {
+      await work;
+    } finally {
+      if (identical(_poolPreparation, work)) _poolPreparation = null;
+    }
+  }
+
+  Future<void> _preparePool(int target) async {
+    _pruneSessions();
+    final needed = target - _sessionPool.length;
+    if (needed <= 0) return;
+
+    final results = await Future.wait(
+      List.generate(needed, (_) => _createDynamicSession()),
+    );
+    // Keep a finite outage decision across sequential reads and prewarming.
+    // Existing usable sessions and the negotiated seed remain available.
+    _registrationRetryAfter = results.any((session) => session == null)
+        ? DateTime.now().add(const Duration(minutes: 1))
+        : null;
+    for (final session in results) {
+      if (session != null &&
+          !_sessionPool.any((s) => s.deviceId == session.deviceId)) {
+        _sessionPool.add(session);
+        _registrationGeneration++;
+      }
+    }
+  }
+
+  void _pruneSessions() {
+    // Reservations only affect temporary eligibility. Completion can release
+    // them, so retire a device only for actual exhaustion or throttling.
+    _sessionPool.removeWhere(
+      (s) => s.throttled || s.requestCount >= maxRequestsPerSession,
+    );
+  }
+
+  Future<({_GatewaySession session, int budget})?> _acquireSession({
+    bool preferPool = false,
+    required int requestBudget,
+  }) async {
+    final budget = min(requestBudget, maxRequestsPerSession);
+    if (budget <= 0) return null;
+    if (_allowDynamicRegistration) {
+      // Reserve the bounded recovery budget synchronously, so other readers
+      // cannot consume the slots needed to retry this device's refreshed key.
+      for (var round = 0; round < 5; round++) {
+        _pruneSessions();
+        for (var offset = 0; offset < _sessionPool.length; offset++) {
+          final session =
+              _sessionPool[(_sessionCursor + offset) % _sessionPool.length];
+          final sessionBudget = min(
+            budget,
+            maxRequestsPerSession - session.requestCount,
+          );
+          if (!session.isUsable(
+            maxRequestsPerSession,
+            requestBudget: sessionBudget,
+          )) {
+            continue;
+          }
+          _sessionCursor = (_sessionCursor + offset + 1) % 0x7fffffff;
+          session.reservedRequests += sessionBudget;
+          return (session: session, budget: sessionBudget);
+        }
+        final generation = _registrationGeneration;
+        await prepareDownloadSessionPool(
+          // Occupied sessions still count toward the retained pool cap.
+          desiredSize:
+              _sessionPool.length + (preferPool ? defaultSessionPoolSize : 1),
+        );
+        _pruneSessions();
+        if (generation == _registrationGeneration) {
+          if (_sessionPool.isEmpty) break; // Registration outage.
+          // A bounded yield lets already-finishing requests release their
+          // reservations. Never wait indefinitely for a busy device.
+          await Future<void>.delayed(Duration.zero);
+        }
+      }
+    }
+    // Registration outages still use negotiated seed keys, never guessed keys.
+    if (_contentKey == null && !await refreshKey()) return null;
+    final seed = _seedSession ??= _GatewaySession(
+      deviceId: _deviceId,
+      installId: _installId,
+      contentKey: _contentKey!,
+      keyVer: _keyVer,
+    );
+    seed.contentKey = _contentKey!;
+    seed.keyVer = _keyVer;
+    final seedBudget = min(
+      budget,
+      maxRequestsPerSession - seed.requestCount - seed.reservedRequests,
+    );
+    if (seedBudget <= 0 || seed.throttled) return null;
+    seed.reservedRequests += seedBudget;
+    return (session: seed, budget: seedBudget);
+  }
+
+  /// 向官方匿名设备注册接口申请全新 device_id 与 install_id，并完成 AES 密钥协商
+  Future<_GatewaySession?> _createDynamicSession() async {
+    try {
+      final registered = await _registerAnonymousDevice();
+      if (registered == null) return null;
+      final negotiated = await _negotiateKeyForDevice(
+        registered.deviceId,
+        registered.installId,
+      );
+      if (negotiated == null) return null;
+      return _GatewaySession(
+        deviceId: registered.deviceId,
+        installId: registered.installId,
+        contentKey: negotiated.key,
+        keyVer: negotiated.keyVer,
+      );
+    } catch (e) {
+      if (kDebugMode) {
+        debugPrint('FanqieMobileGateway _createDynamicSession error: $e');
+      }
+      return null;
+    }
+  }
+
+  Future<({String deviceId, String installId})?>
+  _registerAnonymousDevice() async {
+    final rnd = Random();
+    String hex(int len) =>
+        List.generate(len, (_) => rnd.nextInt(16).toRadixString(16)).join();
+    final openudid = hex(16);
+    final clientudid = '${hex(8)}-${hex(4)}-4${hex(3)}-a${hex(3)}-${hex(12)}';
+
+    final payload = {
+      'magic_tag': 'ss_app_log',
+      'header': {
+        'display_name': '番茄免费小说',
+        'update_version_code': 70132,
+        'manifest_version_code': 70132,
+        'aid': 1967,
+        'channel': '43536163a',
+        'appkey': '57bfa27c67e58e7d920028d3',
+        'package': 'com.dragon.read',
+        'app_version': '7.0.1.32',
+        'version_code': 70132,
+        'sdk_version': '2.12.1-rc.17',
+        'os': 'Android',
+        'os_version': '10',
+        'os_api': 29,
+        'device_model': 'P30',
+        'device_brand': 'realme',
+        'device_manufacturer': 'realme',
+        'cpu_abi': 'arm64-v8a',
+        'release_build': 'c9a68b2_20251015',
+        'density_dpi': 480,
+        'display_density': 'xhdpi',
+        'resolution': '2340x1080',
+        'language': 'zh',
+        'timezone': 8,
+        'access': 'wifi',
+        'not_request_sender': 0,
+        'rom': 'RMX1901_11_A.15',
+        'rom_version': 'coloros_v6.0',
+        'openudid': openudid,
+        'clientudid': clientudid,
+        'req_id': clientudid,
+        'region': 'CN',
+        'tz_name': 'Asia/Shanghai',
+        'tz_offset': 28800,
+        'sim_region': 'cn',
+      },
+      '_gen_time': DateTime.now().millisecondsSinceEpoch,
+    };
+
+    final uri = Uri.https('log.snssdk.com', '/service/2/device_register/', {
+      'aid': '1967',
+      'app_name': 'novelapp',
+      'version_code': '70132',
+      'version_name': '7.0.1.32',
+      'device_platform': 'android',
+      'os': 'android',
+    });
+
+    final response = await _requestBytes(
+      uri,
+      post: true,
+      headers: {'Content-Type': 'application/json; charset=utf-8'},
+      body: utf8.encode(jsonEncode(payload)),
+      maxBytes: 1024 * 1024,
+    );
+    if (response.status != 200) return null;
+    final j = jsonDecode(utf8.decode(response.bytes));
+    if (j is! Map) return null;
+
+    final deviceId =
+        j['device_id_str']?.toString() ?? j['device_id']?.toString() ?? '';
+    final installId =
+        j['install_id_str']?.toString() ?? j['install_id']?.toString() ?? '';
+    if (deviceId.isEmpty ||
+        deviceId == '0' ||
+        installId.isEmpty ||
+        installId == '0') {
+      return null;
+    }
+    return (deviceId: deviceId, installId: installId);
   }
 
   /// 获取单章完整正文（突破 200 字锁章限制）
@@ -97,85 +459,214 @@ class FanqieMobileGateway {
   Future<OnlineChapter?> fetchChapterDocument(
     String itemId, {
     int retryCount = 0,
+    bool useSessionPool = false,
   }) async {
     final cleanId = itemId.trim();
     if (cleanId.isEmpty) return null;
+    _GatewaySession? session;
+    var remainingRequests = 0;
+    // At most four chapter requests, including throttling/key/network recovery.
+    try {
+      for (var attempt = retryCount.clamp(0, 3); attempt <= 3; attempt++) {
+        if (session == null) {
+          final acquired = await _acquireSession(
+            preferPool: useSessionPool,
+            requestBudget: 4 - attempt,
+          );
+          if (acquired == null) return null;
+          session = acquired.session;
+          remainingRequests = acquired.budget;
+        }
+        if (remainingRequests <= 0) return null;
+        final uri = Uri.https(
+          'reading.snssdk.com',
+          '/reading/reader/full/v',
+          _buildCommonParams(
+            deviceId: session.deviceId,
+            installId: session.installId,
+            extra: {'item_id': cleanId, 'req_type': '1'},
+          ),
+        );
+        try {
+          // Charge every physical chapter attempt, including failures/retries.
+          remainingRequests--;
+          session.reservedRequests--;
+          session.requestCount++;
+          final response = await _requestBytes(
+            uri,
+            headers: signRequest(uri.toString()),
+            maxBytes: 32 * 1024 * 1024,
+          );
+          final throttled =
+              response.status == 429 ||
+              (response.status == 200 && response.bytes.isEmpty);
+          if (throttled) {
+            if (_allowDynamicRegistration) {
+              session.throttled = true;
+              _sessionPool.remove(session);
+            }
+            session.reservedRequests -= remainingRequests;
+            remainingRequests = 0;
+            session = null;
+            if (attempt >= (_allowDynamicRegistration ? 3 : 1)) return null;
+            await Future<void>.delayed(
+              Duration(milliseconds: 150 * (attempt + 1)),
+            );
+            continue;
+          }
+          if (response.status != 200) return null;
+          final j = jsonDecode(utf8.decode(response.bytes));
+          if (j is! Map || j['code'] != 0 || j['data'] is! Map) return null;
+          final data = j['data'] as Map;
+          final encrypted = data['content']?.toString() ?? '';
+          final version =
+              int.tryParse(data['key_version']?.toString() ?? '0') ?? 0;
+          if (encrypted == 'Invalid' ||
+              (version != 0 && version != session.keyVer)) {
+            if (attempt >= 2 || remainingRequests <= 0) return null;
+            if (!await _refreshSessionKey(session)) return null;
+            // Reuse this exact refreshed device/key; rotation would consume all
+            // retries on the other expired pool keys before ever decrypting.
+            continue;
+          }
+          if (encrypted.isEmpty) return null;
+          final html = _decryptAesCbc(
+            encrypted,
+            session.contentKey,
+            isCompressed: data['compress_status'] == 1,
+          );
+          return html == null || html.isEmpty
+              ? null
+              : OnlineChapter.parse(html);
+        } on FormatException catch (e) {
+          if (kDebugMode) {
+            debugPrint('FanqieMobileGateway invalid response: $e');
+          }
+          return null;
+        } catch (e) {
+          if (kDebugMode) {
+            debugPrint('FanqieMobileGateway fetchChapter error: $e');
+          }
+          if (attempt >= 2 || remainingRequests <= 0) return null;
+          await Future<void>.delayed(
+            Duration(milliseconds: 200 * (attempt + 1)),
+          );
+        }
+      }
+      return null;
+    } finally {
+      // Success, malformed content, failed key negotiation and bounded recovery
+      // exits release unused slots without resetting actual usage. This is not
+      // an immediate task-cancellation hook.
+      if (session != null) session.reservedRequests -= remainingRequests;
+    }
+  }
 
-    if (_contentKey == null && !await refreshKey()) return null;
+  Future<bool> _refreshSessionKey(_GatewaySession session) async {
+    if (session.deviceId == _deviceId) {
+      if (!await refreshKey()) return false;
+      session.contentKey = _contentKey!;
+      session.keyVer = _keyVer;
+      return true;
+    }
+    final pending = session._refreshingKey;
+    if (pending != null) return pending;
+    final future = _negotiateKeyForDevice(session.deviceId, session.installId)
+        .then((result) {
+          if (result == null) return false;
+          session.contentKey = result.key;
+          session.keyVer = result.keyVer;
+          if (session.deviceId == _deviceId) {
+            _contentKey = result.key;
+            _keyVer = result.keyVer;
+          }
+          return true;
+        })
+        .catchError((_) => false)
+        .whenComplete(() {
+          session._refreshingKey = null;
+        });
+    session._refreshingKey = future;
+    return future;
+  }
+
+  Future<({Uint8List key, int keyVer})?> _negotiateKeyForDevice(
+    String deviceId,
+    String installId,
+  ) async {
+    var id = BigInt.parse(deviceId);
+    final idBytes = Uint8List(16);
+    for (int i = 15; i >= 0; i--) {
+      idBytes[i] = (id & BigInt.from(0xFF)).toInt();
+      id >>= 8;
+    }
+    final reversedId = Uint8List.fromList(idBytes.reversed.toList());
+
+    final iv = Uint8List(16);
+    final rnd = Random();
+    for (int i = 0; i < 16; i++) {
+      iv[i] = rnd.nextInt(256);
+    }
+
+    final padded = _pkcs7Pad(reversedId, 16);
+    final encrypted = _aesCbcEncrypt(padded, _sharedKey, iv);
+
+    final content = Uint8List(iv.length + encrypted.length);
+    content.setRange(0, iv.length, iv);
+    content.setRange(iv.length, content.length, encrypted);
+
+    final plainBody = jsonEncode({'content': base64.encode(content)});
+    final gzipped = GZipEncoder().encode(utf8.encode(plainBody));
 
     final queryParams = _buildCommonParams(
-      extra: {'item_id': cleanId, 'req_type': '1'},
+      deviceId: deviceId,
+      installId: installId,
     );
 
     final uri = Uri.https(
       'reading.snssdk.com',
-      '/reading/reader/full/v',
+      '/reading/crypt/registerkey',
       queryParams,
     );
-    final sigHeaders = signRequest(uri.toString());
+    final sigHeaders = signRequest(uri.toString(), body: gzipped);
 
-    try {
-      final req = await _client.getUrl(uri).timeout(const Duration(seconds: 8));
-      req.headers.set('User-Agent', userAgent);
-      for (final e in sigHeaders.entries) {
-        req.headers.set(e.key, e.value);
-      }
+    final response = await _requestBytes(
+      uri,
+      post: true,
+      headers: {
+        'Content-Type': 'application/json; charset=utf-8',
+        'Content-Encoding': 'gzip',
+        ...sigHeaders,
+      },
+      body: gzipped,
+      maxBytes: 1024 * 1024,
+    );
+    if (response.status != 200) return null;
+    final jsonStr = utf8.decode(response.bytes);
+    final j = jsonDecode(jsonStr);
 
-      final res = await req.close().timeout(const Duration(seconds: 8));
-      if (res.statusCode == 200) {
-        final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
-        final jsonStr = utf8.decode(respBytes, allowMalformed: true);
-        if (jsonStr.isEmpty) {
-          if (retryCount < 1) {
-            await Future.delayed(const Duration(milliseconds: 150));
-            return await fetchChapterDocument(
-              itemId,
-              retryCount: retryCount + 1,
-            );
-          }
-          return null;
-        }
+    if (j is! Map || j['code'] != 0 || j['data'] is! Map) {
+      return null;
+    }
+    final keyVersion = int.tryParse(j['data']?['keyver']?.toString() ?? '');
+    final encryptedKey = j['data']?['key']?.toString();
+    if (encryptedKey == null || encryptedKey.isEmpty) return null;
+    final keyBuf = base64.decode(encryptedKey);
+    if (keyBuf.length < 32 || (keyBuf.length - 16) % 16 != 0) {
+      return null;
+    }
+    final kIv = Uint8List.sublistView(keyBuf, 0, 16);
+    final kCt = Uint8List.sublistView(keyBuf, 16);
 
-        final j = jsonDecode(jsonStr);
-        if (j is Map && j['code'] == 0 && j['data'] is Map) {
-          final data = j['data'] as Map<String, dynamic>;
-          final encContent = data['content']?.toString() ?? '';
-          final respKeyVer =
-              int.tryParse(data['key_version']?.toString() ?? '0') ?? 0;
-
-          // 密钥过期或无效处理
-          if (encContent == 'Invalid' ||
-              (respKeyVer != 0 && respKeyVer != _keyVer)) {
-            if (retryCount < 2) {
-              await refreshKey();
-              return await fetchChapterDocument(
-                itemId,
-                retryCount: retryCount + 1,
-              );
-            }
-            return null;
-          }
-
-          if (encContent.isNotEmpty && _contentKey != null) {
-            final plainHtml = _decryptAesCbc(
-              encContent,
-              _contentKey!,
-              isCompressed: data['compress_status'] == 1,
-            );
-            if (plainHtml != null && plainHtml.isNotEmpty) {
-              return OnlineChapter.parse(plainHtml);
-            }
-          }
-        }
-      }
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('FanqieMobileGateway fetchChapter error: $e');
-      }
-      if (retryCount < 2) {
-        await Future.delayed(Duration(milliseconds: 150 * (retryCount + 1)));
-        return await fetchChapterDocument(itemId, retryCount: retryCount + 1);
-      }
+    var decKey = _aesCbcDecrypt(kCt, _sharedKey, kIv);
+    final padVal = decKey.last;
+    if (padVal > 0 &&
+        padVal <= 16 &&
+        decKey.sublist(decKey.length - padVal).every((b) => b == padVal)) {
+      decKey = Uint8List.sublistView(decKey, 0, decKey.length - padVal);
+    }
+    if (decKey.length == 16 && keyVersion != null && keyVersion > 0) {
+      return (key: decKey, keyVer: keyVersion);
     }
     return null;
   }
@@ -189,87 +680,12 @@ class FanqieMobileGateway {
     _refreshKeyCompleter = completer;
 
     try {
-      var id = BigInt.parse(_deviceId);
-      final idBytes = Uint8List(16);
-      for (int i = 15; i >= 0; i--) {
-        idBytes[i] = (id & BigInt.from(0xFF)).toInt();
-        id >>= 8;
-      }
-      final reversedId = Uint8List.fromList(idBytes.reversed.toList());
-
-      final iv = Uint8List(16);
-      final rnd = Random();
-      for (int i = 0; i < 16; i++) {
-        iv[i] = rnd.nextInt(256);
-      }
-
-      final padded = _pkcs7Pad(reversedId, 16);
-      final encrypted = _aesCbcEncrypt(padded, _sharedKey, iv);
-
-      final content = Uint8List(iv.length + encrypted.length);
-      content.setRange(0, iv.length, iv);
-      content.setRange(iv.length, content.length, encrypted);
-
-      final plainBody = jsonEncode({'content': base64.encode(content)});
-      final gzipped = GZipEncoder().encode(utf8.encode(plainBody));
-
-      final queryParams = _buildCommonParams();
-
-      final uri = Uri.https(
-        'reading.snssdk.com',
-        '/reading/crypt/registerkey',
-        queryParams,
-      );
-      final sigHeaders = signRequest(uri.toString(), body: gzipped);
-
-      final req = await _client
-          .postUrl(uri)
-          .timeout(const Duration(seconds: 10));
-      req.headers.set('User-Agent', userAgent);
-      req.headers.set('Content-Type', 'application/json; charset=utf-8');
-      req.headers.set('Content-Encoding', 'gzip');
-      for (final e in sigHeaders.entries) {
-        req.headers.set(e.key, e.value);
-      }
-      req.add(gzipped);
-
-      final res = await req.close().timeout(const Duration(seconds: 10));
-      if (res.statusCode == 200) {
-        final respBytes = await res.fold<List<int>>([], (a, b) => a..addAll(b));
-        final jsonStr = utf8.decode(respBytes, allowMalformed: true);
-        final j = jsonDecode(jsonStr);
-
-        if (j is! Map || j['code'] != 0 || j['data'] is! Map) {
-          completer.complete(false);
-          return false;
-        }
-        final keyVersion = int.tryParse(j['data']?['keyver']?.toString() ?? '');
-        final encryptedKey = j['data']?['key']?.toString();
-        if (encryptedKey != null && encryptedKey.isNotEmpty) {
-          final keyBuf = base64.decode(encryptedKey);
-          if (keyBuf.length < 32 || (keyBuf.length - 16) % 16 != 0) {
-            completer.complete(false);
-            return false;
-          }
-          final kIv = Uint8List.sublistView(keyBuf, 0, 16);
-          final kCt = Uint8List.sublistView(keyBuf, 16);
-
-          var decKey = _aesCbcDecrypt(kCt, _sharedKey, kIv);
-          final padVal = decKey.last;
-          if (padVal > 0 &&
-              padVal <= 16 &&
-              decKey
-                  .sublist(decKey.length - padVal)
-                  .every((b) => b == padVal)) {
-            decKey = Uint8List.sublistView(decKey, 0, decKey.length - padVal);
-          }
-          if (decKey.length == 16 && keyVersion != null && keyVersion > 0) {
-            _contentKey = decKey;
-            _keyVer = keyVersion;
-            completer.complete(true);
-            return true;
-          }
-        }
+      final result = await _negotiateKeyForDevice(_deviceId, _installId);
+      if (result != null) {
+        _contentKey = result.key;
+        _keyVer = result.keyVer;
+        completer.complete(true);
+        return true;
       }
       completer.complete(false);
       return false;

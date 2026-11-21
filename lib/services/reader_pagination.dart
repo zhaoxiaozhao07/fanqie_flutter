@@ -345,13 +345,43 @@ class ReaderPaginationCache {
           final spacing = fragments.isEmpty ? 0.0 : layout.paragraphSpacing;
           var room = available() - usedHeight - spacing;
           final prefix = indent && cursor == 0 ? '\u3000\u3000' : '';
-          final display = '$prefix${original.substring(cursor, block.end)}';
-          final fullHeight = measure(
-            display,
-            layout.bodyStyle,
-            width,
-            paragraphEnd: block.end == original.length,
-          );
+          final remainingLength = block.end - cursor;
+          var limit = math.min(1024, remainingLength);
+          late String display;
+          late double fullHeight;
+          var measuredEnd = 0;
+          while (true) {
+            // Re-laying out the full remaining paragraph on every page is
+            // quadratic for imported books with very long/no-break paragraphs.
+            // Measure enough look-ahead to fill this page, widening only when
+            // unusually small text or a wide viewport needs more characters.
+            final range = CharacterRange.at(original, cursor, cursor + limit);
+            measuredEnd = math.min(
+              remainingLength,
+              original.length - range.stringAfterLength - cursor,
+            );
+            // Slice only the bounded window, not the entire remaining tail.
+            // CharacterRange expands a cut through an emoji/combining cluster.
+            display =
+                '$prefix${original.substring(cursor, cursor + measuredEnd)}';
+            fullHeight = measure(
+              display,
+              layout.bodyStyle,
+              width,
+              paragraphEnd:
+                  measuredEnd == remainingLength &&
+                  block.end == original.length,
+            );
+            if (measuredEnd == remainingLength || fullHeight > room + .01) {
+              break;
+            }
+            limit = math.min(
+              remainingLength,
+              math.max(measuredEnd + 1, limit * 2),
+            );
+          }
+          final measuredParagraphEnd =
+              measuredEnd == remainingLength && block.end == original.length;
           // Only the true ending needs room for the chapter footer. Earlier
           // pages stay fully filled; late comment counts never change layout.
           if (endHeight > 0 && fullHeight <= room + 0.01) {
@@ -379,6 +409,7 @@ class ReaderPaginationCache {
               continue;
             }
             if (layout.smartTypography &&
+                measuredEnd == remainingLength &&
                 fittingLines >= 3 &&
                 fittingLines == lines.length - 1) {
               final preceding = lines[fittingLines - 2];
@@ -395,17 +426,25 @@ class ReaderPaginationCache {
             if (candidate <= prefix.length) {
               candidate =
                   prefix.length +
-                  original.substring(cursor).characters.first.length;
+                  CharacterRange.at(
+                    original,
+                    cursor,
+                    cursor + 1,
+                  ).current.length;
               oversized = true;
             }
             // 气泡单独溢出时，最后一个完整字素随气泡留到续页；
             // 不生成丢失原文位置的“仅气泡页”，也不切断 emoji。
             if (candidate >= display.length &&
-                block.end == original.length &&
+                measuredParagraphEnd &&
                 !layout.inlineCommentSize.isEmpty) {
               candidate =
                   display.length -
-                  original.substring(cursor).characters.last.length;
+                  CharacterRange.at(
+                    original,
+                    block.end - 1,
+                    block.end,
+                  ).current.length;
               if (candidate <= prefix.length && fragments.isNotEmpty) {
                 flush();
                 continue;
@@ -415,7 +454,11 @@ class ReaderPaginationCache {
             if (candidate <= prefix.length) {
               end =
                   prefix.length +
-                  original.substring(cursor).characters.first.length;
+                  CharacterRange.at(
+                    original,
+                    cursor,
+                    cursor + 1,
+                  ).current.length;
               oversized = true;
             }
             end = ReaderText.safeOffset(display, end);
@@ -429,15 +472,18 @@ class ReaderPaginationCache {
             if (end <= prefix.length) {
               end =
                   prefix.length +
-                  original.substring(cursor, block.end).characters.first.length;
+                  CharacterRange.at(
+                    original,
+                    cursor,
+                    cursor + 1,
+                  ).current.length;
               oversized = true;
             }
             height = measure(
               display.substring(0, end),
               layout.bodyStyle,
               width,
-              paragraphEnd:
-                  end == display.length && block.end == original.length,
+              paragraphEnd: end == display.length && measuredParagraphEnd,
             );
             // 少数字体/词边界的独立续页重排可能多出一行，退回上一行再核对。
             while (height > room + 0.01 &&
@@ -473,8 +519,7 @@ class ReaderPaginationCache {
                 display.substring(0, end),
                 layout.bodyStyle,
                 width,
-                paragraphEnd:
-                    end == display.length && block.end == original.length,
+                paragraphEnd: end == display.length && measuredParagraphEnd,
               );
             }
           }
