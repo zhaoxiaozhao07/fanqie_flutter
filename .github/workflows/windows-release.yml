@@ -1,0 +1,299 @@
+name: Windows 正式便携版
+run-name: Windows x64 Release · ${{ github.ref_name }}
+
+# Independent namespace: never create v* tags or modify Android releases.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '版本一致性校验（如 3.3.6；留空使用 pubspec.yaml，不覆盖版本）'
+        required: false
+        default: ''
+        type: string
+      publish:
+        description: '发布独立、未签名的正式 Windows ZIP（只允许 main）'
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+concurrency:
+  group: windows-formal-release-${{ github.ref }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    runs-on: windows-2022
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      build: ${{ steps.version.outputs.build }}
+      full_version: ${{ steps.version.outputs.full_version }}
+      release_tag: ${{ steps.version.outputs.release_tag }}
+      package_name: ${{ steps.version.outputs.package_name }}
+      artifact_name: ${{ steps.version.outputs.artifact_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Validate exact source, version and scope
+        id: version
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          PUBLISH: ${{ inputs.publish }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') { throw 'x64 runner required' }
+          $head = git rev-parse HEAD
+          $code = $LASTEXITCODE
+          if ($code -ne 0 -or $head -cne $env:GITHUB_SHA) { throw "Exact triggering SHA checkout required (git exit $code)" }
+          if ($env:PUBLISH -eq 'true' -and $env:GITHUB_REF -cne 'refs/heads/main') { throw 'Only main may publish; disable publish for branch verification' }
+          $text = Get-Content -LiteralPath pubspec.yaml -Raw
+          if ($text -notmatch '(?m)^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$') { throw 'Invalid pubspec version' }
+          $version = $Matches[1]; $build = $Matches[2]
+          if ($env:REQUESTED_VERSION -and $env:REQUESTED_VERSION -cne $version) { throw 'Requested version differs from pubspec' }
+          @(
+            "version=$version", "build=$build", "full_version=$version+$build",
+            "release_tag=windows-v$version-$build",
+            "package_name=FanqieReader-$version-$build-windows-x64",
+            "artifact_name=windows-x64-$version-$build-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
+          ) | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
+          foreach ($script in @('scripts/package_windows.ps1', 'scripts/verify_windows_package.ps1', 'scripts/test_windows_package.ps1')) {
+            $tokens = $null; $errors = $null
+            $null = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $script), [ref]$tokens, [ref]$errors)
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+          git diff --check
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "git diff check failed (exit $code)" }
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.9'
+          channel: stable
+          architecture: x64
+          cache: true
+      - name: Enforce lock, offline analyze/test, production build and verified package
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          . ./scripts/verify_windows_package.ps1
+          $root = $PWD.Path
+          $logs = Resolve-WindowsReleasePath 'build/windows/ci-logs' $root
+          $out = Resolve-WindowsReleasePath 'dist/windows-ci' $root
+          Assert-WindowsWithin $logs (Join-Path $root 'build')
+          Assert-WindowsWithin $out (Join-Path $root 'dist')
+          New-Item -ItemType Directory -Path $logs -Force | Out-Null
+          function Invoke-CheckedFlutter([string[]]$Arguments, [string]$LogName) {
+            $mutex = [Threading.Mutex]::new($false, 'Local\FanqieCodexReaderFlutterChecks')
+            $owned = $false
+            try {
+              try { $owned = $mutex.WaitOne([TimeSpan]::FromMinutes(30)) }
+              catch [Threading.AbandonedMutexException] { $owned = $true }
+              if (-not $owned) { throw 'Flutter checks mutex timed out' }
+              & flutter @Arguments 2>&1 | Tee-Object -FilePath (Join-Path $logs $LogName)
+              $code = $LASTEXITCODE
+              if ($code -ne 0) { throw "flutter $Arguments failed (exit $code)" }
+            } finally {
+              if ($owned) { $mutex.ReleaseMutex() }
+              $mutex.Dispose()
+            }
+          }
+          Invoke-CheckedFlutter @('--version', '--machine') 'flutter-version.json'
+          $sdk = Get-Content -LiteralPath (Join-Path $logs 'flutter-version.json') -Raw | ConvertFrom-Json
+          if ($sdk.frameworkVersion -ne '3.47.9' -or $sdk.dartSdkVersion -ne '3.13.7') { throw 'Pinned SDK mismatch' }
+          Invoke-CheckedFlutter @('config', '--enable-windows-desktop') 'flutter-config.log'
+          Invoke-CheckedFlutter @('pub', 'get', '--enforce-lockfile') 'flutter-pub.log'
+          git diff --exit-code -- pubspec.lock
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "Committed lock changed (git exit $code)" }
+          Invoke-CheckedFlutter @('analyze', '--no-pub') 'flutter-analyze.log'
+          Invoke-CheckedFlutter @('test', '--no-pub', '--reporter', 'expanded') 'flutter-test.log'
+          # This script alone performs exactly one Release build of lib/main.dart.
+          & ./scripts/package_windows.ps1 -OutputDir dist/windows-ci 2>&1 | Tee-Object -FilePath (Join-Path $logs 'package.log')
+          if (-not $?) { throw 'Package script failed' }
+          git diff --exit-code -- pubspec.lock
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "Committed lock changed after checks/build (git exit $code)" }
+          # The harness consumes the just-built EXE for Windows resource checks; Flutter is stubbed.
+          & pwsh -NoLogo -NoProfile -File scripts/test_windows_package.ps1 -Suite All -LogPath (Join-Path $logs 'package-tests.log')
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "Packaging behavior tests failed (exit $code)" }
+          & pwsh -NoLogo -NoProfile -File scripts/test_windows_package.ps1 -Suite Publish -LogPath (Join-Path $logs 'publication-tests.log')
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "Publication behavior tests failed (exit $code)" }
+          & pwsh -NoLogo -NoProfile -File scripts/test_windows_package.ps1 -Suite Review -LogPath (Join-Path $logs 'review-repairs-tests.log')
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "Snapshot/archive/path race regressions failed (exit $code)" }
+          git diff --exit-code
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "Tracked source changed from triggering SHA (git exit $code)" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.version.outputs.artifact_name }}
+          path: |
+            dist/windows-ci/${{ steps.version.outputs.package_name }}.zip
+            dist/windows-ci/${{ steps.version.outputs.package_name }}.zip.sha256
+            dist/windows-ci/windows-build-info.json
+          if-no-files-found: error
+          retention-days: 30
+      - name: Preserve diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-ci-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/windows/ci-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  publish:
+    needs: build
+    if: inputs.publish && github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact_name }}
+          path: dist/windows
+      - name: Create new draft, validate all assets and exact tag SHA, then publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+          BUILD_NUMBER: ${{ needs.build.outputs.build }}
+          FULL_VERSION: ${{ needs.build.outputs.full_version }}
+          TAG: ${{ needs.build.outputs.release_tag }}
+          PACKAGE: ${{ needs.build.outputs.package_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          if ($env:GITHUB_REF -cne 'refs/heads/main' -or $env:GITHUB_SHA -notmatch '^[0-9a-f]{40}$') { throw 'Invalid publication source' }
+          if ($env:FULL_VERSION -cne "$env:VERSION+$env:BUILD_NUMBER" -or
+              $env:TAG -cne "windows-v$env:VERSION-$env:BUILD_NUMBER" -or
+              $env:PACKAGE -cne "FanqieReader-$env:VERSION-$env:BUILD_NUMBER-windows-x64" -or
+              $env:FULL_VERSION -notmatch '^\d+\.\d+\.\d+\+\d+$') { throw 'Invalid deterministic release identity' }
+          $directory = Join-Path $PWD 'dist/windows'
+          $names = @("$env:PACKAGE.zip", "$env:PACKAGE.zip.sha256", 'windows-build-info.json')
+          $actual = @(Get-ChildItem -LiteralPath $directory -Force)
+          if ($actual.Count -ne 3 -or @($actual | Where-Object { $_.PSIsContainer -or $_.Name -cnotin $names }).Count) { throw 'Unexpected downloaded artifacts' }
+          $digests = @{}; $sizes = @{}
+          foreach ($name in $names) {
+            $path = Join-Path $directory $name
+            $digests[$name] = (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant()
+            $sizes[$name] = (Get-Item -LiteralPath $path).Length
+            if ($sizes[$name] -eq 0) { throw "Empty artifact: $name" }
+          }
+          $sidecar = Get-Content -LiteralPath (Join-Path $directory "$env:PACKAGE.zip.sha256") -Raw
+          if ($sidecar.Trim() -cne "$($digests["$env:PACKAGE.zip"])  $env:PACKAGE.zip") { throw 'ZIP checksum mismatch' }
+          $info = Get-Content -LiteralPath (Join-Path $directory 'windows-build-info.json') -Raw | ConvertFrom-Json -AsHashtable
+          $runUrl = "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+          if ($info.source_commit -cne $env:GITHUB_SHA -or $info.source_ref -cne $env:GITHUB_REF -or
+              $info.version -cne $env:FULL_VERSION -or $info.release_tag -cne $env:TAG -or
+              $info.workflow_run -cne $runUrl -or $info.run_id -cne $env:GITHUB_RUN_ID -or
+              $info.run_attempt -cne $env:GITHUB_RUN_ATTEMPT -or $info.schema_version -ne 1 -or
+              $info.architecture -cne 'x64' -or $info.build_target -cne 'lib/main.dart' -or
+              $info.build_mode -cne 'Release' -or $info.signing -cne 'unsigned' -or
+              $info.authenticode_signed -ne $false -or $info.runtime.family -cne 'VC143' -or
+              $info.flutter.frameworkVersion -cne '3.47.9' -or $info.flutter.dartSdkVersion -cne '3.13.7' -or
+              $info.flutter.channel -cne 'stable') { throw 'Provenance differs from triggering run/target/SDK/runtime' }
+          if ($info.assets.Count -ne 2) { throw 'Invalid provenance assets' }
+          foreach ($name in $names[0..1]) {
+            if ($info.assets[$name].sha256 -cne $digests[$name] -or $info.assets[$name].size -ne $sizes[$name]) { throw "Provenance asset mismatch: $name" }
+          }
+          # Validate the archived payload against the provenance, not just the outer ZIP hash.
+          $zip = [IO.Compression.ZipFile]::OpenRead((Join-Path $directory "$env:PACKAGE.zip"))
+          try {
+            $files = @($zip.Entries | Where-Object { -not $_.FullName.EndsWith('/') })
+            if ($files.Count -ne $info.package_files_sha256.Count) { throw 'ZIP payload count mismatch' }
+            $seen = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+            foreach ($entry in $files) {
+              if ($entry.FullName -match '^/|\\|:|(^|/)\.\.(/|$)' -or -not $seen.Add($entry.FullName)) { throw 'Unsafe/duplicate ZIP payload path' }
+              $stream = $entry.Open()
+              try { $digest = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($stream)).ToLowerInvariant() }
+              finally { $stream.Dispose() }
+              if ($info.package_files_sha256[$entry.FullName] -cne $digest) { throw "ZIP payload digest mismatch: $($entry.FullName)" }
+            }
+          } finally { $zip.Dispose() }
+          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; Accept = 'application/vnd.github+json'; 'X-GitHub-Api-Version' = '2022-11-28' }
+          $api = "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY"
+          function Invoke-ReleaseApi([string]$Method, [string]$Uri, $Body = $null, [int]$Expected = 200, [string]$File = '') {
+            $parameters = @{ Method = $Method; Uri = $Uri; Headers = $headers; SkipHttpErrorCheck = $true }
+            if ($File) { $parameters.InFile = $File; $parameters.ContentType = 'application/octet-stream' }
+            elseif ($null -ne $Body) { $parameters.Body = $Body | ConvertTo-Json -Depth 10 -Compress; $parameters.ContentType = 'application/json; charset=utf-8' }
+            $response = Invoke-WebRequest @parameters
+            if ([int]$response.StatusCode -ne $Expected) { throw "GitHub API failed closed: $Method $Uri status $($response.StatusCode), expected $Expected" }
+            if ($response.Content) { return ($response.Content | ConvertFrom-Json) }
+          }
+          $refs = @(Invoke-ReleaseApi 'GET' "$api/git/matching-refs/tags/$env:TAG")
+          if (@($refs | Where-Object ref -CEQ "refs/tags/$env:TAG").Count) { throw 'Tag already exists; no force/reuse' }
+          # Only a genuine 404 is absence. Authentication/rate-limit/server/transport errors abort.
+          $null = Invoke-ReleaseApi 'GET' "$api/releases/tags/$env:TAG" -Expected 404
+          # Drafts without refs can be absent from by-tag lookup; inspect the authenticated list too.
+          for ($page = 1; ; $page++) {
+            if ($page -gt 20) { throw 'Release collision scan limit exceeded; fail closed' }
+            $releases = @(Invoke-ReleaseApi 'GET' "$api/releases?per_page=100&page=$page")
+            if (@($releases | Where-Object tag_name -CEQ $env:TAG).Count) { throw 'Release/draft already exists; no reuse' }
+            if ($releases.Count -lt 100) { break }
+          }
+          # Explicit lightweight ref: GitHub may defer automatic draft tag creation until publication.
+          $createdRef = Invoke-ReleaseApi 'POST' "$api/git/refs" @{ ref = "refs/tags/$env:TAG"; sha = $env:GITHUB_SHA } 201
+          if ($createdRef.object.type -cne 'commit' -or $createdRef.object.sha -cne $env:GITHUB_SHA) { throw 'Created tag SHA mismatch' }
+          $notes = @"
+          # Windows 正式便携版 $env:FULL_VERSION
+
+          官方项目分发的 **未签名** Windows x64 ZIP；不是 MSI/MSIX、Store 包或 Authenticode 签名版本。
+          Windows 10 1809+；app-local VC143 运行库、阅读字体和 OFL 许可证已包含。
+          核验同名 SHA-256 后完整解压并运行 FanqieReader.exe；SmartScreen 可能提示，勿关闭系统防护。
+          升级前退出旧实例，解压到新目录；保留 %APPDATA%\com.fanqie\FanqieReader 阅读数据。
+          离线 analyze/test、Release 生产入口和 ZIP 校验不替代 Windows 10/11 干净用户、DPI、音频或 SmartScreen 实机验收。
+          不修改 Android 的既有标签、APK、正文或 Latest 指向。
+
+          源码：$env:GITHUB_SHA
+          构建与测试：$runUrl
+          完整来源与附件摘要见 windows-build-info.json。
+          "@
+          $draft = Invoke-ReleaseApi 'POST' "$api/releases" @{
+            tag_name = $env:TAG; target_commitish = $env:GITHUB_SHA
+            name = "番茄Reader Windows v$env:VERSION（构建 $env:BUILD_NUMBER）"
+            body = $notes; draft = $true; prerelease = $false; make_latest = 'false'
+          } 201
+          $releaseId = $draft.id
+          if (-not $releaseId -or -not $draft.draft -or $draft.tag_name -cne $env:TAG -or
+              $draft.target_commitish -cne $env:GITHUB_SHA) { throw 'Unexpected draft identity' }
+          $uploadUrl = $draft.upload_url -replace '\{\?.*$', ''
+          if (-not $uploadUrl.StartsWith('https://uploads.github.com/')) { throw 'Unexpected asset upload host' }
+          foreach ($name in $names) {
+            $null = Invoke-ReleaseApi 'POST' "$uploadUrl`?name=$([Uri]::EscapeDataString($name))" -Expected 201 -File (Join-Path $directory $name)
+          }
+          function Confirm-NewRelease($Release, [bool]$IsDraft) {
+            if ($Release.id -ne $releaseId -or $Release.tag_name -cne $env:TAG -or $Release.draft -ne $IsDraft -or
+                $Release.prerelease -ne $false -or $Release.target_commitish -cne $env:GITHUB_SHA) { throw 'Release identity/state mismatch' }
+            $assets = @($Release.assets)
+            if ($assets.Count -ne 3 -or @($assets | Where-Object { $_.name -cnotin $names }).Count) { throw 'Incomplete/unexpected release assets' }
+            foreach ($name in $names) {
+              $matches = @($assets | Where-Object name -CEQ $name)
+              if ($matches.Count -ne 1 -or $matches[0].state -cne 'uploaded' -or
+                  $matches[0].size -ne $sizes[$name] -or $matches[0].digest -cne "sha256:$($digests[$name])") {
+                throw "Release asset state/size/digest mismatch: $name"
+              }
+            }
+            $tagRef = Invoke-ReleaseApi 'GET' "$api/git/ref/tags/$env:TAG"
+            if ($tagRef.object.type -cne 'commit' -or $tagRef.object.sha -cne $env:GITHUB_SHA) { throw 'Exact tag SHA changed/mismatch' }
+          }
+          $completeDraft = Invoke-ReleaseApi 'GET' "$api/releases/$releaseId"
+          Confirm-NewRelease $completeDraft $true
+          # No public announcement until the complete new draft and exact tag have been validated.
+          $public = Invoke-ReleaseApi 'PATCH' "$api/releases/$releaseId" @{ draft = $false; prerelease = $false; make_latest = 'false' }
+          Confirm-NewRelease $public $false
+          $confirmed = Invoke-ReleaseApi 'GET' "$api/releases/$releaseId"
+          Confirm-NewRelease $confirmed $false
+          "## Windows 正式便携版`n`n[下载 ZIP、校验值和来源]($($confirmed.html_url))`n`n未签名；x64；稳定发布但非 Latest；Android 历史发布保持不变。" |
+            Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Encoding utf8
