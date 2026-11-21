@@ -1,8 +1,15 @@
 # 🍅 番茄Reader
 
-基于 Flutter 的 Android 小说阅读客户端，内置 Dart 服务引擎，无需单独部署后端。
+基于 Flutter 的小说阅读客户端，提供 Android、Windows PC 版及 macOS 自用构建，内置 Dart 服务引擎，无需单独部署后端。
 
-[最新 Android 版本](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/latest) · [Android 发布](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/release.yml) · [macOS 自用构建](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/macos-internal.yml)
+[最新 Android 版本](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/latest) · [Windows 正式下载](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/tag/windows-v3.3.6-342) · [Windows 发布](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/windows-release.yml) · [Android 发布](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/release.yml) · [macOS 自用构建](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/macos-internal.yml)
+
+### Windows 正式 PC 版（2026-11-22）
+
+- **3.3.6+342 / Windows x64 便携 ZIP**：[下载 ZIP、SHA-256 与构建来源](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/tag/windows-v3.3.6-342)。解压到可写目录后运行 `FanqieReader.exe`；升级先退出旧实例，不删除 `%APPDATA%\com.fanqie\FanqieReader` 阅读数据。
+- 正文、章节标题与设置预览统一字体解析，正文保持常规字重；保留楷体、宋体及导入字体选择。优化五种翻页效果、连续滚轮、异步换章与长段落分页，背景扩展至九套；支持桌面选区、双栏、快捷键和听书。
+- [正式云构建](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/runs/44934821500)与发布通过，下载后的 ZIP/源码标签/逐文件摘要已独立核验。Windows 使用独立标签，不覆盖 Android/macOS 发行物，Android Latest 仍为 `v3.3.5`。
+- **未做代码签名**，可能触发 SmartScreen；先核验下载来源和 SHA-256，不要求关闭系统防护。完整前台性能、多物理 DPI/多显示器及手工覆盖保存仍保留验收边界。见 [发布说明](docs/WINDOWS_RELEASE.md)与[验证记录](docs/WINDOWS_CLIENT_VERIFICATION.md)。
 
 macOS 核心阅读客户端已完成主要适配代码与本地自动化验证，仅提供 Apple Silicon 自用构建，部分手工验收仍待完成。现已按用户要求加入独立 GitHub Actions Release DMG 构建：无需 Apple ID 或新增密钥，临时签名、未公证，不覆盖 Android 发布。见 [自用打包说明](docs/MACOS_INTERNAL_RELEASE.md)、[开发计划](docs/MACOS_CLIENT_DEVELOPMENT_PLAN.md) 与 [实施和验证记录](docs/MACOS_CLIENT_VERIFICATION.md)。
 

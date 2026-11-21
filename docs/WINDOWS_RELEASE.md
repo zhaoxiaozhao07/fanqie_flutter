@@ -127,3 +127,17 @@ ZIP helper 使用同一个 `FileStream`（`FileAccess.Read` / `FileShare.Read`�
 任何真实 Flutter 命令都必须持有 named mutex
 `Local\FanqieCodexReaderFlutterChecks`；`AbandonedMutexException` 表示已取得所有权。
 工作流和打包脚本均遵循该约定，避免共享 Windows checkout 同时运行 Flutter。
+
+## 已发布：3.3.6+342（2026-11-22）
+
+- 正式发行：[windows-v3.3.6-342](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/tag/windows-v3.3.6-342)，非草稿、非 prerelease、未签名 x64 便携版。
+- 成功的 build/publish：[Actions 44934821500](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/runs/44934821500)。
+- 发行源码与标签：`08fa58a0ba3a74cb5079f045c3ab2f289ad3dbee`。后续文档提交不改变此发行标签。
+- ZIP：`FanqieReader-3.3.6-342-windows-x64.zip`，`28,270,825` bytes。
+- SHA-256：`ac8cce77a79107a4834076d55ee15f7bb4d62d5cc61f5f1e0a3b621d3a35d165`。
+- 重新下载三个正式附件后，独立验证服务器附件摘要、ZIP sidecar、构建来源/目标/SDK、源码标签和 33 个包内文件的摘要；解压后 x64 EXE/DLL/ELF、版本资源、VC143、字体/OFL 与正式 native manifest 检查通过，没有旧测试清单。
+- 本地源码回归 781 通过/11 跳过；云端 779 通过/13 环境相关跳过；脚本回归 65 项通过。原生 Windows 9 项及真实字体 1 项通过，交互式另存为 1 项未执行；更多实机/DPI/前台验收边界仍见 `WINDOWS_CLIENT_VERIFICATION.md`。
+- Android Latest 的发行 ID、标签及原附件摘要/大小保持不变，仍为 `v3.3.5`；没有覆盖原 APK 或 macOS 自用版本。
+
+前两次云构建先后暴露冷 SDK 初始化输出混入 JSON、误用旧测试清单位置的问题，
+均在公开发行前修复并补回归；它们没有创建 Windows 发行标签或发布半包。
