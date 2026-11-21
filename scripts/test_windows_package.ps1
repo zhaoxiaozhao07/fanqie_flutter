@@ -67,7 +67,9 @@ function New-Fixture {
   foreach ($dll in @('msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll')) {
     New-PeFixture (Join-Path $app "runtime/x64/Microsoft.VC143.CRT/$dll")
   }
-  Set-Content -LiteralPath (Join-Path $app 'seed/native_assets.json') -Value '{"format-version":[1,0,0],"native-assets":{}}'
+  # WindowsAssetBundle puts the production manifest inside flutter_assets.
+  # A root native_assets.json may exist only as a stale host-test artifact.
+  Set-Content -LiteralPath (Join-Path $app 'seed/data/flutter_assets/NativeAssetsManifest.json') -Value '{"format-version":[1,0,0],"native-assets":{}}'
   # Flutter's Windows AOT snapshot is ELF64 x86_64, not a Windows PE DLL.
   $aot = [byte[]]::new(64)
   ([byte[]]@(0x7f, 0x45, 0x4c, 0x46, 2, 1, 1)).CopyTo($aot, 0)
@@ -613,6 +615,55 @@ try {
       # Re-running must never overwrite the completed artifact.
       Expect-Failure { Invoke-Package $f -Runtime } 'exists|collision|overwrite'
     }
+    Test-Case 'stale host-test native manifest is not shipped or used' {
+      $f = New-Fixture
+      Set-Content -LiteralPath (Join-Path $f.App 'seed/native_assets.json') -Value 'stale host test paths, not production JSON'
+      Invoke-Package $f -Runtime
+      Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.App "dist/$($f.Name).verify/native_assets.json"))) 'host-test manifest leaked into package'
+      Assert-True (Test-Path -LiteralPath (Join-Path $f.App "dist/$($f.Name).verify/data/flutter_assets/NativeAssetsManifest.json")) 'production manifest missing'
+    }
+    Test-Case 'root host-test manifest cannot replace a missing production manifest' {
+      $f = New-Fixture
+      Set-Content -LiteralPath (Join-Path $f.App 'seed/native_assets.json') -Value '{"format-version":[1,0,0],"native-assets":{}}'
+      Remove-Item -LiteralPath (Join-Path $f.App 'seed/data/flutter_assets/NativeAssetsManifest.json')
+      Expect-Failure { Invoke-Package $f -Runtime } 'NativeAssetsManifest|missing'
+    }
+    Test-Case 'unsupported production manifest is rejected despite a valid root artifact' {
+      $f = New-Fixture
+      Set-Content -LiteralPath (Join-Path $f.App 'seed/native_assets.json') -Value '{"format-version":[1,0,0],"native-assets":{}}'
+      Set-Content -LiteralPath (Join-Path $f.App 'seed/data/flutter_assets/NativeAssetsManifest.json') -Value '{"format-version":[99,0,0],"native-assets":{}}'
+      Expect-Failure { Invoke-Package $f -Runtime } 'Unsupported native'
+    }
+    foreach ($available in @($true, $false)) {
+      Test-Case "production manifest resolves packaged native DLL (available=$available)" {
+        $f = New-Fixture
+        Set-Content -LiteralPath (Join-Path $f.App 'seed/data/flutter_assets/NativeAssetsManifest.json') -Value '{"format-version":[1,0,0],"native-assets":{"windows_x64":{"fixture":["absolute","native_fixture.dll"]}}}'
+        if ($available) {
+          New-PeFixture (Join-Path $f.App 'seed/native_fixture.dll')
+          Invoke-Package $f -Runtime
+          Assert-True (Test-Path -LiteralPath (Join-Path $f.App "dist/$($f.Name).verify/native_fixture.dll")) 'referenced native DLL absent'
+        } else {
+          Expect-Failure { Invoke-Package $f -Runtime } 'Native asset missing'
+        }
+      }
+    }
+    foreach ($invalid in @('relative', 'host-absolute', 'parent-path')) {
+      Test-Case "production native DLL rejects non-portable loading (mode=$invalid)" {
+        $f = New-Fixture
+        New-PeFixture (Join-Path $f.App 'seed/native_fixture.dll')
+        $kind = if ($invalid -eq 'relative') { 'relative' } else { 'absolute' }
+        $name = switch ($invalid) {
+          'host-absolute' { 'C:/temporary/native_fixture.dll' }
+          'parent-path' { '../native_fixture.dll' }
+          default { 'native_fixture.dll' }
+        }
+        $manifest = @{ 'format-version' = @(1, 0, 0); 'native-assets' = @{
+          windows_x64 = @{ fixture = @($kind, $name) }
+        }}
+        $manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath (Join-Path $f.App 'seed/data/flutter_assets/NativeAssetsManifest.json')
+        Expect-Failure { Invoke-Package $f -Runtime } 'Non-portable native|within|Unsafe'
+      }
+    }
     Test-Case 'missing runtime rejected before build' {
       $f = New-Fixture
       Remove-Item -LiteralPath (Join-Path $f.App 'runtime/x64/Microsoft.VC143.CRT/msvcp140.dll')
@@ -631,7 +682,7 @@ try {
       Expect-Failure { Invoke-Package $f -Runtime } 'lock'
       Assert-True (-not (Test-Path -LiteralPath (Join-Path $f.App "dist/$($f.Name).zip"))) 'mutated lock produced ZIP'
     }
-    foreach ($missing in @('permission_handler_windows_plugin.dll', 'native_assets.json', 'data/app.so', 'data/flutter_assets/assets/fonts/LXGW-OFL.txt')) {
+    foreach ($missing in @('permission_handler_windows_plugin.dll', 'data/flutter_assets/NativeAssetsManifest.json', 'data/app.so', 'data/flutter_assets/assets/fonts/LXGW-OFL.txt')) {
       Test-Case "missing $missing prevents ZIP" {
         $f = New-Fixture
         Remove-Item -LiteralPath (Join-Path $f.App "seed/$missing")

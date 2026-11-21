@@ -67,8 +67,11 @@ pwsh -NoProfile -File scripts/package_windows.ps1 -OutputDir dist/windows-local
 脚本同时检查 EXE product/string/numeric version、所有 EXE/DLL 的 x64 PE、
 Flutter Windows AOT snapshot 的 x64 ELF64（`app.so` 不是 PE DLL）、
 Flutter data、native assets、Windows permission plugin、两组阅读字体/映射/OFL 许可证，
-并将字体/许可证 bytes 与源码比对。native manifest 当前只支持 1.0.0 格式、
-可搬移的 relative native assets；未来原生依赖改变格式必须先更新验证。
+并将字体/许可证 bytes 与源码比对。生产清单使用 Flutter 生成的
+`data/flutter_assets/NativeAssetsManifest.json`；测试可能遗留的根目录
+`native_assets.json` 不参与校验，也不打入正式包。native manifest 当前只支持 1.0.0 格式、
+Windows bundled DLL 的 `["absolute","basename.dll"]` 加载描述（模式名并不表示主机绝对路径）。
+不接受主机路径、目录穿越或相对 AOT snapshot 的 `relative` 描述；未来原生依赖改变格式必须先更新验证。
 ZIP 根直接包含 EXE/DLL/data（不新增顶层文件夹）；sidecar 是真实 ZIP 的 SHA-256。
 再次解压至新 `.verify` 目录，逐文件比对 stage 与 ZIP 摘要。
 

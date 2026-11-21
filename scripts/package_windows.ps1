@@ -77,7 +77,11 @@ foreach ($path in @($stage, $zipPath, $checksumPath, $infoPath, $extract)) {
   if (Test-Path -LiteralPath $path) { throw "No overwrite: path already exists: $path" }
 }
 New-Item -ItemType Directory -Path $stage | Out-Null
-Get-ChildItem -LiteralPath $release -Force | Copy-Item -Destination $stage -Recurse
+# NativeAssetsManifest.json in flutter_assets is authoritative. A root
+# native_assets.json can be left by host tests and is not a runtime bundle input.
+Get-ChildItem -LiteralPath $release -Force |
+  Where-Object Name -NE 'native_assets.json' |
+  Copy-Item -Destination $stage -Recurse
 Rename-Item -LiteralPath (Join-Path $stage 'fanqie_flutter.exe') -NewName 'FanqieReader.exe'
 foreach ($dll in $runtimeFiles) { Copy-Item -LiteralPath $dll.FullName -Destination $stage }
 # Keep the Chinese filename and explicit UTF-8 BOM on PowerShell 7.

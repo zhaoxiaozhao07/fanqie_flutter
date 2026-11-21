@@ -85,7 +85,7 @@ function Test-WindowsPackageLayout([string]$Directory, [string]$FullVersion, [st
   foreach ($relative in @(
       'FanqieReader.exe', 'flutter_windows.dll', 'permission_handler_windows_plugin.dll',
       'msvcp140.dll', 'vcruntime140.dll', 'vcruntime140_1.dll',
-      'native_assets.json', 'data/app.so', 'data/icudtl.dat',
+      'data/flutter_assets/NativeAssetsManifest.json', 'data/app.so', 'data/icudtl.dat',
       'data/flutter_assets/FontManifest.json', 'README-安装说明.txt',
       'data/flutter_assets/assets/fonts/LXGWWenKaiLite-Regular.ttf',
       'data/flutter_assets/assets/fonts/ZCOOLXiaoWei-Regular.ttf',
@@ -130,11 +130,17 @@ function Test-WindowsPackageLayout([string]$Directory, [string]$FullVersion, [st
       throw "Font/license digest differs from source: $file"
     }
   }
-  $native = Get-Content -LiteralPath (Join-Path $Directory 'native_assets.json') -Raw | ConvertFrom-Json -AsHashtable
+  $native = Get-Content -LiteralPath (Join-Path $assets 'NativeAssetsManifest.json') -Raw | ConvertFrom-Json -AsHashtable
   if (($native['format-version'] -join '.') -ne '1.0.0' -or -not $native.ContainsKey('native-assets')) { throw 'Unsupported native assets manifest' }
   foreach ($platform in $native['native-assets'].Values) {
     foreach ($asset in $platform.Values) {
-      if ($asset.Count -ne 2 -or $asset[0] -ne 'relative') { throw 'Non-portable native asset' }
+      # Windows uses the "absolute" loading mode with a bundled DLL basename.
+      # "relative" means relative to app.so, not to the executable directory.
+      if ($asset.Count -ne 2 -or $asset[0] -cne 'absolute' -or
+          $asset[1] -isnot [string] -or [string]::IsNullOrWhiteSpace($asset[1]) -or
+          $asset[1] -match '[\\/]' -or [IO.Path]::GetFileName($asset[1]) -cne $asset[1]) {
+        throw 'Non-portable native asset'
+      }
       $path = Resolve-WindowsReleasePath $asset[1] $Directory
       Assert-WindowsWithin $path $Directory
       if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "Native asset missing: $path" }
