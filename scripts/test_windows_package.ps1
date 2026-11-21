@@ -1,6 +1,6 @@
 # Controlled Flutter-boundary tests; filesystem guards/copy/ZIP/PE checks stay real.
 param(
-  [ValidateSet('Guards', 'All', 'Publish', 'Review')][string]$Suite = 'All',
+  [ValidateSet('Guards', 'All', 'Publish', 'Review', 'Bootstrap')][string]$Suite = 'All',
   [string]$LogPath,
   [switch]$OmitDraftValidation
 )
@@ -129,6 +129,78 @@ function Get-PublishProgram {
   }
   if (-not $program.Count) { throw 'Publication run block missing' }
   return $program -join "`n"
+}
+function Test-FlutterBootstrap {
+  # Execute the actual build step only through its SDK JSON read, not a copy of
+  # the wrapper. The SDK boundary simulates a fresh installation's noisy launch.
+  $lines = Get-Content -LiteralPath (Join-Path $repo '.github/workflows/windows-release.yml')
+  $selected = $false; $inRun = $false
+  $programLines = [Collections.Generic.List[string]]::new()
+  foreach ($line in $lines) {
+    if ($line -eq '      - name: Enforce lock, offline analyze/test, production build and verified package') {
+      $selected = $true
+    }
+    if (-not $selected) { continue }
+    if ($line -eq '        run: |') { $inRun = $true; continue }
+    if ($inRun) {
+      if ($line -and -not $line.StartsWith('          ')) { break }
+      $programLines.Add($(if ($line) { $line.Substring(10) } else { '' }))
+    }
+  }
+  $program = $programLines -join "`n"
+  $tokens = $null; $errors = $null
+  $ast = [Management.Automation.Language.Parser]::ParseInput($program, [ref]$tokens, [ref]$errors)
+  if ($errors.Count) { throw 'Build step parser failure' }
+  $read = @($ast.FindAll({
+    param($node)
+    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
+      $node.Left -is [Management.Automation.Language.VariableExpressionAst] -and
+      $node.Left.VariablePath.UserPath -eq 'sdk'
+  }, $true))
+  if ($read.Count -ne 1) { throw 'Build SDK read boundary not found' }
+  $prefix = $program.Substring(0, $read[0].Extent.EndOffset)
+  function global:flutter {
+    $arguments = @($args)
+    Assert-True ($arguments[0] -eq '--version') 'unexpected SDK bootstrap operation'
+    $global:FanqieBootstrapTestState.Calls.Add($arguments -join ' ')
+    if (-not $global:FanqieBootstrapTestState.Initialized) {
+      'Building flutter tool...'
+      'Resolving dependencies...'
+      [Console]::Error.WriteLine('Running pub upgrade...')
+      $global:FanqieBootstrapTestState.Initialized = $true
+    }
+    if ($arguments -contains '--machine') {
+      '{"frameworkVersion":"3.47.9","channel":"stable","dartSdkVersion":"3.13.7"}'
+    } else { 'Flutter 3.47.9 stable / Dart 3.13.7' }
+    $code = if ($global:FanqieBootstrapTestState.Fail) { 23 } else { 0 }
+    & $env:ComSpec /d /c "exit $code"
+  }
+  foreach ($mode in @('cold', 'warm', 'native-error')) {
+    Test-Case "SDK $mode bootstrap preserves strict machine JSON and exit status" {
+      $f = New-Fixture
+      $global:FanqieBootstrapTestState = @{
+        Initialized = ($mode -eq 'warm'); Fail = ($mode -eq 'native-error')
+        Calls = [Collections.Generic.List[string]]::new()
+      }
+      Set-Location -LiteralPath $f.App
+      try {
+        if ($mode -eq 'native-error') {
+          Expect-Failure { . ([scriptblock]::Create($prefix)) } 'exit 23'
+          Assert-True ($global:FanqieBootstrapTestState.Calls.Count -eq 1) 'SDK failure was silently retried'
+        } else {
+          . ([scriptblock]::Create($prefix))
+          Assert-True ($sdk.frameworkVersion -ceq '3.47.9' -and $sdk.dartSdkVersion -ceq '3.13.7') 'wrong parsed SDK'
+          $json = Get-Content -LiteralPath (Join-Path $f.App 'build/windows/ci-logs/flutter-version.json') -Raw
+          Assert-True (($json | ConvertFrom-Json).frameworkVersion -ceq '3.47.9') 'machine log contains bootstrap chatter'
+          if ($mode -eq 'cold') {
+            $bootstrap = Get-Content -LiteralPath (Join-Path $f.App 'build/windows/ci-logs/flutter-bootstrap.log') -Raw
+            Assert-True ($bootstrap.Contains('Building flutter tool...')) 'initialization diagnostics were lost'
+          }
+        }
+      } finally { Set-Location -LiteralPath $savedLocation }
+    }
+  }
+  Remove-Variable FanqieBootstrapTestState -Scope Global -ErrorAction SilentlyContinue
 }
 function global:Invoke-WebRequest {
   param($Method, $Uri, $Headers, [switch]$SkipHttpErrorCheck, $Body, $ContentType, $InFile)
@@ -457,6 +529,7 @@ public static class FanqieReleaseReviewProbe {
 try {
   if ($Suite -eq 'Publish') { Test-Publication }
   elseif ($Suite -eq 'Review') { Test-ReviewRepairs }
+  elseif ($Suite -eq 'Bootstrap') { Test-FlutterBootstrap }
   else {
   Test-Case 'escaped output rejected before build' {
     $f = New-Fixture
@@ -634,3 +707,4 @@ try {
   if ($LogPath) { Stop-Transcript | Out-Null }
 }
 if ($failures -gt 0) { exit 1 }
+exit 0

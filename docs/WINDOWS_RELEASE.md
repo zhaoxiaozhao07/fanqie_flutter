@@ -91,6 +91,7 @@ provenance 包含 source commit/ref、run URL/id/attempt、SDK、runner、VC143 
 pwsh -NoProfile -File scripts/test_windows_package.ps1 -Suite All
 pwsh -NoProfile -File scripts/test_windows_package.ps1 -Suite Publish
 pwsh -NoProfile -File scripts/test_windows_package.ps1 -Suite Review
+pwsh -NoProfile -File scripts/test_windows_package.ps1 -Suite Bootstrap
 ```
 
 无需调用真实 Flutter，但需要仓库已经存在一个 Windows Release EXE 用于真实
@@ -104,6 +105,11 @@ source/tagSHA 故障；绝不发出远程请求。测试专用 `-OmitDraftValida
 应当失败，用于证明测试会抓到“先公开再校验”的回归，不能用于正常验证。
 fixture utility 将复制的脚本中的 mutex 名改为 fixture 私有名称，保留真实 acquire/release，
 避免纯测试桩等待维护者的 Flutter 检查；仓库生产脚本及真实 Flutter 仍使用下面的共享名称。
+
+`Bootstrap` 执行真实工作流的 SDK 初始化及 JSON 读取部分，以冷/热 SDK 和原生命令失败
+作为边界夹具。首次普通 `--version` 单独保留工具初始化日志，随后才读取严格机器 JSON，
+不从混合日志猜测 JSON；任何命令非零退出仍使构建失败。
+
 `Review` 对 reserved device components（含扩展名）做参数化拒绝检查，
 并用不同线程的 C# Task 在真实 Release copy/hash 边界竞争 mutex；
 在 fixture 中仅包装实际 .NET extraction 调用，确定性尝试替换/写入已校验 ZIP，

@@ -105,6 +105,9 @@ jobs:
               $mutex.Dispose()
             }
           }
+          # A fresh SDK bootstraps its tool with non-JSON diagnostics. Finish
+          # that first launch separately before requesting strict machine JSON.
+          Invoke-CheckedFlutter @('--version') 'flutter-bootstrap.log'
           Invoke-CheckedFlutter @('--version', '--machine') 'flutter-version.json'
           $sdk = Get-Content -LiteralPath (Join-Path $logs 'flutter-version.json') -Raw | ConvertFrom-Json
           if ($sdk.frameworkVersion -ne '3.47.9' -or $sdk.dartSdkVersion -ne '3.13.7') { throw 'Pinned SDK mismatch' }
@@ -131,6 +134,9 @@ jobs:
           & pwsh -NoLogo -NoProfile -File scripts/test_windows_package.ps1 -Suite Review -LogPath (Join-Path $logs 'review-repairs-tests.log')
           $code = $LASTEXITCODE
           if ($code -ne 0) { throw "Snapshot/archive/path race regressions failed (exit $code)" }
+          & pwsh -NoLogo -NoProfile -File scripts/test_windows_package.ps1 -Suite Bootstrap -LogPath (Join-Path $logs 'sdk-bootstrap-tests.log')
+          $code = $LASTEXITCODE
+          if ($code -ne 0) { throw "SDK cold-start regressions failed (exit $code)" }
           git diff --exit-code
           $code = $LASTEXITCODE
           if ($code -ne 0) { throw "Tracked source changed from triggering SHA (git exit $code)" }
