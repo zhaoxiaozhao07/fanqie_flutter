@@ -744,8 +744,18 @@ class FanqieBackendEngine {
                   FileSystemEntityType.file &&
               !await FileSystemEntity.isLink(legacy.parent.path) &&
               await legacy.length() <= ReaderCacheService.maxChapterBytes) {
-            final cached = await legacy.readAsString();
-            if (cached.length > 50 && ReaderCacheService.isReadable(cached)) {
+            String? cached;
+            try {
+              // readAsString wraps invalid UTF-8 in FileSystemException.
+              // Decode explicitly so rejected optional cache bytes are a miss,
+              // while genuine read/write failures retain disk-error handling.
+              cached = utf8.decode(await legacy.readAsBytes());
+            } on FormatException {
+              // Preserve the legacy bytes and continue with network recovery.
+            }
+            if (cached != null &&
+                cached.length > 50 &&
+                ReaderCacheService.isReadable(cached)) {
               text = cached;
             }
           }

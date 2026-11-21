@@ -411,6 +411,73 @@ void main() {
     },
   );
 
+  for (final failuresBeforeSuccess in [0, 2]) {
+    test(
+      'rejected legacy UTF-8 preserves network recovery after $failuresBeforeSuccess failures',
+      () async {
+        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+        const text = '网络返回的完整正文，旧缓存不应阻断恢复。';
+        var fetches = 0;
+        configure((_) async {
+          fetches++;
+          return fetches <= failuresBeforeSuccess ? null : OnlineChapter(text);
+        });
+        final legacy = File('${root.path}/fanqie_cache/chapters/one.txt');
+        await legacy.parent.create(recursive: true);
+        const rejected = [255, 254, 0, 255];
+        await legacy.writeAsBytes(rejected);
+        final progress = <int>[];
+        await engine.downloadChapters(
+          bookId: 'book',
+          chapters: [chapters.first],
+          onProgress: (current, _, _) => progress.add(current),
+        );
+        expect(
+          await (await engine.getOfflineChapterFile(
+            'book',
+            'one',
+          )).readAsString(),
+          text,
+        );
+        expect(fetches, failuresBeforeSuccess + 1);
+        expect(progress.last, 1);
+        expect(progress.where((current) => current == 1).length, 1);
+        expect(await legacy.readAsBytes(), rejected);
+      },
+    );
+  }
+
+  test(
+    'genuine protected write failure is not retried as a cache miss',
+    () async {
+      debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+      var fetches = 0;
+      configure((_) async {
+        fetches++;
+        return OnlineChapter('完整网络正文');
+      });
+      final target = await engine.getOfflineChapterFile('book', 'one');
+      final existingDirectory = Directory(target.path);
+      await existingDirectory.create();
+      final marker = File('${existingDirectory.path}/keep.txt');
+      await marker.writeAsString('existing data');
+      await expectLater(
+        engine.downloadChapters(bookId: 'book', chapters: [chapters.first]),
+        throwsA(
+          isA<ChapterDownloadIncomplete>()
+              .having((error) => error.diskFailure, 'diskFailure', true)
+              .having((error) => error.downloaded, 'downloaded', 0),
+        ),
+      );
+      expect(
+        fetches,
+        1,
+        reason: 'A real write failure suppresses the final sweep',
+      );
+      expect(await marker.readAsString(), 'existing data');
+    },
+  );
+
   for (final fallback in ['temporary', 'fetched']) {
     test(
       'R1 invalid protected UTF-8 is repaired atomically from $fallback content',

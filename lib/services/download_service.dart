@@ -1498,9 +1498,31 @@ $navPoints  </navMap>
     return null;
   }
 
-  /// 请求存储权限
+  /// 获取 Android SDK 版本号，用于在 Android 10+ 跳过已废弃的外部存储权限申请
+  Future<int?> _getAndroidSdkInt() async {
+    if (!Platform.isAndroid) return null;
+    try {
+      final sdk = await platform.invokeMethod<int>('getAndroidSdkInt');
+      if (sdk != null && sdk > 0) return sdk;
+    } catch (_) {}
+    try {
+      final caps = await platform.invokeMapMethod<String, dynamic>(
+        'getReaderCapabilities',
+      );
+      final raw = caps?['sdk'];
+      if (raw is int && raw > 0) return raw;
+    } catch (_) {}
+    return null;
+  }
+
+  /// 请求存储权限（Android 10+ 通过 MediaStore.Downloads 保存文件，无需任何存储权限）
   Future<bool> _requestStoragePermission() async {
     if (!Platform.isAndroid) return true;
+
+    final sdkInt = await _getAndroidSdkInt();
+    if (sdkInt != null && sdkInt >= 29) {
+      return true;
+    }
 
     var status = await Permission.storage.request();
     if (status.isGranted) return true;

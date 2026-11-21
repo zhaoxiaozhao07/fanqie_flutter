@@ -120,3 +120,5 @@ Android 回归：按用户提供的代理（127.0.0.1:7890，`JAVA_TOOL_OPTIONS`
 - `windows_reader_platform_test.dart` 本次真实 Windows 集成 **9 通过、1 手工另存为跳过**，包含取消、窗口/全屏锚点、文件恢复、导入和真实 loopback 音频播放。
 - 新增 `windows_reader_font_smoke.dart` 使用原生 Windows 字库而非 Ahem，四种字体的正文/预览混合中英数字测量一致，并生成合成书籍截图供视觉检查。该烟测 **1 项通过**；这是 Debug 原生字体验收，不冒充 Release 性能测试。
 - 物理显示倍率本次为 1.0；更多物理 DPI、多显示器、完整前台性能与手工覆盖保存仍不宣称已通过。
+- 主线整合审查发现旧缓存非法 UTF-8 被 `readAsString` 包装为磁盘异常，导致联网及末尾补漏被阻断。改用严格字节解码，保留旧缓存并继续恢复；真实离线写入失败仍报告磁盘错误并禁止自动重试。
+- 加入上述修复后的整合全量回归 **781 通过、11 跳过、0 失败**，静态分析 0 issues；保留主线 Android 10+ MediaStore 无存储权限保存优化，Android Debug SDK 编译通过。原生设备权限/MediaStore 验收不由编译替代。

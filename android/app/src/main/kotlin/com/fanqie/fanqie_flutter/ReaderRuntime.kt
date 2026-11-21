@@ -154,6 +154,7 @@ object ReaderRuntime {
                             main.post { result.success(checked) }
                         }
                     }
+                    "getAndroidSdkInt" -> result.success(Build.VERSION.SDK_INT)
                     "initNativeTts", "speakNativeTts", "playAudioFile", "pauseAudio", "resumeAudio",
                     "stopNativeTts", "stopAudio", "stopPlayback", "setAudioVolume", "setSleepDeadline",
                     "updateMediaPlaybackState", "releasePlaybackService", "getPlaybackState" -> {
