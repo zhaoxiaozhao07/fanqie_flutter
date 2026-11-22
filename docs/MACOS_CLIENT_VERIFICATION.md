@@ -1,5 +1,27 @@
 # macOS 客户端实施与验证记录
 
+## 当前 Task 5 打包与来源门禁（2026-11-22）
+
+- 保持 `3.3.6+342`、macOS `12.0` / arm64、Flutter `3.47.9` / Dart `3.13.7`；
+  不改依赖、锁文件、Android/Windows 默认值或其他发布流程/旧附件。
+- `scripts/macos_release_validation.py` 用真实文件系统验证生产 plist、
+  versioned framework 资源/字体/ICU/NativeAssetsManifest.json（真实空 mapping 合法）、
+  非空数据根（charset 是 list，其余三个为 dict）、链接 containment、
+  文件快照、附件摘要/大小与完整 trigger/SDK 来源。
+- `scripts/package_macos.sh` 仅 self-use internal：签名后快照 → 私有 DMG
+  （无 `-ov`）→ `scripts/verify_macos_dmg.sh` 只读挂载独立原生/资源验证和快照比较
+  → 专属创建的 DMG、同名 SHA-256、build-info.json，无覆盖旧输出。
+- Task 1 XCTest 仍是必需 gate；CI 新增 portable package 与 Task 4 六项生命周期
+  fixture。生命周期 read timeout 改为整数以兼容 `/bin/bash` 3.2，不依赖 Homebrew Bash。
+- 控制端审查最终提交后可请求 `publish=false/full_platform=true/reader_aot=true`
+  的 hosted Mac 验证；平台/AOT/独立 live opt-in 有界且分开保存日志。
+  无前台 AOT 不等于物理前台 FPS；请求 `require_foreground=true` 时不能前台即失败。
+  人工保存面板/原生系统全屏保持关闭。详见 [自用打包说明](MACOS_INTERNAL_RELEASE.md)。
+- **本次 Windows portable/controlled-command 通过不代表 Mac 原生构建、签名、
+  真正挂载、七场景 AOT、macOS 12、安装升级、前台 FPS 或音频已验收。**
+  最终真实 hosted Mac 运行、验证 DMG 下载及独立审查由控制端继续；本任务不推送/
+  dispatch/发布。下方历史结果不作为最终源码通过证据。
+
 ## 0. 2026-11-22：Task 1 原生验证基线
 
 - 本次基线：`eb9b48f05026820c621bf5697e38e6a0ac05061c`；

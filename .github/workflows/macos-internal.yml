@@ -15,6 +15,26 @@ on:
         required: true
         default: true
         type: boolean
+      full_platform:
+        description: '最终验证：完整 Mac 平台集成（不启用人工保存面板/系统全屏）'
+        required: false
+        default: false
+        type: boolean
+      reader_aot:
+        description: '最终验证：七场景 AOT Profile（失败保留诊断，不视为验收）'
+        required: false
+        default: false
+        type: boolean
+      require_foreground:
+        description: 'AOT 必须获得真实前台；无前台的 hosted runner 将失败'
+        required: false
+        default: false
+        type: boolean
+      live_api:
+        description: '独立 opt-in：有界只读真实 API smoke，不配置凭据'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -32,10 +52,11 @@ jobs:
     name: 测试并构建 arm64 Release DMG
     # A standard, non-larger Apple Silicon runner; do not use an Intel label.
     runs-on: macos-26
-    timeout-minutes: 60
+    timeout-minutes: 90
     outputs:
       version: ${{ steps.version.outputs.version }}
       full_version: ${{ steps.version.outputs.full_version }}
+      build: ${{ steps.version.outputs.build }}
       artifact_name: ${{ steps.version.outputs.artifact_name }}
     steps:
       - uses: actions/checkout@v4
@@ -54,6 +75,7 @@ jobs:
           VERSION=${FULL_VERSION%%+*}
           BUILD=${FULL_VERSION##*+}
           [[ "$FULL_VERSION" == *+* && "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$BUILD" =~ ^[0-9]+$ ]]
+          [[ "$FULL_VERSION" == 3.3.6+342 ]]
           if [[ -n "$REQUESTED_VERSION" && "$REQUESTED_VERSION" != "$VERSION" ]]; then
             echo '手动版本与代码版本不一致'; exit 1
           fi
@@ -81,11 +103,29 @@ jobs:
           flutter --version
           flutter config --enable-macos-desktop
           flutter pub get --enforce-lockfile
+          flutter --version --machine > build/macos/ci-logs/flutter-version.json
       - name: 原生门禁受控命令回归（不等于 Mac 实机验证）
+        timeout-minutes: 3
         run: |
           set -euo pipefail
           python3 scripts/test_macos_native_pipeline.py \
             2>&1 | tee build/macos/ci-logs/native-pipeline-fixtures.log
+      - name: AOT 生命周期回归（Bash 3.2 兼容进程 doubles）
+        timeout-minutes: 3
+        env:
+          BASH_EXECUTABLE: /bin/bash
+        run: |
+          set -euo pipefail
+          python3 scripts/test_macos_reader_performance_pipeline.py \
+            2>&1 | tee build/macos/ci-logs/reader-lifecycle-fixtures.log
+      - name: 打包与来源受控文件系统回归
+        timeout-minutes: 5
+        env:
+          BASH_EXECUTABLE: /bin/bash
+        run: |
+          set -euo pipefail
+          python3 scripts/test_macos_package.py \
+            2>&1 | tee build/macos/ci-logs/package-provenance-fixtures.log
       - name: 静态分析
         run: |
           set -euo pipefail
@@ -95,9 +135,37 @@ jobs:
           set -euo pipefail
           flutter test --no-pub --reporter expanded 2>&1 | tee build/macos/ci-logs/flutter-test.log
       - name: 原生 XCTest（生产 Debug 主机）
+        timeout-minutes: 15
         run: |
           set -euo pipefail
           scripts/test_macos_native.sh 2>&1 | tee build/macos/ci-logs/native-xctest.log
+      - name: 完整平台集成（独立最终验证 opt-in）
+        if: inputs.full_platform
+        timeout-minutes: 15
+        run: |
+          set -euo pipefail
+          scripts/test_macos_platform.sh \
+            --dart-define=MACOS_NATIVE_FULLSCREEN_TEST=false \
+            --dart-define=MACOS_SAVE_PANEL_TEST=false \
+            2>&1 | tee build/macos/ci-logs/full-platform.log
+      - name: 七场景 AOT Profile（独立最终验证 opt-in）
+        if: inputs.reader_aot
+        timeout-minutes: 12
+        env:
+          MACOS_REQUIRE_FOREGROUND: ${{ inputs.require_foreground }}
+          MACOS_READER_PERF_LOG: ${{ github.workspace }}/build/macos/ci-logs/reader-aot-app.log
+        run: |
+          set -euo pipefail
+          scripts/test_macos_reader_performance.sh \
+            2>&1 | tee build/macos/ci-logs/reader-aot-runner.log
+      - name: 有界真实 API smoke（独立 opt-in）
+        if: inputs.live_api
+        timeout-minutes: 8
+        run: |
+          set -euo pipefail
+          flutter test --no-pub test/api_integration_test.dart \
+            --dart-define=FANQIE_LIVE_API=true --concurrency=1 --reporter expanded \
+            2>&1 | tee build/macos/ci-logs/live-api.log
       - name: 构建生产入口 Release
         env:
           VERSION: ${{ steps.version.outputs.version }}
@@ -108,44 +176,23 @@ jobs:
             --build-name="$VERSION" --build-number="$BUILD_NUMBER" \
             2>&1 | tee build/macos/ci-logs/flutter-build.log
       - name: 内部签名、架构校验与 DMG 打包
+        timeout-minutes: 10
         env:
           FULL_VERSION: ${{ steps.version.outputs.full_version }}
         run: |
           set -euo pipefail
           # "internal" is ad-hoc signing of a Release build, not a Debug build.
-          # The separate "release" packaging mode requires Developer ID/notarization.
+          export MACOS_XCODE_VERSION="$(xcodebuild -version)"
+          python3 scripts/macos_release_validation.py context \
+            --sdk build/macos/ci-logs/flutter-version.json \
+            --native-log build/macos/ci-logs/native-xctest.log \
+            --output build/macos/ci-logs/release-context.json
+          export MACOS_RELEASE_CONTEXT="$PWD/build/macos/ci-logs/release-context.json"
           scripts/package_macos.sh \
             build/macos/Build/Products/Release/FanqieReader.app \
             internal build/macos/distribution/ci \
             2>&1 | tee build/macos/ci-logs/package.log
-          (cd build/macos/distribution/ci && shasum -a 256 -c ./*.dmg.sha256)
-          flutter --version --machine > build/macos/ci-logs/flutter-version.json
-          python3 - <<'PY'
-          import datetime, hashlib, json, os, pathlib, subprocess
-          out = pathlib.Path("build/macos/distribution/ci")
-          images = list(out.glob("*.dmg"))
-          assert len(images) == 1, "Expected exactly one internal DMG"
-          sdk = json.loads(pathlib.Path("build/macos/ci-logs/flutter-version.json").read_text())
-          run_url = f"{os.environ['GITHUB_SERVER_URL']}/{os.environ['GITHUB_REPOSITORY']}/actions/runs/{os.environ['GITHUB_RUN_ID']}"
-          info = {
-              "version": os.environ["FULL_VERSION"],
-              "source_commit": os.environ["GITHUB_SHA"],
-              "source_ref": os.environ["GITHUB_REF"],
-              "workflow_run": run_url,
-              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
-              "built_at_utc": datetime.datetime.now(datetime.timezone.utc).isoformat(),
-              "architecture": subprocess.check_output(["uname", "-m"], text=True).strip(),
-              "build_mode": "Release",
-              "build_target": "lib/main.dart",
-              "minimum_macos_target": "12.0",
-              "signing": "ad-hoc",
-              "notarized": False,
-              "flutter": sdk,
-              "xcode": subprocess.check_output(["xcodebuild", "-version"], text=True).strip(),
-              "sha256": {image.name: hashlib.sha256(image.read_bytes()).hexdigest() for image in images},
-          }
-          (out / "build-info.json").write_text(json.dumps(info, ensure_ascii=False, indent=2) + "\n")
-          PY
+          python3 scripts/macos_release_validation.py artifacts build/macos/distribution/ci
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ steps.version.outputs.artifact_name }}
@@ -167,12 +214,16 @@ jobs:
   publish:
     name: 发布独立的自用预发布附件
     needs: build
-    if: inputs.publish
+    if: inputs.publish && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: ${{ needs.build.outputs.artifact_name }}
@@ -182,13 +233,19 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           VERSION: ${{ needs.build.outputs.version }}
           FULL_VERSION: ${{ needs.build.outputs.full_version }}
+          BUILD_NUMBER: ${{ needs.build.outputs.build }}
         run: |
           set -euo pipefail
-          NAME="fanqie-v$VERSION-macos-arm64-internal.dmg"
-          (cd dist/macos && sha256sum -c "$NAME.sha256")
+          [[ "$GITHUB_REF" == refs/heads/main && "$FULL_VERSION" == 3.3.6+342 ]]
+          python3 scripts/macos_release_validation.py artifacts dist/macos
+          NAME="fanqie-v$VERSION-$BUILD_NUMBER-macos-arm64-internal.dmg"
           # Separate namespace + immutable run identity; never move Android v* tags.
           TAG="macos-internal-v$VERSION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
           RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          WORK="$(mktemp -d)"
+          trap 'rm -rf "$WORK"' EXIT
+          gh api "repos/$GITHUB_REPOSITORY/git/matching-refs/tags/$TAG" > "$WORK/refs.json"
+          python3 scripts/macos_release_validation.py tag-absent "$WORK/refs.json"
           {
             printf '# macOS 自用构建\n\n'
             printf '版本：`%s`；生产入口 `lib/main.dart`，Release AOT，Apple Silicon / arm64。\n\n' "$FULL_VERSION"
@@ -200,12 +257,17 @@ jobs:
             printf '此预发布不修改 Android 正式 Release、APK、正文或版本标签。\n'
             printf '仓库公开，因此预发布附件也公开；包内不包含个人阅读数据或语音密钥。\n\n'
             printf '源码提交：`%s`\n\n[构建与测试日志](%s)；完整来源见附件 `build-info.json`。\n' "$GITHUB_SHA" "$RUN_URL"
-          } > dist/macos/release-notes.md
+          } > "$WORK/release-notes.md"
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" --prerelease --latest=false \
             --title "番茄Reader macOS 自用 v$VERSION（构建 $GITHUB_RUN_NUMBER）" \
-            --notes-file dist/macos/release-notes.md \
+            --notes-file "$WORK/release-notes.md" \
             "dist/macos/$NAME" "dist/macos/$NAME.sha256" dist/macos/build-info.json
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > "$WORK/tag.json"
+          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$WORK/release.json"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$WORK/download"
+          python3 scripts/macos_release_validation.py remote dist/macos "$WORK/download" \
+            --tag-json "$WORK/tag.json" --release-json "$WORK/release.json"
           RELEASE_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG"
           {
             printf '## macOS 自用 Release DMG\n\n'

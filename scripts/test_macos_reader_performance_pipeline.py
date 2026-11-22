@@ -86,7 +86,7 @@ class PerformancePipelineTests(unittest.TestCase):
               exec 8<>"$FIXTURE_ROOT/app.fifo"
               printf ready > "$FIXTURE_ROOT/app.ready"
               limit=$((SECONDS + 40))
-              while (( SECONDS < limit )); do read -r -t 0.1 -u 8 value || :; done
+              while (( SECONDS < limit )); do read -r -t 1 -u 8 value || :; done
               exit 93
             fi
             printf ready > "$FIXTURE_ROOT/app.ready"
@@ -107,7 +107,7 @@ class PerformancePipelineTests(unittest.TestCase):
             limit=$((SECONDS + 40))
             while (( SECONDS < limit )); do
               if [[ "$FIXTURE_HANG_HELPER" != 1 && -f "$FIXTURE_ROOT/app.done" ]]; then exit 0; fi
-              read -r -t 0.1 -u 9 value || :
+              read -r -t 1 -u 9 value || :
             done
             exit 92
         """)

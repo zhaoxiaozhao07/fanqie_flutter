@@ -1,16 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
+ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="${1:?Usage: verify_macos_bundle.sh app-path [internal|release]}"
 MODE="${2:-internal}"
 [[ "$MODE" == internal || "$MODE" == release ]] || exit 2
 PLIST="$APP/Contents/Info.plist"
 [[ -f "$PLIST" ]] || { echo 'Missing app bundle' >&2; exit 1; }
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :FanqieBuildTarget' "$PLIST")" == lib/main.dart ]] || {
-  echo 'Refusing a test entry point as a client artifact; rebuild with --target lib/main.dart.' >&2
-  exit 1
-}
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$PLIST")" == com.fanqie.reader.macos ]]
-[[ "$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' "$PLIST")" == 12.0 ]]
+# Includes full 3.3.6/342 plist, production entry point, AOT resources, ICU,
+# font/native-assets manifests and non-escaping framework links.
+python3 "$ROOT/scripts/macos_release_validation.py" bundle "$APP"
 COUNT=0
 while IFS= read -r -d '' binary; do
   if file -b "$binary" | grep -q 'Mach-O'; then
@@ -36,17 +34,12 @@ PY
 done < <(find "$APP" -type f -print0)
 [[ "$COUNT" -ge 2 ]]
 codesign --verify --deep --strict "$APP"
-ENTITLEMENTS="$(codesign -d --entitlements :- "$APP" 2>/dev/null)"
-python3 - "$MODE" "$ENTITLEMENTS" <<'PY'
-import plistlib, sys
-p = plistlib.loads(sys.argv[2].encode())
-for key in ['com.apple.security.app-sandbox', 'com.apple.security.network.client',
-            'com.apple.security.files.user-selected.read-write']:
-    assert p.get(key) is True, f'Missing entitlement: {key}'
-if sys.argv[1] == 'release':
-    assert not p.get('com.apple.security.cs.allow-jit'), 'Debug JIT entitlement in Release'
-    assert not p.get('com.apple.security.network.server'), 'Debug server entitlement in Release'
-PY
+WORK="$(mktemp -d "${TMPDIR:-/tmp}/fanqie-permissions.XXXXXX")"
+trap 'rm -rf "$WORK"' EXIT
+codesign -d --entitlements :- "$APP" > "$WORK/entitlements.plist" 2>/dev/null
+# Both internal and formal production AOT must have the same narrow permissions;
+# ad-hoc signing is not permission to include Debug JIT/server entitlements.
+python3 "$ROOT/scripts/macos_release_validation.py" entitlements "$WORK/entitlements.plist"
 if [[ "$MODE" == release ]]; then
   xcrun stapler validate "$APP"
   spctl --assess --type execute --verbose=2 "$APP"
