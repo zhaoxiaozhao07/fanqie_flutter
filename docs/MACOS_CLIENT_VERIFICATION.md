@@ -1,5 +1,76 @@
 # macOS 客户端实施与验证记录
 
+## 0. 2026-11-22：Task 1 原生验证基线
+
+- 本次基线：`eb9b48f05026820c621bf5697e38e6a0ac05061c`；
+  应用版本保持 **`3.3.6+342`**，最低构建目标 **macOS 12.0 / arm64**。
+- 自用 CI 固定 **Flutter `3.47.9` / 配套 Dart `3.13.7`**，
+  保留 `macos-26` Apple Silicon runner 与依赖锁定获取；不修改依赖或 lockfile。
+- `scripts/test_macos_native.sh` 拒绝非 macOS／非 arm64，使用
+  `set -euo pipefail` 依次执行生产入口 Debug 构建
+  （`--no-pub --target lib/main.dart`）、内部 Debug 签名及 `Runner` XCTest。
+  任一步失败即终止；Flutter 与 Xcode 不并发操作同一构建目录。
+- 原生门禁独立于 Flutter 平台集成入口；XCTest 不启动生产 Dart，
+  但其主机必须先恢复为生产入口，不能沿用上一次集成测试的生成配置。
+- **本次在 Windows 上的受控命令夹具和 Bash 语法检查不是 Mac 实机验证。**
+  本次未运行 macOS 构建、原生 XCTest、云端 CI、签名或发布；
+  历史 Mac 结果不作为本次基线通过的证据。
+
+### 原生基线与完整平台入口
+
+在真实 arm64 Mac、上述 SDK 和已安装 Xcode 的项目根目录运行：
+
+```bash
+flutter pub get --enforce-lockfile
+python3 scripts/test_macos_native_pipeline.py
+scripts/test_macos_native.sh
+flutter build macos --release --no-pub --target lib/main.dart
+```
+
+完整平台集成继续保留，并在集成成功后复用同一原生门禁：
+
+```bash
+scripts/test_macos_platform.sh
+# 仅在有前台图形会话、用户可以操作系统保存面板的 Mac 上启用：
+scripts/test_macos_platform.sh \
+  --dart-define=MACOS_SAVE_PANEL_TEST=true \
+  --dart-define=MACOS_NATIVE_FULLSCREEN_TEST=true \
+  --dart-define=MACOS_READER_SCREENSHOTS=true
+```
+
+完整平台脚本使用 `--no-pub`，需预先获取锁定依赖。默认自动化不会把
+用户另存为、系统全屏、物理显示器／Retina、真实中文 IME、VoiceOver、
+Dock 恢复或实际音频／媒体键记为已覆盖。启用手工参数仍须实际完成交互，
+并单独记录结果；画布截图或 headless runner 不代替这些验收。
+
+### CI 顺序、日志与发布边界
+
+`macos-internal.yml` 必须按顺序通过：受控命令夹具、analyze、离线 Dart
+测试、生产 Debug／内部签名／原生 XCTest，最后才构建生产入口 Release
+并执行既有内部 DMG 打包。原生门禁不是可选步骤，`tee` 使用 `pipefail`，
+不会吞掉测试退出码；失败时仍由既有 `always()` 步骤上传日志：
+
+| `build/macos/ci-logs/` 日志 | 覆盖范围 |
+|---|---|
+| `native-pipeline-fixtures.log` | 隔离命令行为；不运行真正 Flutter／Xcode／签名 |
+| `flutter-analyze.log` | 静态分析 |
+| `flutter-test.log` | 默认离线 Dart 单元／组件回归；不启用 live API |
+| `native-xctest.log` | 生产 Debug 构建、内部 Debug 签名和原生 XCTest |
+| `flutter-build.log` | 最后的生产入口 Release 构建 |
+
+发布政策不变：仅 main 可创建公开的独立自用预发布，隔离分支必须
+`publish=false`。保留 main 的公开预发布行为，不更改 Android／Windows
+工作流、默认行为或已有发布资产，不合并／推送 main，不创建正式发布。
+
+控制器随后应在隔离分支使用 `publish=false` 获取实际云端基线，核对 SDK、
+arm64、原生 XCTest 与最终生产 Release 日志；失败须记录可行动的错误。
+即使云端成功，也不能据此宣称 macOS 12.0 实机、完整手工交互、
+Developer ID／公证／Gatekeeper、安装或覆盖升级已通过。
+
+---
+
+**以下为 2026-11-05–2026-11-07 的历史记录，不代表本次 Task 1 验证结果。**
+
 - 记录日期：2026-11-05–2026-11-07；基线 `eed103f`，版本保持 `3.3.4+340`。
 - 本机：Mac mini / Apple M4 / 24 GB，macOS 27.0.1（26A434），`arm64`。
 - 工具链：Flutter 3.47.4 / Dart 3.13.3 / Xcode 27.2（27B52）。

@@ -71,7 +71,7 @@ jobs:
           git diff --check
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.47.4'
+          flutter-version: '3.47.9'
           channel: stable
           architecture: arm64
           cache: true
@@ -81,6 +81,11 @@ jobs:
           flutter --version
           flutter config --enable-macos-desktop
           flutter pub get --enforce-lockfile
+      - name: 原生门禁受控命令回归（不等于 Mac 实机验证）
+        run: |
+          set -euo pipefail
+          python3 scripts/test_macos_native_pipeline.py \
+            2>&1 | tee build/macos/ci-logs/native-pipeline-fixtures.log
       - name: 静态分析
         run: |
           set -euo pipefail
@@ -89,6 +94,10 @@ jobs:
         run: |
           set -euo pipefail
           flutter test --no-pub --reporter expanded 2>&1 | tee build/macos/ci-logs/flutter-test.log
+      - name: 原生 XCTest（生产 Debug 主机）
+        run: |
+          set -euo pipefail
+          scripts/test_macos_native.sh 2>&1 | tee build/macos/ci-logs/native-xctest.log
       - name: 构建生产入口 Release
         env:
           VERSION: ${{ steps.version.outputs.version }}
