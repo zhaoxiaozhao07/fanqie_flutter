@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'reader_platform.dart';
+import 'reader_scroll_input.dart';
 
 /// 阅读器系统级辅助服务（屏幕常亮、电量获取）
 class ReaderSystemService {
@@ -102,6 +103,8 @@ class ReaderSystemService {
     _channel.setMethodCallHandler((call) async {
       if (call.method == 'onAppQuitRequested') {
         return await _quitHandler?.call() ?? false;
+      } else if (call.method == 'onReaderScrollInput') {
+        ReaderScrollInput.record(call.arguments);
       } else if (call.method == 'onDesktopCommand') {
         return _desktopCommandHandler?.call(call.arguments?.toString() ?? '') ??
             false;

@@ -21,6 +21,7 @@
 /* End PBXAggregateTarget section */
 
 /* Begin PBXBuildFile section */
+		E7310A002026112200000003 /* ReaderScrollInput.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7310A002026112200000004 /* ReaderScrollInput.swift */; };
 		E7310A002026112200000001 /* ReaderDownloadOutput.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7310A002026112200000002 /* ReaderDownloadOutput.swift */; };
 		E7310A002026110600000001 /* ReaderPlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = E7310A002026110600000002 /* ReaderPlayback.swift */; };
 		331C80D8294CF71000263BE5 /* RunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 331C80D7294CF71000263BE5 /* RunnerTests.swift */; };
@@ -63,6 +64,7 @@
 /* End PBXCopyFilesBuildPhase section */
 
 /* Begin PBXFileReference section */
+		E7310A002026112200000004 /* ReaderScrollInput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderScrollInput.swift; sourceTree = "<group>"; };
 		E7310A002026112200000002 /* ReaderDownloadOutput.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderDownloadOutput.swift; sourceTree = "<group>"; };
 		E7310A002026110600000002 /* ReaderPlayback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ReaderPlayback.swift; sourceTree = "<group>"; };
 		331C80D5294CF71000263BE5 /* RunnerTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RunnerTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -172,6 +174,7 @@
 			children = (
 				33CC10F02044A3C60003C045 /* AppDelegate.swift */,
 				33CC11122044BFA00003C045 /* MainFlutterWindow.swift */,
+				E7310A002026112200000004 /* ReaderScrollInput.swift */,
 				E7310A002026112200000002 /* ReaderDownloadOutput.swift */,
 				E7310A002026110600000002 /* ReaderPlayback.swift */,
 				33E51913231747F40026EE4D /* DebugProfile.entitlements */,
@@ -361,6 +364,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				33CC11132044BFA00003C045 /* MainFlutterWindow.swift in Sources */,
+				E7310A002026112200000003 /* ReaderScrollInput.swift in Sources */,
 				E7310A002026112200000001 /* ReaderDownloadOutput.swift in Sources */,
 				E7310A002026110600000001 /* ReaderPlayback.swift in Sources */,
 				33CC10F12044A3C60003C045 /* AppDelegate.swift in Sources */,

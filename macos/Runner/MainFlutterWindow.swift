@@ -117,6 +117,7 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
   private var displayAssertion: IOPMAssertionID = 0
   private var wantsDisplayAwake = false
   private var readerCommandsEnabled = false
+  private var scrollInput: ReaderScrollInput?
   private let decoder = ReaderTextDecoder()
   private let exportQueue = ReaderExportQueue()
   private lazy var exporter = ReaderFileExporter(window: window, queue: exportQueue)
@@ -133,6 +134,9 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
     super.init()
     channel.setMethodCallHandler { [weak self] call, result in
       self?.handle(call, result: result)
+    }
+    scrollInput = ReaderScrollInput(window: window) { [weak self] input in
+      self?.channel.invokeMethod("onReaderScrollInput", arguments: input)
     }
     monitor.pathUpdateHandler = { [weak self] path in
       guard let self = self else { return }

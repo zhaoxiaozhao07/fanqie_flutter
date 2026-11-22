@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import '../services/reader_platform.dart';
+import '../services/reader_scroll_input.dart';
 
 import 'reader_page_transition.dart';
 import 'simulation_page_turn.dart';
@@ -386,9 +387,9 @@ class ReaderPageViewState extends State<ReaderPageView> {
 
   void _wheel(PointerScrollEvent event) {
     // Small trailing signals belong to one gesture, not additional pages.
-    // Windows mouse wheels can also keep producing full notches: accept one
-    // after the previous animation, but use source time so delayed delivery
-    // does not turn an old burst into new input.
+    // Windows mouse wheels and explicitly classified native Mac wheels can
+    // keep producing full notches. Source time keeps delayed dispatch from
+    // turning an old burst into new input; deltas never classify Mac devices.
     final timestamp = event.timeStamp;
     final previous = _lastWheelTimestamp;
     final hasTimeline =
@@ -398,10 +399,12 @@ class ReaderPageViewState extends State<ReaderPageView> {
         : _wheelGestureActive;
     final forward = event.scrollDelta.dy > 0;
     final magnitude = event.scrollDelta.dy.abs();
-    final windowsMouse =
-        ReaderPlatform.isWindows && event.kind == PointerDeviceKind.mouse;
+    final nativeDiscrete = ReaderScrollInput.takeDiscrete(event);
+    final discreteMouse =
+        event.kind == PointerDeviceKind.mouse &&
+        (ReaderPlatform.isWindows || nativeDiscrete);
     final reversing =
-        windowsMouse &&
+        discreteMouse &&
         continuing &&
         _wheelDirection != null &&
         _wheelDirection != forward &&
@@ -412,7 +415,7 @@ class ReaderPageViewState extends State<ReaderPageView> {
         ? timestamp - accepted >= _wheelRepeatInterval
         : _wheelRepeatReady;
     final sustainedNotch =
-        windowsMouse &&
+        discreteMouse &&
         continuing &&
         !_motionBusy &&
         _wheelCanRepeat &&
@@ -430,7 +433,7 @@ class ReaderPageViewState extends State<ReaderPageView> {
     });
     if (widget.selection.value != null ||
         (continuing && !reversing && !sustainedNotch) ||
-        (_inputBlocked && (!windowsMouse || !_wheelTurning))) {
+        (_inputBlocked && (!discreteMouse || !_wheelTurning))) {
       return;
     }
     _wheelDirection = forward;

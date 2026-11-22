@@ -30,6 +30,86 @@ final class RunnerTests: XCTestCase {
     XCTAssertFalse(windows.contains { $0.readerPlatform != nil })
   }
 
+  private func nativeScroll(
+    _ units: CGScrollEventUnit, timestamp: CGEventTimestamp = 1_000_000_900
+  ) throws -> NSEvent {
+    let cgEvent = try XCTUnwrap(CGEvent(
+      scrollWheelEvent2Source: nil, units: units, wheelCount: 1,
+      wheel1: 3, wheel2: 0, wheel3: 0))
+    cgEvent.setIntegerValueField(
+      .scrollWheelEventIsContinuous, value: units == .pixel ? 1 : 0)
+    cgEvent.timestamp = timestamp
+    return try XCTUnwrap(NSEvent(cgEvent: cgEvent))
+  }
+
+  func testLineScrollNotifiesDiscretePrecisionAndTruncatedSourceTimestamp() throws {
+    let event = try nativeScroll(.line)
+    XCTAssertFalse(event.hasPreciseScrollingDeltas)
+    let input = try XCTUnwrap(ReaderScrollInput.notification(for: event))
+    // CGEvent uses nanoseconds; Flutter 3.47.9 casts NSEvent seconds * 1e6.
+    // The fractional 0.9 microsecond must not be rounded up to 1_000_001.
+    XCTAssertEqual(event.timestamp, 1.0000009, accuracy: 0.00000001)
+    XCTAssertEqual(input["timestampMicros"] as? Int64, 1_000_000)
+    XCTAssertEqual(input["precise"] as? Bool, false)
+    XCTAssertEqual(Set(input.keys), Set(["timestampMicros", "precise"]))
+  }
+
+  func testPixelScrollNotifiesPreciseWithoutGuessingFromDeltaSize() throws {
+    // Both fixtures use wheel1 == 3. Only the native precision property differs.
+    let event = try nativeScroll(.pixel)
+    XCTAssertTrue(event.hasPreciseScrollingDeltas)
+    let input = try XCTUnwrap(ReaderScrollInput.notification(for: event))
+    XCTAssertEqual(input["timestampMicros"] as? Int64, 1_000_000)
+    XCTAssertEqual(input["precise"] as? Bool, true)
+  }
+
+  func testScrollSourceTimestampRejectsInvalidOrUnrepresentableValues() {
+    XCTAssertEqual(ReaderScrollInput.timestampMicros(1.0000009), 1_000_000)
+    XCTAssertNil(ReaderScrollInput.timestampMicros(0))
+    XCTAssertNil(ReaderScrollInput.timestampMicros(-1))
+    XCTAssertNil(ReaderScrollInput.timestampMicros(0.0000001))
+    XCTAssertNil(ReaderScrollInput.timestampMicros(.nan))
+    XCTAssertNil(ReaderScrollInput.timestampMicros(.infinity))
+    XCTAssertNil(ReaderScrollInput.timestampMicros(.greatestFiniteMagnitude))
+    XCTAssertNil(ReaderScrollInput.timestampMicros(Double(Int64.max) / 1_000_000))
+  }
+
+  func testScrollMonitorOnlyNotifiesItsReaderWindowAndReturnsOriginalEvent() throws {
+    let reader = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+      styleMask: .borderless, backing: .buffered, defer: false)
+    let other = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+      styleMask: .borderless, backing: .buffered, defer: false)
+    var notifications = [[String: Any]]()
+    let monitor = ReaderScrollInput(window: reader) { notifications.append($0) }
+    let event = try nativeScroll(.line)
+    XCTAssertTrue(monitor.forward(event, from: other) === event)
+    XCTAssertTrue(monitor.forward(event, from: nil) === event)
+    XCTAssertTrue(notifications.isEmpty)
+    XCTAssertTrue(monitor.forward(event, from: reader) === event)
+    XCTAssertEqual(notifications.count, 1)
+    XCTAssertEqual(notifications.first?["timestampMicros"] as? Int64, 1_000_000)
+    XCTAssertEqual(notifications.first?["precise"] as? Bool, false)
+    let key = try XCTUnwrap(NSEvent.keyEvent(
+      with: .keyDown, location: .zero, modifierFlags: [], timestamp: 1,
+      windowNumber: reader.windowNumber, context: nil, characters: "a",
+      charactersIgnoringModifiers: "a", isARepeat: false, keyCode: 0))
+    XCTAssertTrue(monitor.forward(key, from: reader) === key)
+    XCTAssertEqual(notifications.count, 1)
+  }
+
+  func testScrollMonitorDoesNotRetainItsOwner() {
+    let reader = NSWindow(
+      contentRect: NSRect(x: 0, y: 0, width: 200, height: 200),
+      styleMask: .borderless, backing: .buffered, defer: false)
+    var monitor: ReaderScrollInput? = ReaderScrollInput(window: reader) { _ in }
+    weak var weakMonitor = monitor
+    monitor = nil
+    XCTAssertNil(weakMonitor)
+    withExtendedLifetime(reader) {}
+  }
+
   func testExternalImportStagesExactBytesAndKeepsOriginal() throws {
     let original = try file("中文 文件.TXT", Data("第一章\n完整原文😀".utf8))
     let root = directory.appendingPathComponent("external", isDirectory: true)

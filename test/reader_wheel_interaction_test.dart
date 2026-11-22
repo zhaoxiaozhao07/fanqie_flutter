@@ -1,9 +1,12 @@
 import 'dart:async';
 
+import 'package:fanqie_flutter/services/reader_platform.dart';
+import 'package:fanqie_flutter/services/reader_system_service.dart';
 import 'package:fanqie_flutter/widgets/reader_page_view.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 class _WheelReader extends StatefulWidget {
@@ -86,6 +89,36 @@ class _WheelReaderState extends State<_WheelReader> {
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+  ReaderSystemService.registerDesktopCommandHandler((_) => false);
+
+  Future<void> nativeMessage(
+    WidgetTester tester,
+    String method,
+    Object? arguments,
+  ) async {
+    // The shared listener is registered in the real async zone, like a native
+    // callback. Waiting inside FakeAsync alone would never drain its reply.
+    await tester.runAsync(() async {
+      final reply = Completer<void>();
+      tester.binding.channelBuffers.push(
+        ReaderPlatform.channel.name,
+        const StandardMethodCodec().encodeMethodCall(
+          MethodCall(method, arguments),
+        ),
+        (_) => reply.complete(),
+      );
+      await reply.future;
+    });
+  }
+
+  Future<void> nativeInput(
+    WidgetTester tester,
+    Duration timeStamp, {
+    bool precise = false,
+  }) => nativeMessage(tester, 'onReaderScrollInput', {
+    'timestampMicros': timeStamp.inMicroseconds,
+    'precise': precise,
+  });
 
   void desktopTest(
     String name,
@@ -93,6 +126,9 @@ void main() {
     TargetPlatform platform = TargetPlatform.macOS,
   }) {
     testWidgets(name, (tester) async {
+      // Platform changes must not leave native Mac classifications reusable.
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      await nativeMessage(tester, 'onReaderScrollInput', null);
       debugDefaultTargetPlatformOverride = platform;
       try {
         await body(tester);
@@ -144,7 +180,170 @@ void main() {
     await tester.pumpAndSettle();
   }
 
+  Future<void> macWheel(
+    WidgetTester tester,
+    Offset delta, {
+    required Duration timeStamp,
+    bool precise = false,
+  }) async {
+    await nativeInput(tester, timeStamp, precise: precise);
+    await wheel(tester, delta, timeStamp: timeStamp);
+  }
+
   for (final mode in ['cover', 'slide', 'fade', 'none', 'simulation']) {
+    desktopTest(
+      'Mac $mode classified discrete notches continue after the previous turn',
+      (tester) async {
+        final reader = await open(tester, mode);
+        for (var index = 0; index < 8; index++) {
+          await macWheel(
+            tester,
+            const Offset(0, 120),
+            timeStamp: Duration(milliseconds: 1000 + index * 70),
+          );
+          await tester.pump(const Duration(milliseconds: 70));
+        }
+        await tester.pumpAndSettle();
+        expect(reader.settled.take(2), [2, 3]);
+        expect(reader.settled.length, lessThanOrEqualTo(3));
+        expect(reader.pager.currentState!.isBusy, isFalse);
+        await close(tester);
+      },
+    );
+
+    desktopTest('Mac $mode classified discrete reversal changes direction', (
+      tester,
+    ) async {
+      final reader = await open(tester, mode);
+      await macWheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(seconds: 1),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 60));
+      await macWheel(
+        tester,
+        const Offset(0, -120),
+        timeStamp: const Duration(milliseconds: 1060),
+      );
+      await tester.pumpAndSettle();
+      expect(reader.settled, [2, 1]);
+      await close(tester);
+    });
+
+    desktopTest(
+      'Mac $mode classified wheel retains ownership through pending commit',
+      (tester) async {
+        final reader = await open(tester, mode);
+        // Metadata is delivered before the pointer signal injected by commit.
+        await nativeInput(tester, const Duration(milliseconds: 1500));
+        var injected = false;
+        reader.onSettled = (_) {
+          if (injected) return;
+          injected = true;
+          void signal() => GestureBinding.instance.handlePointerEvent(
+            const PointerScrollEvent(
+              timeStamp: Duration(milliseconds: 1500),
+              kind: PointerDeviceKind.mouse,
+              position: Offset(400, 350),
+              scrollDelta: Offset(0, -120),
+            ),
+          );
+          if (mode == 'none') {
+            scheduleMicrotask(signal);
+          } else {
+            signal();
+          }
+        };
+        await macWheel(
+          tester,
+          const Offset(0, 120),
+          timeStamp: const Duration(seconds: 1),
+        );
+        await tester.pumpAndSettle();
+        expect(reader.settled, [2, 1]);
+        await close(tester);
+      },
+    );
+
+    desktopTest('Mac $mode delayed classified notches use source time', (
+      tester,
+    ) async {
+      final reader = await open(tester, mode);
+      await macWheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(seconds: 1),
+      );
+      await tester.pumpAndSettle();
+      await tester.pump(const Duration(seconds: 2));
+      await macWheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(milliseconds: 1070),
+      );
+      await tester.pumpAndSettle();
+      expect(reader.settled, [2]);
+      await macWheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(milliseconds: 1140),
+      );
+      await macWheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(milliseconds: 1280),
+      );
+      await macWheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(milliseconds: 1400),
+      );
+      await tester.pumpAndSettle();
+      expect(reader.settled, [2, 3]);
+      expect(reader.userTurns, 2);
+      await close(tester);
+    });
+
+    for (final classified in [false, true]) {
+      desktopTest(
+        'Mac $mode ${classified ? "precise" : "unknown"} full deltas never repeat',
+        (tester) async {
+          final reader = await open(tester, mode);
+          for (var index = 0; index < 8; index++) {
+            final timestamp = Duration(milliseconds: 1000 + index * 70);
+            if (classified) {
+              await nativeInput(tester, timestamp, precise: true);
+            }
+            await wheel(tester, const Offset(0, 120), timeStamp: timestamp);
+            await tester.pump(const Duration(milliseconds: 70));
+          }
+          await tester.pumpAndSettle();
+          expect(reader.settled, [2]);
+          expect(reader.userTurns, 1);
+          await close(tester);
+        },
+      );
+    }
+
+    desktopTest(
+      'Mac $mode classified wheel during a keyboard turn never takes ownership',
+      (tester) async {
+        final reader = await open(tester, mode);
+        reader.pager.currentState!.turnToNextPage();
+        await tester.pump();
+        await macWheel(
+          tester,
+          const Offset(0, 120),
+          timeStamp: const Duration(seconds: 1),
+        );
+        await tester.pumpAndSettle();
+        expect(reader.settled, [2]);
+        await close(tester);
+      },
+    );
+
     desktopTest(
       'Windows $mode keeps wheel ownership until the page commit finishes',
       (tester) async {
@@ -345,6 +544,65 @@ void main() {
       );
     }
   }
+
+  desktopTest(
+    'Mac classified sustained notches request an unavailable chapter once',
+    (tester) async {
+      final reader = await open(tester, 'none', initialPage: 0);
+      for (var index = 0; index < 10; index++) {
+        await macWheel(
+          tester,
+          const Offset(0, -120),
+          timeStamp: Duration(milliseconds: 1000 + index * 70),
+        );
+        await tester.pump(const Duration(milliseconds: 70));
+      }
+      await tester.pumpAndSettle();
+      expect(reader.boundaries, 1);
+      expect(reader.settled, isEmpty);
+      await macWheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(milliseconds: 1700),
+      );
+      await tester.pumpAndSettle();
+      expect(reader.settled, [1]);
+      await close(tester);
+    },
+  );
+
+  desktopTest(
+    'Mac classified wheel still yields to nested vertical scrolling',
+    (tester) async {
+      final reader = await open(tester, 'cover', scrollableContent: true);
+      await macWheel(
+        tester,
+        const Offset(0, 120),
+        timeStamp: const Duration(seconds: 1),
+      );
+      await tester.pumpAndSettle();
+      expect(reader.contentScroll.offset, greaterThan(0));
+      expect(reader.settled, isEmpty);
+      expect(reader.userTurns, 0);
+      await close(tester);
+    },
+  );
+
+  desktopTest('Mac classified wheel still yields to selection', (tester) async {
+    final reader = await open(tester, 'simulation');
+    reader.selection.value = 'selected-paragraph';
+    await tester.pump();
+    await macWheel(
+      tester,
+      const Offset(0, 120),
+      timeStamp: const Duration(seconds: 1),
+    );
+    await tester.pumpAndSettle();
+    expect(reader.selection.value, 'selected-paragraph');
+    expect(reader.settled, isEmpty);
+    expect(reader.userTurns, 0);
+    await close(tester);
+  });
 
   desktopTest('one wheel gesture requests an unavailable chapter only once', (
     tester,
