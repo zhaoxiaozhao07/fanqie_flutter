@@ -87,10 +87,23 @@ final class ReaderDownloadDirectoryStore {
   }
 
   func remember(_ directory: URL) throws -> URL {
+    let release = try retainSelection(directory)
+    defer { release() }
+    return try rememberAuthorizedSelection(directory)
+  }
+
+  /// Keep a panel's native grant alive while its selection waits for ordered
+  /// background I/O. This only acquires the scope; directory/bookmark I/O is
+  /// performed by the worker, and its defer releases the same retained URL.
+  fileprivate func retainSelection(_ directory: URL) throws -> () -> Void {
     guard directory.isFileURL, bookmarks.start(directory) else {
       throw ReaderDownloadError.authorityDenied
     }
-    defer { bookmarks.stop(directory) }
+    let access = bookmarks
+    return { access.stop(directory) }
+  }
+
+  fileprivate func rememberAuthorizedSelection(_ directory: URL) throws -> URL {
     let descriptor = try ReaderDownloadWriter.directoryDescriptor(directory)
     defer { close(descriptor) }
     let selected = directory.standardizedFileURL
@@ -316,8 +329,9 @@ final class ReaderDownloadWriter {
   }
 }
 
-/// The cancellation/commit lock linearizes a cancel against publication.
-/// After publication succeeds, queued late cancellation cannot rewrite saved.
+/// The short flag check is the publication-admission linearization point.
+/// An admitted attempt may settle despite later cancellation, but only a
+/// successful atomic rename is saved. Never hold the flag lock over volume I/O.
 final class ReaderExportRequest {
   let id: String
   var onCancel: (() -> Void)?
@@ -333,10 +347,15 @@ final class ReaderExportRequest {
   }
 
   func publish(_ operation: () throws -> Void) throws {
-    lock.lock()
-    defer { lock.unlock() }
-    if cancelled { throw ReaderFileError.cancelled }
-    try operation()
+    try check()
+    do {
+      try operation()
+    } catch {
+      // Cancellation during a failed/colliding attempt prevents retries.
+      // A successful attempt deliberately has no post-publication check.
+      try check()
+      throw error
+    }
   }
 
   fileprivate func cancel() {
@@ -455,9 +474,25 @@ final class ReaderDownloadOutput {
         result(["status": "cancelled"])
         return
       }
-      do { result(["status": "saved", "path": try self.store.remember(directory).path]) }
-      catch { result(Self.failure(error)) }
+      self.rememberDirectory(directory, result: result)
     }
+  }
+
+  /// Also used by native fixture tests without presenting a real picker.
+  /// Main retains the panel's grant and delivers the reply; the shared ordered
+  /// executor owns open/fstat/bookmark creation and the persistent state update.
+  func rememberDirectory(_ directory: URL, result: @escaping FlutterResult) {
+    dispatchPrecondition(condition: .onQueue(.main))
+    let release: () -> Void
+    do { release = try store.retainSelection(directory) }
+    catch { result(Self.failure(error)); return }
+    queue.perform({
+      defer { release() }
+      do {
+        return ["status": "saved",
+          "path": try self.store.rememberAuthorizedSelection(directory).path]
+      } catch { return Self.failure(error) }
+    }, completion: { result($0) })
   }
 
   func commit(_ args: [String: Any], result: @escaping FlutterResult) {

@@ -819,6 +819,368 @@ final class RunnerTests: XCTestCase {
     wait(for: [first, duplicate, resumed], timeout: 3)
   }
 
+  private func cancelAndPulseMain(
+    _ queue: ReaderExportQueue, id: String, barrier: DownloadIOBarrier,
+    cancelled: XCTestExpectation, heartbeat: XCTestExpectation
+  ) {
+    // The watchdog is independent of Cocoa and the copy worker. Even the old
+    // filesystem-held lock must unblock when this bounded watchdog releases.
+    DispatchQueue.global(qos: .userInitiated).async { barrier.releaseAfterHeartbeat() }
+    DispatchQueue.main.async {
+      queue.cancel(id)
+      cancelled.fulfill()
+      DispatchQueue.main.async {
+        barrier.pulse()
+        heartbeat.fulfill()
+      }
+    }
+  }
+
+  func testDownloadCancellationBeforePublicationAdmissionNeverRenames() throws {
+    let output = try downloadDirectory()
+    let source = try file("pre-admission-source", Data("complete source".utf8))
+    let queue = ReaderExportQueue()
+    let barrier = DownloadIOBarrier()
+    defer { barrier.releaseFromBackground() }
+    let entered = expectation(description: "before publication admission")
+    let cancelled = expectation(description: "cancel entry returned")
+    let heartbeat = expectation(description: "main heartbeat")
+    let finished = expectation(description: "cancelled without publication")
+    let writer = ReaderDownloadWriter(rename: { descriptor, staging, name in
+      barrier.recordPublication()
+      try ReaderDownloadWriter.renameExclusive(descriptor, staging, name)
+    })
+    queue.enqueue(id: "pre-admission", result: { value in
+      XCTAssertEqual((value as? [String: Any])?["status"] as? String, "cancelled")
+      finished.fulfill()
+    }) { request, finish in
+      queue.perform({
+        do {
+          _ = try writer.commit(source, named: "book.txt", in: output,
+            check: { try request.check() }, publish: { operation in
+              entered.fulfill()
+              guard barrier.waitForRelease() else { throw ReaderDownloadError.atomicUnavailable }
+              try request.publish(operation)
+            })
+          return ["status": "saved"]
+        } catch {
+          XCTAssertEqual(error as? ReaderFileError, .cancelled)
+          return ["status": "cancelled"]
+        }
+      }, completion: finish)
+    }
+    wait(for: [entered], timeout: 5)
+    cancelAndPulseMain(queue, id: "pre-admission", barrier: barrier,
+      cancelled: cancelled, heartbeat: heartbeat)
+    wait(for: [cancelled, heartbeat, finished], timeout: 10)
+    XCTAssertFalse(barrier.watchdogReleased)
+    XCTAssertEqual(barrier.publications, 0)
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: output.path).isEmpty)
+    XCTAssertEqual(try Data(contentsOf: source), Data("complete source".utf8))
+  }
+
+  func testDownloadBlockedPublicationAllowsMainCancellationAndHeartbeat() throws {
+    let downloads = try downloadDirectory()
+    let source = try file("admitted-source", Data("complete admitted source".utf8))
+    let queue = ReaderExportQueue()
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: { downloads })
+    let barrier = DownloadIOBarrier()
+    defer { barrier.releaseFromBackground() }
+    let entered = expectation(description: "worker blocked inside admitted volume operation")
+    let cancelled = expectation(description: "cancel entry returned before volume release")
+    let heartbeat = expectation(description: "next main turn before volume release")
+    let committed = expectation(description: "admitted operation saved")
+    let following = expectation(description: "queued follow-up saved")
+    var firstReplies = 0, followingReplies = 0
+    let writer = ReaderDownloadWriter(rename: { descriptor, staging, name in
+      XCTAssertFalse(Thread.isMainThread)
+      barrier.recordPublication()
+      entered.fulfill()
+      guard barrier.waitForRelease() else { throw ReaderDownloadError.atomicUnavailable }
+      try ReaderDownloadWriter.renameExclusive(descriptor, staging, name)
+    })
+    let output = ReaderDownloadOutput(store: store, queue: queue, writer: writer)
+    let normal = ReaderDownloadOutput(store: store, queue: queue)
+    output.commit(["id": "admitted", "sourcePath": source.path, "fileName": "book.txt"]) { value in
+      XCTAssertTrue(Thread.isMainThread)
+      firstReplies += 1
+      XCTAssertEqual((value as? [String: Any])?["status"] as? String, "saved")
+      committed.fulfill()
+    }
+    wait(for: [entered], timeout: 5)
+    normal.commit(["id": "follow-up", "sourcePath": source.path,
+      "fileName": "following.txt"]) { value in
+        followingReplies += 1
+        XCTAssertEqual((value as? [String: Any])?["status"] as? String, "saved")
+        following.fulfill()
+      }
+    cancelAndPulseMain(queue, id: "admitted", barrier: barrier,
+      cancelled: cancelled, heartbeat: heartbeat)
+    wait(for: [cancelled, heartbeat, committed, following], timeout: 10)
+    XCTAssertFalse(barrier.watchdogReleased,
+      "Cocoa cancellation/heartbeat needed a watchdog to unblock volume I/O")
+    XCTAssertEqual(barrier.publications, 1)
+    XCTAssertEqual(firstReplies, 1)
+    XCTAssertEqual(followingReplies, 1)
+    let reused = expectation(description: "finished admitted ID can be reused")
+    var reusedReplies = 0
+    normal.commit(["id": "admitted", "sourcePath": source.path,
+      "fileName": "reused.txt"]) { value in
+        reusedReplies += 1
+        XCTAssertEqual((value as? [String: Any])?["status"] as? String, "saved")
+        reused.fulfill()
+      }
+    wait(for: [reused], timeout: 5)
+    XCTAssertEqual(reusedReplies, 1)
+    let root = downloads.appendingPathComponent("fanqie")
+    for name in ["book.txt", "following.txt", "reused.txt"] {
+      XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent(name)),
+        Data("complete admitted source".utf8))
+    }
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).count, 3)
+  }
+
+  private func assertCancelledFailedPublication(colliding: Bool) throws {
+    let downloads = try downloadDirectory()
+    let source = try file("failed-admission-source", Data("complete source".utf8))
+    let queue = ReaderExportQueue()
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: { downloads })
+    let root = try store.resolve()
+    let existing = root.appendingPathComponent("book.txt")
+    let oldBytes = Data("existing complete file".utf8)
+    if colliding { try oldBytes.write(to: existing) }
+    let barrier = DownloadIOBarrier()
+    defer { barrier.releaseFromBackground() }
+    let entered = expectation(description: "failed volume operation entered")
+    let cancelled = expectation(description: "failed publication cancel entry")
+    let heartbeat = expectation(description: "failed publication main heartbeat")
+    let finished = expectation(description: "failed admitted operation cancelled")
+    let following = expectation(description: "work queued behind failure")
+    var replies = 0, nextReplies = 0
+    let writer = ReaderDownloadWriter(rename: { descriptor, staging, name in
+      let attempts = barrier.recordPublication()
+      guard attempts == 1 else {
+        XCTFail("Cancellation must prevent another publication attempt")
+        throw ReaderDownloadError.atomicUnavailable
+      }
+      entered.fulfill()
+      guard barrier.waitForRelease() else { throw ReaderDownloadError.atomicUnavailable }
+      if colliding {
+        // Real exclusive rename must report EEXIST and preserve the old bytes.
+        try ReaderDownloadWriter.renameExclusive(descriptor, staging, name)
+      } else {
+        throw ReaderDownloadError.atomicUnavailable
+      }
+    })
+    let output = ReaderDownloadOutput(store: store, queue: queue, writer: writer)
+    let normal = ReaderDownloadOutput(store: store, queue: queue)
+    output.commit(["id": "failed-admission", "sourcePath": source.path,
+      "fileName": "book.txt"]) { value in
+        replies += 1
+        XCTAssertEqual((value as? [String: Any])?["status"] as? String, "cancelled")
+        finished.fulfill()
+      }
+    wait(for: [entered], timeout: 5)
+    normal.commit(["id": "after-failure", "sourcePath": source.path,
+      "fileName": "following.txt"]) { value in
+        nextReplies += 1
+        XCTAssertEqual((value as? [String: Any])?["status"] as? String, "saved")
+        following.fulfill()
+      }
+    cancelAndPulseMain(queue, id: "failed-admission", barrier: barrier,
+      cancelled: cancelled, heartbeat: heartbeat)
+    wait(for: [cancelled, heartbeat, finished, following], timeout: 10)
+    XCTAssertFalse(barrier.watchdogReleased)
+    XCTAssertEqual(barrier.publications, 1)
+    XCTAssertEqual(replies, 1)
+    XCTAssertEqual(nextReplies, 1)
+    let reused = expectation(description: "failed publication ID is fresh on reuse")
+    var reusedReplies = 0
+    normal.commit(["id": "failed-admission", "sourcePath": source.path,
+      "fileName": "reused.txt"]) { value in
+        reusedReplies += 1
+        XCTAssertEqual((value as? [String: Any])?["status"] as? String, "saved")
+        reused.fulfill()
+      }
+    wait(for: [reused], timeout: 5)
+    XCTAssertEqual(reusedReplies, 1)
+    if colliding { XCTAssertEqual(try Data(contentsOf: existing), oldBytes) }
+    else { XCTAssertFalse(FileManager.default.fileExists(atPath: existing.path)) }
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: root.appendingPathComponent("book (2).txt").path))
+    XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("following.txt")),
+      Data("complete source".utf8))
+    XCTAssertEqual(try Data(contentsOf: root.appendingPathComponent("reused.txt")),
+      Data("complete source".utf8))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: root.path).count,
+      colliding ? 3 : 2)
+  }
+
+  func testDownloadCancelledFailedPublicationDoesNotRetryOrLeakQueueState() throws {
+    try assertCancelledFailedPublication(colliding: false)
+  }
+
+  func testDownloadCancelledCollidingPublicationDoesNotRetryOrOverwrite() throws {
+    try assertCancelledFailedPublication(colliding: true)
+  }
+
+  func testDownloadCancellationAfterCollisionPreventsNextPublication() throws {
+    let output = try downloadDirectory()
+    let source = try file("post-collision-source", Data("new complete source".utf8))
+    let target = output.appendingPathComponent("book.txt")
+    try Data("old complete file".utf8).write(to: target)
+    let queue = ReaderExportQueue()
+    let barrier = DownloadIOBarrier()
+    defer { barrier.releaseFromBackground() }
+    let collided = expectation(description: "first publication already failed with EEXIST")
+    let cancelled = expectation(description: "cancel after collision")
+    let heartbeat = expectation(description: "main heartbeat after collision")
+    let finished = expectation(description: "cancelled before retry")
+    let writer = ReaderDownloadWriter(rename: { descriptor, staging, name in
+      barrier.recordPublication()
+      try ReaderDownloadWriter.renameExclusive(descriptor, staging, name)
+    })
+    queue.enqueue(id: "post-collision", result: { value in
+      XCTAssertEqual((value as? [String: Any])?["status"] as? String, "cancelled")
+      finished.fulfill()
+    }) { request, finish in
+      queue.perform({
+        do {
+          _ = try writer.commit(source, named: "book.txt", in: output,
+            check: { try request.check() }, publish: { operation in
+              do { try request.publish(operation) }
+              catch let error as NSError
+                where error.domain == NSPOSIXErrorDomain && error.code == Int(EEXIST) {
+                // Freeze AFTER failed publication, before the writer can
+                // inspect the collision and admit its next candidate.
+                collided.fulfill()
+                guard barrier.waitForRelease() else { throw ReaderDownloadError.atomicUnavailable }
+                throw error
+              }
+            })
+          return ["status": "saved"]
+        } catch {
+          XCTAssertEqual(error as? ReaderFileError, .cancelled)
+          return ["status": "cancelled"]
+        }
+      }, completion: finish)
+    }
+    wait(for: [collided], timeout: 5)
+    cancelAndPulseMain(queue, id: "post-collision", barrier: barrier,
+      cancelled: cancelled, heartbeat: heartbeat)
+    wait(for: [cancelled, heartbeat, finished], timeout: 10)
+    XCTAssertFalse(barrier.watchdogReleased)
+    XCTAssertEqual(barrier.publications, 1)
+    XCTAssertEqual(try Data(contentsOf: target), Data("old complete file".utf8))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path), ["book.txt"])
+  }
+
+  func testDownloadDirectorySelectionsUseOrderedWorkerAndRetainScopeWhileQueued() throws {
+    let downloads = try downloadDirectory()
+    let prior = try downloadDirectory("prior-selection")
+    let first = try downloadDirectory("first-selection")
+    let second = try downloadDirectory("second-selection")
+    let defaults = try downloadDefaults()
+    let access = DownloadSelectionBookmarks()
+    defer { access.onCreate = nil }
+    let store = ReaderDownloadDirectoryStore(
+      defaults: defaults, downloadsDirectory: { downloads }, bookmarks: access)
+    _ = try store.remember(prior)
+    access.onCreate = { directory in
+      XCTAssertFalse(Thread.isMainThread, "Directory/bookmark selection I/O must run off Cocoa")
+      XCTAssertEqual(access.activeScopes(directory), 1)
+    }
+    let queue = ReaderExportQueue()
+    let output = ReaderDownloadOutput(store: store, queue: queue)
+    let barrier = DownloadIOBarrier()
+    defer { barrier.releaseFromBackground() }
+    let entered = expectation(description: "ordered worker occupied")
+    let unblocked = expectation(description: "prior ordered work finished")
+    queue.perform({
+      entered.fulfill()
+      guard barrier.waitForRelease() else { return ["status": "failed"] }
+      return ["status": "saved"]
+    }, completion: { value in
+      XCTAssertEqual(value["status"] as? String, "saved")
+      unblocked.fulfill()
+    })
+    wait(for: [entered], timeout: 5)
+    let selected = expectation(description: "ordered selection callbacks")
+    selected.expectedFulfillmentCount = 2
+    output.rememberDirectory(first) { value in
+      XCTAssertTrue(Thread.isMainThread)
+      XCTAssertEqual((value as? [String: Any])?["path"] as? String, first.path)
+      selected.fulfill()
+    }
+    output.rememberDirectory(second) { value in
+      XCTAssertTrue(Thread.isMainThread)
+      XCTAssertEqual((value as? [String: Any])?["path"] as? String, second.path)
+      selected.fulfill()
+    }
+    XCTAssertEqual(access.activeScopes(first), 1)
+    XCTAssertEqual(access.activeScopes(second), 1)
+    XCTAssertEqual(defaults.dictionary(
+      forKey: ReaderDownloadDirectoryStore.preferencesKey)?["current"] as? String, prior.path)
+    let resolved = expectation(description: "resolve ordered after both selections")
+    output.getDirectory { value in
+      XCTAssertTrue(Thread.isMainThread)
+      XCTAssertEqual((value as? [String: Any])?["path"] as? String, second.path)
+      resolved.fulfill()
+    }
+    let heartbeat = expectation(description: "main runs while selections wait")
+    DispatchQueue.global(qos: .userInitiated).async { barrier.releaseAfterHeartbeat() }
+    DispatchQueue.main.async { barrier.pulse(); heartbeat.fulfill() }
+    wait(for: [heartbeat, unblocked, selected, resolved], timeout: 10)
+    XCTAssertFalse(barrier.watchdogReleased)
+    XCTAssertEqual(access.created, [prior, first, second])
+    XCTAssertEqual(access.activeScopes(first), 0)
+    XCTAssertEqual(access.activeScopes(second), 0)
+    XCTAssertEqual(access.activeScopes(prior), 0)
+    let restarted = ReaderDownloadDirectoryStore(
+      defaults: defaults, downloadsDirectory: { downloads }, bookmarks: access)
+    XCTAssertEqual(try restarted.resolve(), second)
+    let roots = defaults.dictionary(
+      forKey: ReaderDownloadDirectoryStore.preferencesKey)?["bookmarks"] as? [String: Any]
+    XCTAssertNotNil(roots?[prior.path] as? Data)
+    XCTAssertNotNil(roots?[first.path] as? Data)
+    XCTAssertNotNil(roots?[second.path] as? Data)
+  }
+
+  func testDownloadFailedDirectorySelectionReleasesScopeAndKeepsPreviousAuthority() throws {
+    let downloads = try downloadDirectory()
+    let prior = try downloadDirectory("prior-authority")
+    let failing = try downloadDirectory("failing-selection")
+    let defaults = try downloadDefaults()
+    let access = DownloadSelectionBookmarks()
+    defer { access.onCreate = nil }
+    let store = ReaderDownloadDirectoryStore(
+      defaults: defaults, downloadsDirectory: { downloads }, bookmarks: access)
+    _ = try store.remember(prior)
+    access.onCreate = { directory in
+      XCTAssertFalse(Thread.isMainThread)
+      XCTAssertEqual(access.activeScopes(directory), 1)
+      throw ReaderDownloadError.invalidBookmark
+    }
+    let output = ReaderDownloadOutput(store: store)
+    let failed = expectation(description: "selection creation failed")
+    output.rememberDirectory(failing) { value in
+      XCTAssertTrue(Thread.isMainThread)
+      XCTAssertEqual((value as? [String: Any])?["status"] as? String, "failed")
+      failed.fulfill()
+    }
+    wait(for: [failed], timeout: 5)
+    XCTAssertEqual(access.activeScopes(failing), 0)
+    XCTAssertEqual(defaults.dictionary(
+      forKey: ReaderDownloadDirectoryStore.preferencesKey)?["current"] as? String, prior.path)
+    XCTAssertEqual(try store.resolve(), prior)
+    XCTAssertEqual(access.activeScopes(prior), 0)
+    let roots = defaults.dictionary(
+      forKey: ReaderDownloadDirectoryStore.preferencesKey)?["bookmarks"] as? [String: Any]
+    XCTAssertNil(roots?[failing.path])
+  }
+
   func testDownloadNativeMetadataHandlerFailsClosedForMalformedOrForeignRequests() throws {
     let downloads = try downloadDirectory()
     let store = ReaderDownloadDirectoryStore(
@@ -1012,5 +1374,98 @@ private final class DownloadRaceResults {
     lock.lock()
     defer { lock.unlock() }
     failures.append(error)
+  }
+}
+
+/// A fake stalled volume, not a physical-latency benchmark. Both the worker's
+/// wait and the independent watchdog are bounded; cleanup never needs Cocoa.
+private final class DownloadIOBarrier {
+  private let release = DispatchSemaphore(value: 0)
+  private let heartbeat = DispatchSemaphore(value: 0)
+  private let lock = NSLock()
+  private var timedOut = false
+  private var attempts = 0
+
+  func waitForRelease() -> Bool { release.wait(timeout: .now() + 5) == .success }
+  func pulse() { heartbeat.signal() }
+
+  func releaseAfterHeartbeat() {
+    let progressed = heartbeat.wait(timeout: .now() + 2) == .success
+    lock.lock()
+    timedOut = !progressed
+    lock.unlock()
+    release.signal()
+  }
+
+  func releaseFromBackground() {
+    DispatchQueue.global(qos: .userInitiated).async { self.release.signal() }
+  }
+
+  @discardableResult
+  func recordPublication() -> Int {
+    lock.lock()
+    defer { lock.unlock() }
+    attempts += 1
+    return attempts
+  }
+
+  var watchdogReleased: Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    return timedOut
+  }
+
+  var publications: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return attempts
+  }
+}
+
+private final class DownloadSelectionBookmarks: ReaderDownloadBookmarkAccess {
+  var onCreate: ((URL) throws -> Void)?
+  private let lock = NSLock()
+  private var active = [String: Int]()
+  private var creations = [URL]()
+
+  func create(for directory: URL) throws -> Data {
+    try onCreate?(directory)
+    lock.lock()
+    creations.append(directory)
+    lock.unlock()
+    return Data(directory.path.utf8)
+  }
+
+  func resolve(_ data: Data) throws -> ReaderResolvedDownloadBookmark {
+    guard let path = String(data: data, encoding: .utf8), path.hasPrefix("/") else {
+      throw ReaderDownloadError.invalidBookmark
+    }
+    return ReaderResolvedDownloadBookmark(
+      directory: URL(fileURLWithPath: path, isDirectory: true), isStale: false)
+  }
+
+  func start(_ directory: URL) -> Bool {
+    lock.lock()
+    defer { lock.unlock() }
+    active[directory.path, default: 0] += 1
+    return true
+  }
+
+  func stop(_ directory: URL) {
+    lock.lock()
+    defer { lock.unlock() }
+    active[directory.path, default: 0] -= 1
+  }
+
+  func activeScopes(_ directory: URL) -> Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return active[directory.path, default: 0]
+  }
+
+  var created: [URL] {
+    lock.lock()
+    defer { lock.unlock() }
+    return creations
   }
 }
