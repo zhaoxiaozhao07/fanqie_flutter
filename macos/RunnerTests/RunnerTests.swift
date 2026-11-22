@@ -787,8 +787,11 @@ final class RunnerTests: XCTestCase {
     }) { request, finish in
       firstFinish = finish
       request.onCancel = {
-        XCTAssertThrowsError(try request.check()) {
-          XCTAssertEqual($0 as? ReaderFileError, .cancelled)
+        do {
+          try request.check()
+          XCTFail("A cancelled request must reject further work")
+        } catch {
+          XCTAssertEqual(error as? ReaderFileError, .cancelled)
         }
       }
     }
@@ -804,8 +807,13 @@ final class RunnerTests: XCTestCase {
       XCTAssertEqual((value as? [String: Any])?["status"] as? String, "saved")
       resumed.fulfill()
     }) { request, finish in
-      XCTAssertNoThrow(try request.check())
-      finish(["status": "saved"])
+      do {
+        try request.check()
+        finish(["status": "saved"])
+      } catch {
+        XCTFail("A fresh request must not inherit cancellation: \(error)")
+        finish(["status": "failed", "error": error.localizedDescription])
+      }
     }
     queue.cancel("already-finished")
     wait(for: [first, duplicate, resumed], timeout: 3)
