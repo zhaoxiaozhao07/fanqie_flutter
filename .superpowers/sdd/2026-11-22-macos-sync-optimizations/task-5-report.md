@@ -200,3 +200,30 @@ independent review. No credentials, network/CI/push/PR/merge or real user-data
 operations occurred. Actual hosted Mac native/platform/seven-scenario AOT,
 mounted final DMG/download, stock Bash 3.2 execution and physical gates remain
 controller-owned; no formal certificate/notarization success is claimed.
+
+## Fix round 2 / 5 — remaining I1 classification boundary
+
+Base: `a46d6fe995ce22219453d4ac7f297244516399e8`.
+Implementation commit: **`63597ec013533b242a9ec8935a5d3e118c4f56b1`** `[skip ci]`;
+this append is a report-only commit; use returned HEAD for re-review.
+
+- I1 delta: walk suppresses entry `is_dir()` errors into `files`; now an actual
+  non-link directory found by lstat must belong to walk's `dirs`, otherwise
+  `ValidationError` identifies the untraversed directory. Existing opening-error
+  handling, complete-tree and legitimate/escaping-link checks remain.
+- RED: `python scripts/test_macos_package.py ValidationTests.test_real_directory_entry_classification_error_cannot_omit_children`
+  injects one error into a real directory entry, with a real child: three failing
+  snapshot/bundle/pre-fault-comparison subcases, `round2-entry-classification-red.log`.
+- GREEN: same case plus retained opening-error/layout/link cases: 4 / 0.708s /
+  exit 0, `round2-entry-classification-green.log`. Full
+  `python scripts/test_macos_package.py`: **27 / 124.835s / exit 0**,
+  `round2-package-green.log`.
+- Python AST syntax (two changed sources), CRLF-normalized shell `bash -n`, and
+  working/staged `git diff --check`: exit 0; `round2-python-syntax.log`,
+  `round2-shell-syntax.log`, `round2-diff-check.log`. All logs use the same
+  `.dart_tool/codex-macos-followup/task-5/` directory documented above.
+- Only validator, focused tests and report changed; I2/I3/M1, 25s deadline,
+  CI/SDK/version/Dart/Swift/dependencies remain unchanged. No extra audit/full
+  retest, credentials, network/push/CI or controller-artifact deletion.
+  Controlled Windows FS-error evidence is not real Mac permission/native/AOT/
+  DMG/physical acceptance; those and scoped re-review remain controller-owned.
