@@ -480,6 +480,34 @@ class DownloadService extends ChangeNotifier {
       return (exists: false, size: 0, path: filePath, contentUri: contentUri);
     }
 
+    if (ReaderPlatform.isMacOS) {
+      // A path alone cannot restore a sandbox grant after restart. Native
+      // checks only this exact recorded file under current/previous bookmarks;
+      // never fall back to Dart metadata or a same-named file in another root.
+      if (contentUri?.isNotEmpty != true &&
+          !filePath.startsWith('content://')) {
+        try {
+          final res = await ReaderPlatform.invoke<dynamic>(
+            'checkDownloadedFile',
+            {'filePath': filePath, 'contentUri': contentUri ?? ''},
+          );
+          if (res is Map &&
+              res['exists'] == true &&
+              res['size'] is int &&
+              (res['size'] as int) > 0 &&
+              res['path'] == filePath) {
+            return (
+              exists: true,
+              size: res['size'] as int,
+              path: filePath,
+              contentUri: contentUri,
+            );
+          }
+        } catch (_) {}
+      }
+      return (exists: false, size: 0, path: filePath, contentUri: contentUri);
+    }
+
     if (defaultTargetPlatform == TargetPlatform.android) {
       try {
         final res = await platform.invokeMapMethod<String, dynamic>(
@@ -1022,9 +1050,13 @@ class DownloadService extends ChangeNotifier {
           throw const FileExportCancelled();
         }
         int fileSize = saved.fileSize;
-        final file = File(saved.path);
-        if (await file.exists()) {
-          fileSize = await file.length();
+        // Swift has already released a custom directory's security scope.
+        // Keep its saved result and the owned staging-file size authoritative.
+        if (!ReaderPlatform.isMacOS) {
+          final file = File(saved.path);
+          if (await file.exists()) {
+            fileSize = await file.length();
+          }
         }
 
         await _historyService.addHistory(
@@ -1369,10 +1401,12 @@ $navPoints  </navMap>
         if (!ReaderPlatform.isDesktop && isCancelled?.call() == true) {
           throw const FileExportCancelled();
         }
-        final file = File(saved.path);
         int fileSize = saved.fileSize;
-        if (await file.exists()) {
-          fileSize = await file.length();
+        if (!ReaderPlatform.isMacOS) {
+          final file = File(saved.path);
+          if (await file.exists()) {
+            fileSize = await file.length();
+          }
         }
 
         await _historyService.addHistory(
@@ -1404,7 +1438,7 @@ $navPoints  </navMap>
     return null;
   }
 
-  /// 通过平台通道将临时文件保存到 Android 的 Downloads/fanqie，非 Android 环境保存到文档目录
+  /// 桌面原生无弹窗提交；Android 仍使用 Downloads/fanqie 的现有通道。
   Future<_SavedFileResult?> _saveFileViaPlatform(
     String tempFilePath,
     String safeFileName,
@@ -1412,7 +1446,7 @@ $navPoints  </navMap>
     String? requestId,
     bool Function()? isCancelled,
   }) async {
-    if (ReaderPlatform.isWindows) {
+    if (ReaderPlatform.isDesktop) {
       // Downloads never pop a panel at the end of a task; they commit into the
       // configured output directory with automatic name numbering.
       final result = await DesktopDownloadOutput.commit(
@@ -1435,28 +1469,7 @@ $navPoints  </navMap>
               fileSize: await File(tempFilePath).length(),
             );
     }
-    if (ReaderPlatform.isDesktop) {
-      final result = await FileExportService().save(
-        File(tempFilePath),
-        name: safeFileName,
-        mimeType: mimeType,
-        requestId: requestId,
-        isCancelled: isCancelled,
-      );
-      if (result.status == FileExportStatus.cancelled) {
-        throw const FileExportCancelled();
-      }
-      if (result.status == FileExportStatus.failed) {
-        throw FileSystemException(result.error ?? '导出保存失败');
-      }
-      final path = result.path;
-      return path == null
-          ? null
-          : _SavedFileResult(
-              path: path,
-              fileSize: await File(tempFilePath).length(),
-            );
-    } else if (defaultTargetPlatform == TargetPlatform.android) {
+    if (defaultTargetPlatform == TargetPlatform.android) {
       final res = await platform.invokeMapMethod<String, dynamic>(
         'saveToDownloadsDetailed',
         {

@@ -118,7 +118,9 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
   private var wantsDisplayAwake = false
   private var readerCommandsEnabled = false
   private let decoder = ReaderTextDecoder()
-  private lazy var exporter = ReaderFileExporter(window: window)
+  private let exportQueue = ReaderExportQueue()
+  private lazy var exporter = ReaderFileExporter(window: window, queue: exportQueue)
+  private lazy var downloadOutput = ReaderDownloadOutput(window: window, queue: exportQueue)
   private lazy var playback = ReaderPlayback { [weak self] method, args in
     self?.channel.invokeMethod(method, arguments: args)
   }
@@ -237,8 +239,16 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
       result(true)
     case "saveExportFile":
       exporter.save(args, result: result)
+    case "getDownloadDirectory":
+      downloadOutput.getDirectory(result: result)
+    case "pickDownloadDirectory":
+      downloadOutput.pickDirectory(result: result)
+    case "commitDownloadFile":
+      downloadOutput.commit(args, result: result)
+    case "checkDownloadedFile":
+      downloadOutput.checkFile(args, result: result)
     case "cancelExport":
-      exporter.cancel(args["id"] as? String ?? "")
+      exportQueue.cancel(args["id"] as? String ?? "")
       result(true)
     case "takeExternalImports":
       result(ReaderExternalFileInbox.shared.takePending())
@@ -832,49 +842,56 @@ final class ReaderTextDecoder {
 /// Sheets are serialized. The replacement is committed only after a complete,
 /// cancellable streaming copy; cancellation never truncates an existing file.
 final class ReaderFileExporter {
+  typealias DestinationSelection = ([String: Any], @escaping (URL?) -> Void) -> Void
   private weak var window: MainFlutterWindow?
-  private let worker = DispatchQueue(label: "com.fanqie.reader.export", qos: .userInitiated)
-  private let lock = NSLock()
-  private var cancelled = Set<String>()
-  private var requests: [([String: Any], FlutterResult)] = []
+  private let queue: ReaderExportQueue
+  private let selectDestination: DestinationSelection?
   private var activePanel: NSSavePanel?
-  private var activeID: String?
 
-  init(window: MainFlutterWindow?) { self.window = window }
+  init(
+    window: MainFlutterWindow?, queue: ReaderExportQueue = ReaderExportQueue(),
+    selectDestination: DestinationSelection? = nil
+  ) {
+    self.window = window
+    self.queue = queue
+    self.selectDestination = selectDestination
+  }
 
   func save(_ args: [String: Any], result: @escaping FlutterResult) {
-    requests.append((args, result))
-    presentNext()
+    queue.enqueue(id: args["id"] as? String ?? UUID().uuidString, result: result) {
+      request, finish in self.present(args, request: request, finish: finish)
+    }
   }
 
-  func cancel(_ id: String) {
-    guard activeID == id || requests.contains(where: { $0.0["id"] as? String == id })
-    else { return }
-    lock.lock()
-    cancelled.insert(id)
-    lock.unlock()
-    if activeID == id { activePanel?.cancel(nil) }
-  }
+  func cancel(_ id: String) { queue.cancel(id) }
 
-  private func isCancelled(_ id: String) -> Bool {
-    lock.lock()
-    defer { lock.unlock() }
-    return cancelled.contains(id)
-  }
-
-  private func presentNext() {
-    guard activeID == nil, !requests.isEmpty else { return }
-    let (args, result) = requests.removeFirst()
-    let id = args["id"] as? String ?? UUID().uuidString
-    activeID = id
-    if isCancelled(id) {
-      finish(id, result: result, value: ["status": "cancelled"])
+  private func present(
+    _ args: [String: Any], request: ReaderExportRequest,
+    finish: @escaping ReaderExportQueue.Completion
+  ) {
+    let source = URL(fileURLWithPath: args["filePath"] as? String ?? "")
+    let selected: (URL?) -> Void = { destination in
+      guard let destination = destination else { finish(["status": "cancelled"]); return }
+      do { try request.check() }
+      catch { finish(["status": "cancelled"]); return }
+      self.queue.perform({
+        do {
+          try Self.copy(source, to: destination) { try request.check() }
+          return ["status": "saved", "path": destination.path]
+        } catch {
+          return (error as? ReaderFileError) == .cancelled
+            ? ["status": "cancelled"]
+            : ["status": "failed", "error": "文件保存失败，请检查权限与存储空间"]
+        }
+      }, completion: finish)
+    }
+    if let selectDestination = selectDestination {
+      selectDestination(args, selected)
       return
     }
-    let source = URL(fileURLWithPath: args["filePath"] as? String ?? "")
     let name = (args["fileName"] as? String ?? "export.txt") as NSString
     guard let window = window else {
-      finish(id, result: result, value: ["status": "failed", "error": "阅读窗口不可用"])
+      finish(["status": "failed", "error": "阅读窗口不可用"])
       return
     }
     window.showReaderWindow()
@@ -886,36 +903,12 @@ final class ReaderFileExporter {
       panel.allowedContentTypes = [type]
     }
     activePanel = panel
+    request.onCancel = { [weak panel] in panel?.cancel(nil) }
     panel.beginSheetModal(for: window) { response in
       self.activePanel = nil
-      guard response == .OK, let destination = panel.url, !self.isCancelled(id) else {
-        self.finish(id, result: result, value: ["status": "cancelled"])
-        return
-      }
-      self.worker.async {
-        var value: [String: Any]
-        do {
-          try Self.copy(source, to: destination) {
-            if self.isCancelled(id) { throw ReaderFileError.cancelled }
-          }
-          value = ["status": "saved", "path": destination.path]
-        } catch {
-          value = (error as? ReaderFileError) == .cancelled
-            ? ["status": "cancelled"]
-            : ["status": "failed", "error": "文件保存失败，请检查权限与存储空间"]
-        }
-        DispatchQueue.main.async { self.finish(id, result: result, value: value) }
-      }
+      request.onCancel = nil
+      selected(response == .OK ? panel.url : nil)
     }
-  }
-
-  private func finish(_ id: String, result: FlutterResult, value: [String: Any]) {
-    lock.lock()
-    cancelled.remove(id)
-    lock.unlock()
-    activeID = nil
-    result(value)
-    presentNext()
   }
 
   static func copy(

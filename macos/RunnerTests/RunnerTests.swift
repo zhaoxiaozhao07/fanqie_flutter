@@ -2,13 +2,14 @@ import Cocoa
 import FlutterMacOS
 import XCTest
 import AVFoundation
+import Darwin
 @testable import FanqieReader
 
 final class RunnerTests: XCTestCase {
   private var directory: URL!
 
   override func setUpWithError() throws {
-    directory = FileManager.default.temporaryDirectory
+    directory = FileManager.default.temporaryDirectory.resolvingSymlinksInPath()
       .appendingPathComponent("reader-native-tests-\(UUID().uuidString)", isDirectory: true)
     try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
   }
@@ -206,6 +207,637 @@ final class RunnerTests: XCTestCase {
     XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), "safe")
   }
 
+  private func downloadDirectory(_ name: String = "downloads") throws -> URL {
+    let url = directory.appendingPathComponent(name, isDirectory: true)
+    try FileManager.default.createDirectory(at: url, withIntermediateDirectories: false)
+    return url
+  }
+
+  private func downloadDefaults() throws -> UserDefaults {
+    let suite = "com.fanqie.reader.download-tests.\(UUID().uuidString)"
+    let defaults = try XCTUnwrap(UserDefaults(suiteName: suite))
+    addTeardownBlock { defaults.removePersistentDomain(forName: suite) }
+    return defaults
+  }
+
+  func testDownloadExactBytesAndNumericCollisions() throws {
+    let output = try downloadDirectory()
+    var bytes = Data(repeating: 0x61, count: 3 * 1024 * 1024 + 7)
+    bytes.append(Data("中文😀".utf8))
+    let source = try file("download-source", bytes)
+    let writer = ReaderDownloadWriter()
+    let first = try writer.commit(source, named: "书.epub", in: output)
+    let second = try writer.commit(source, named: "书.epub", in: output)
+    let third = try writer.commit(source, named: "书.epub", in: output)
+    XCTAssertEqual(first.lastPathComponent, "书.epub")
+    XCTAssertEqual(second.lastPathComponent, "书 (2).epub")
+    XCTAssertEqual(third.lastPathComponent, "书 (3).epub")
+    for target in [first, second, third] {
+      XCTAssertEqual(try Data(contentsOf: target), bytes)
+    }
+    XCTAssertEqual(try Data(contentsOf: source), bytes)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path).count, 3)
+  }
+
+  func testDownloadExclusiveRenameDoesNotOverwriteARacingFile() throws {
+    let output = try downloadDirectory()
+    let original = Data("racer must survive".utf8)
+    let bytes = Data("complete new download".utf8)
+    let source = try file("racing-source", bytes)
+    let target = output.appendingPathComponent("race.epub")
+    let writer = ReaderDownloadWriter(rename: { descriptor, staging, name in
+      if name == "race.epub" { try original.write(to: target) }
+      // Exercise the real Darwin no-replace operation, not a mock move.
+      try ReaderDownloadWriter.renameExclusive(descriptor, staging, name)
+    })
+    let saved = try writer.commit(source, named: "race.epub", in: output)
+    XCTAssertEqual(saved.lastPathComponent, "race (2).epub")
+    XCTAssertEqual(try Data(contentsOf: target), original)
+    XCTAssertEqual(try Data(contentsOf: saved), bytes)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path).count, 2)
+  }
+
+  func testDownloadConcurrentWritersPublishDistinctCompleteFiles() throws {
+    let output = try downloadDirectory()
+    let fixtures = try (0..<8).map { index -> (URL, Data) in
+      let bytes = Data(repeating: UInt8(index + 1), count: 65537)
+      return (try file("concurrent-\(index)", bytes), bytes)
+    }
+    let results = DownloadRaceResults()
+    let group = DispatchGroup()
+    for (source, bytes) in fixtures {
+      group.enter()
+      DispatchQueue.global(qos: .userInitiated).async {
+        defer { group.leave() }
+        do {
+          let target = try ReaderDownloadWriter().commit(source, named: "same.txt", in: output)
+          results.append(target, bytes: bytes)
+        } catch { results.fail(error) }
+      }
+    }
+    XCTAssertEqual(group.wait(timeout: .now() + 10), .success)
+    XCTAssertTrue(results.errors.isEmpty, "\(results.errors)")
+    XCTAssertEqual(Set(results.files.map { $0.0.path }).count, 8)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path).count, 8)
+    for (target, bytes) in results.files { XCTAssertEqual(try Data(contentsOf: target), bytes) }
+  }
+
+  func testDownloadRejectsInvalidNamesAndNonregularSources() throws {
+    let output = try downloadDirectory()
+    let source = try file("valid-download", Data("safe".utf8))
+    let writer = ReaderDownloadWriter()
+    for name in ["", ".", "..", "../escape", "/absolute", "with\\slash", "nul\0.txt"] {
+      XCTAssertThrowsError(try writer.commit(source, named: name, in: output), name)
+    }
+    XCTAssertThrowsError(try writer.commit(directory, named: "book.txt", in: output))
+    XCTAssertThrowsError(try writer.commit(
+      URL(string: "https://example.invalid/book.txt")!, named: "book.txt", in: output))
+    let fifo = directory.appendingPathComponent("input-fifo")
+    XCTAssertEqual(mkfifo(fifo.path, 0o600), 0)
+    XCTAssertThrowsError(try writer.commit(fifo, named: "book.txt", in: output))
+    XCTAssertThrowsError(try writer.commit(source, named: "book.txt", in: source))
+    XCTAssertThrowsError(try writer.commit(
+      output.appendingPathComponent("missing"), named: "book.txt", in: output))
+    let same = output.appendingPathComponent("same.txt")
+    try Data("original".utf8).write(to: same)
+    XCTAssertThrowsError(try writer.commit(same, named: "same.txt", in: output))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path), ["same.txt"])
+  }
+
+  func testDownloadRejectsSourceDirectoryAndDestinationLinks() throws {
+    let output = try downloadDirectory()
+    let source = try file("original-download", Data("must survive".utf8))
+    let sourceLink = directory.appendingPathComponent("source-link")
+    try FileManager.default.createSymbolicLink(at: sourceLink, withDestinationURL: source)
+    let directoryLink = directory.appendingPathComponent("directory-link")
+    try FileManager.default.createSymbolicLink(at: directoryLink, withDestinationURL: output)
+    let target = output.appendingPathComponent("book.txt")
+    try FileManager.default.createSymbolicLink(at: target, withDestinationURL: source)
+    let writer = ReaderDownloadWriter()
+    XCTAssertThrowsError(try writer.commit(sourceLink, named: "other.txt", in: output))
+    XCTAssertThrowsError(try writer.commit(source, named: "other.txt", in: directoryLink))
+    XCTAssertThrowsError(try writer.commit(source, named: "book.txt", in: output))
+    try FileManager.default.removeItem(at: target)
+    try FileManager.default.createSymbolicLink(
+      at: target, withDestinationURL: directory.appendingPathComponent("absent"))
+    XCTAssertThrowsError(try writer.commit(source, named: "book.txt", in: output))
+    XCTAssertEqual(try Data(contentsOf: source), Data("must survive".utf8))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path), ["book.txt"])
+  }
+
+  func testDownloadEarlyCancellationHasNoOutputSideEffects() throws {
+    let output = try downloadDirectory()
+    let source = try file("cancel-early-download", Data("complete source".utf8))
+    XCTAssertThrowsError(try ReaderDownloadWriter().commit(
+      source, named: "cancel.txt", in: output, check: { throw ReaderFileError.cancelled }
+    )) { XCTAssertEqual($0 as? ReaderFileError, .cancelled) }
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: output.path).isEmpty)
+    XCTAssertEqual(try Data(contentsOf: source), Data("complete source".utf8))
+  }
+
+  func testDownloadCopyCancellationIsBoundedTo64KiBAndCleansStaging() throws {
+    let output = try downloadDirectory()
+    let source = try file("cancel-copy-download", Data(repeating: 0x61, count: 200000))
+    let existing = output.appendingPathComponent("cancel.txt")
+    try Data("old output".utf8).write(to: existing)
+    var checks = 0
+    XCTAssertThrowsError(try ReaderDownloadWriter().commit(
+      source, named: "cancel.txt", in: output, check: {
+        checks += 1
+        if checks == 3 {
+          let staging = try FileManager.default.contentsOfDirectory(
+            at: output, includingPropertiesForKeys: nil).filter {
+              $0.lastPathComponent.hasPrefix(".fanqie-download-")
+            }
+          XCTAssertEqual(staging.count, 1)
+          XCTAssertEqual(try Data(contentsOf: XCTUnwrap(staging.first)).count, 64 * 1024)
+          throw ReaderFileError.cancelled
+        }
+      }
+    )) { XCTAssertEqual($0 as? ReaderFileError, .cancelled) }
+    XCTAssertEqual(checks, 3)
+    XCTAssertEqual(try Data(contentsOf: existing), Data("old output".utf8))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path), ["cancel.txt"])
+  }
+
+  func testDownloadCancellationAtPublicationPreservesOldFiles() throws {
+    let output = try downloadDirectory()
+    let source = try file("cancel-publish-download", Data("new complete bytes".utf8))
+    let existing = output.appendingPathComponent("book.txt")
+    try Data("old complete bytes".utf8).write(to: existing)
+    XCTAssertThrowsError(try ReaderDownloadWriter().commit(
+      source, named: "book.txt", in: output,
+      publish: { _ in throw ReaderFileError.cancelled }
+    )) { XCTAssertEqual($0 as? ReaderFileError, .cancelled) }
+    XCTAssertEqual(try Data(contentsOf: existing), Data("old complete bytes".utf8))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: output.path), ["book.txt"])
+  }
+
+  func testDownloadSuccessfulPublicationWinsOverLaterCancellation() throws {
+    let output = try downloadDirectory()
+    let source = try file("committed-download", Data("complete bytes".utf8))
+    var cancelled = false
+    let writer = ReaderDownloadWriter(rename: { descriptor, staging, name in
+      try ReaderDownloadWriter.renameExclusive(descriptor, staging, name)
+      cancelled = true
+    })
+    let saved = try writer.commit(source, named: "book.txt", in: output, check: {
+      if cancelled { throw ReaderFileError.cancelled }
+    })
+    XCTAssertTrue(cancelled)
+    XCTAssertEqual(try Data(contentsOf: saved), Data("complete bytes".utf8))
+  }
+
+  func testDownloadUnsupportedAtomicPublicationNeverFallsBackToMove() throws {
+    let output = try downloadDirectory()
+    let source = try file("unsupported-volume-source", Data("new".utf8))
+    let writer = ReaderDownloadWriter(rename: { _, _, _ in
+      throw ReaderDownloadError.atomicUnavailable
+    })
+    XCTAssertThrowsError(try writer.commit(source, named: "book.txt", in: output)) {
+      XCTAssertEqual($0 as? ReaderDownloadError, .atomicUnavailable)
+      XCTAssertFalse($0.localizedDescription.isEmpty)
+    }
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: output.path).isEmpty)
+    XCTAssertEqual(try Data(contentsOf: source), Data("new".utf8))
+  }
+
+  func testDownloadDefaultStoreCreatesOnlyItsInjectedDownloadsChild() throws {
+    let downloads = try downloadDirectory()
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: { downloads })
+    let output = try store.resolve()
+    XCTAssertEqual(output, downloads.appendingPathComponent("fanqie", isDirectory: true))
+    XCTAssertEqual(try store.resolve(), output)
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: downloads.path), ["fanqie"])
+  }
+
+  func testDownloadNativeDownloadsProviderMayReturnASystemDirectoryAlias() throws {
+    let downloads = try downloadDirectory()
+    let alias = directory.appendingPathComponent("system-downloads-alias")
+    try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: downloads)
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: { alias })
+    // A native system-directory URL may be a container alias. Only that
+    // provider is canonicalized; a Dart hint or selected link is not authority.
+    XCTAssertEqual(try store.resolve(), downloads.appendingPathComponent("fanqie", isDirectory: true))
+    XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: downloads.path), ["fanqie"])
+  }
+
+  func testDownloadNativeBookmarksRoundTripWithoutPickerOrUserDirectories() throws {
+    let downloads = try downloadDirectory()
+    let selected = try downloadDirectory("selected-real-bookmark")
+    let secondRoot = try downloadDirectory("selected-second-real-bookmark")
+    let defaults = try downloadDefaults()
+    let original = selected.appendingPathComponent("book.txt")
+    let bytes = Data("native scoped bookmark original".utf8)
+    try bytes.write(to: original)
+    let secondFile = secondRoot.appendingPathComponent("book.txt")
+    let secondBytes = Data("other original, not a replacement".utf8)
+    try secondBytes.write(to: secondFile)
+    // Construct scoped fixture URLs with Foundation over directories already
+    // owned by this sandbox, rather than opening a real NSOpenPanel. Plain
+    // file URLs do not themselves carry the panel's security-scope token.
+    let nativeBookmarks = ReaderSecurityScopedDownloadBookmarks()
+    let firstGrant = try nativeBookmarks.resolve(nativeBookmarks.create(for: selected))
+    let secondGrant = try nativeBookmarks.resolve(nativeBookmarks.create(for: secondRoot))
+    XCTAssertFalse(firstGrant.isStale)
+    XCTAssertFalse(secondGrant.isStale)
+    let first = ReaderDownloadDirectoryStore(defaults: defaults, downloadsDirectory: { downloads })
+    _ = try first.remember(firstGrant.directory)
+    _ = try first.remember(secondGrant.directory)
+    let restarted = ReaderDownloadDirectoryStore(
+      defaults: defaults, downloadsDirectory: { downloads })
+    XCTAssertEqual(try restarted.resolve(), secondRoot)
+    let checked = try restarted.check(filePath: original.path)
+    XCTAssertTrue(checked.exists)
+    XCTAssertEqual(checked.path, original.path)
+    XCTAssertEqual(checked.size, Int64(bytes.count))
+    let secondChecked = try restarted.check(filePath: secondFile.path)
+    XCTAssertTrue(secondChecked.exists)
+    XCTAssertEqual(secondChecked.path, secondFile.path)
+    XCTAssertEqual(secondChecked.size, Int64(secondBytes.count))
+    XCTAssertEqual(try Data(contentsOf: original), bytes)
+    XCTAssertEqual(try Data(contentsOf: secondFile), secondBytes)
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: downloads.appendingPathComponent("fanqie").path))
+  }
+
+  func testDownloadRestartRetainsTwoScopedRootsAndOriginalIdentities() throws {
+    let downloads = try downloadDirectory()
+    let firstRoot = try downloadDirectory("selected-first")
+    let secondRoot = try downloadDirectory("selected-second")
+    let defaults = try downloadDefaults()
+    let access = DownloadBookmarkFixture()
+    let firstFile = firstRoot.appendingPathComponent("same.txt")
+    let secondFile = secondRoot.appendingPathComponent("same.txt")
+    try Data("first original".utf8).write(to: firstFile)
+    try Data("second original".utf8).write(to: secondFile)
+    let store = ReaderDownloadDirectoryStore(
+      defaults: defaults, downloadsDirectory: { downloads }, bookmarks: access)
+    _ = try store.remember(firstRoot)
+    _ = try store.remember(secondRoot)
+    let restarted = ReaderDownloadDirectoryStore(
+      defaults: defaults, downloadsDirectory: { downloads }, bookmarks: access)
+    XCTAssertEqual(try restarted.resolve(), secondRoot)
+    for (path, size) in [(firstFile.path, 14), (secondFile.path, 15)] {
+      let checked = try restarted.check(filePath: path)
+      XCTAssertEqual(checked.path, path)
+      XCTAssertEqual(checked.size, Int64(size))
+      XCTAssertTrue(checked.exists)
+    }
+    XCTAssertEqual(try Data(contentsOf: firstFile), Data("first original".utf8))
+    XCTAssertEqual(try Data(contentsOf: secondFile), Data("second original".utf8))
+    XCTAssertEqual(access.starts, access.stops)
+    XCTAssertTrue(access.starts.contains(firstRoot))
+    XCTAssertTrue(access.starts.contains(secondRoot))
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: downloads.appendingPathComponent("fanqie").path))
+  }
+
+  func testDownloadStaleCorruptRevokedOrMovedAuthorityDoesNotFallBack() throws {
+    let downloads = try downloadDirectory()
+    let selected = try downloadDirectory("selected")
+    let defaults = try downloadDefaults()
+    let access = DownloadBookmarkFixture()
+    let store = ReaderDownloadDirectoryStore(
+      defaults: defaults, downloadsDirectory: { downloads }, bookmarks: access)
+    _ = try store.remember(selected)
+    access.stale.insert(selected.path)
+    XCTAssertThrowsError(try store.resolve()) {
+      XCTAssertEqual($0 as? ReaderDownloadError, .authorityExpired)
+    }
+    access.stale.removeAll()
+    access.denied.insert(selected.path)
+    XCTAssertThrowsError(try store.resolve()) {
+      XCTAssertEqual($0 as? ReaderDownloadError, .authorityDenied)
+    }
+    access.denied.removeAll()
+    access.moved[selected.path] = downloads
+    XCTAssertThrowsError(try store.resolve())
+    access.moved.removeAll()
+    defaults.set(Data("corrupt stored authorization".utf8),
+      forKey: ReaderDownloadDirectoryStore.preferencesKey)
+    XCTAssertThrowsError(try store.resolve())
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: downloads.appendingPathComponent("fanqie").path))
+    // Explicit selection repairs corrupt state; a resolver never repairs it implicitly.
+    XCTAssertEqual(try store.remember(selected), selected)
+    XCTAssertEqual(try store.resolve(), selected)
+  }
+
+  func testDownloadOldStaleBookmarkCannotBorrowTheCurrentRootsSameName() throws {
+    let downloads = try downloadDirectory()
+    let firstRoot = try downloadDirectory("old-root")
+    let secondRoot = try downloadDirectory("current-root")
+    let defaults = try downloadDefaults()
+    let access = DownloadBookmarkFixture()
+    let store = ReaderDownloadDirectoryStore(
+      defaults: defaults, downloadsDirectory: { downloads }, bookmarks: access)
+    _ = try store.remember(firstRoot)
+    _ = try store.remember(secondRoot)
+    try Data("old".utf8).write(to: firstRoot.appendingPathComponent("book.txt"))
+    try Data("new".utf8).write(to: secondRoot.appendingPathComponent("book.txt"))
+    access.stale.insert(firstRoot.path)
+    let restarted = ReaderDownloadDirectoryStore(
+      defaults: defaults, downloadsDirectory: { downloads }, bookmarks: access)
+    XCTAssertThrowsError(try restarted.check(
+      filePath: firstRoot.appendingPathComponent("book.txt").path))
+    XCTAssertTrue(try restarted.check(
+      filePath: secondRoot.appendingPathComponent("book.txt").path).exists)
+    XCTAssertEqual(access.starts, access.stops)
+  }
+
+  func testDownloadMissingSelectedDirectoryIsNotRecreated() throws {
+    let downloads = try downloadDirectory()
+    let selected = try downloadDirectory("removed-selection")
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: { downloads },
+      bookmarks: DownloadBookmarkFixture())
+    _ = try store.remember(selected)
+    try FileManager.default.removeItem(at: selected)
+    XCTAssertThrowsError(try store.resolve())
+    XCTAssertFalse(FileManager.default.fileExists(atPath: selected.path))
+    XCTAssertFalse(FileManager.default.fileExists(
+      atPath: downloads.appendingPathComponent("fanqie").path))
+  }
+
+  func testDownloadHistoryRejectsForeignEscapingLinksAndUnverifiedURIs() throws {
+    let downloads = try downloadDirectory()
+    let selected = try downloadDirectory("history-root")
+    let foreign = try downloadDirectory("history-root-other")
+    let access = DownloadBookmarkFixture()
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: { downloads }, bookmarks: access)
+    _ = try store.remember(selected)
+    let owned = selected.appendingPathComponent("book.txt")
+    try Data("owned original".utf8).write(to: owned)
+    let other = foreign.appendingPathComponent("book.txt")
+    try Data("same name is not authorization".utf8).write(to: other)
+    let outsideDefault = downloads.appendingPathComponent("book.txt")
+    try Data("Downloads entitlement is not a general check API".utf8).write(to: outsideDefault)
+    let link = selected.appendingPathComponent("link.txt")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: other)
+    for path in [other.path, outsideDefault.path, link.path, "relative/book.txt",
+      selected.path + "/../history-root-other/book.txt", "content://media/downloads/17"] {
+      XCTAssertThrowsError(try store.check(filePath: path), path)
+    }
+    for uri in ["content://media/downloads/17", "file://" + owned.path] {
+      XCTAssertThrowsError(try store.check(filePath: owned.path, contentUri: uri))
+    }
+    let empty = selected.appendingPathComponent("empty.txt")
+    try Data().write(to: empty)
+    XCTAssertFalse(try store.check(filePath: empty.path).exists)
+    XCTAssertFalse(try store.check(
+      filePath: selected.appendingPathComponent("absent.txt").path).exists)
+    XCTAssertEqual(try Data(contentsOf: owned), Data("owned original".utf8))
+    XCTAssertEqual(access.starts, access.stops)
+  }
+
+  func testDownloadSelectedAndDefaultSymlinkRootsAreRejected() throws {
+    let downloads = try downloadDirectory()
+    let selected = try downloadDirectory("real-root")
+    let link = directory.appendingPathComponent("linked-root")
+    try FileManager.default.createSymbolicLink(at: link, withDestinationURL: selected)
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: { downloads },
+      bookmarks: DownloadBookmarkFixture())
+    XCTAssertThrowsError(try store.remember(link))
+    try FileManager.default.createSymbolicLink(
+      at: downloads.appendingPathComponent("fanqie"), withDestinationURL: selected)
+    XCTAssertThrowsError(try store.resolve())
+  }
+
+  func testDownloadHandlerRunsInBackgroundAndIgnoresDartDirectory() throws {
+    let downloads = try downloadDirectory()
+    let foreign = try downloadDirectory("dart-directory-is-not-authority")
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: { downloads })
+    let writer = ReaderDownloadWriter(rename: { descriptor, staging, name in
+      XCTAssertFalse(Thread.isMainThread)
+      try ReaderDownloadWriter.renameExclusive(descriptor, staging, name)
+    })
+    let output = ReaderDownloadOutput(store: store, writer: writer)
+    let bytes = Data(repeating: 0x42, count: 131073)
+    let source = try file("background-source", bytes)
+    let finished = expectation(description: "background download commit")
+    output.commit(["id": "job-1", "sourcePath": source.path,
+      "fileName": "书.epub", "directory": foreign.path]) { value in
+        XCTAssertTrue(Thread.isMainThread)
+        let result = value as? [String: Any]
+        XCTAssertEqual(result?["status"] as? String, "saved")
+        let path = result?["path"] as? String ?? ""
+        XCTAssertEqual(path, downloads.appendingPathComponent("fanqie/书.epub").path)
+        XCTAssertEqual(try? Data(contentsOf: URL(fileURLWithPath: path)), bytes)
+        finished.fulfill()
+      }
+    wait(for: [finished], timeout: 10)
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: foreign.path).isEmpty)
+  }
+
+  func testDownloadHandlerExpiredAuthorityCannotUseDartOrDefaultFallback() throws {
+    let downloads = try downloadDirectory()
+    let selected = try downloadDirectory("expired-handler-root")
+    let access = DownloadBookmarkFixture()
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: { downloads }, bookmarks: access)
+    _ = try store.remember(selected)
+    access.stale.insert(selected.path)
+    let source = try file("expired-handler-source", Data("original bytes".utf8))
+    let output = ReaderDownloadOutput(store: store)
+    let finished = expectation(description: "expired authority fails explicitly")
+    output.commit(["id": "expired", "sourcePath": source.path,
+      "fileName": "book.txt", "directory": downloads.path]) { value in
+        let result = value as? [String: Any]
+        XCTAssertEqual(result?["status"] as? String, "failed")
+        XCTAssertTrue((result?["error"] as? String ?? "").contains("授权已过期"))
+        finished.fulfill()
+      }
+    wait(for: [finished], timeout: 10)
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: selected.path).isEmpty)
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: downloads.path).isEmpty)
+    XCTAssertEqual(try Data(contentsOf: source), Data("original bytes".utf8))
+  }
+
+  func testDownloadAndManualExportShareSerializedQueueAndQueuedCancellation() throws {
+    let downloads = try downloadDirectory()
+    let queue = ReaderExportQueue()
+    let source = try file("shared-queue-source", Data("complete original".utf8))
+    let target = directory.appendingPathComponent("manual-export.txt")
+    var selected: ((URL?) -> Void)?
+    let exporter = ReaderFileExporter(window: nil, queue: queue,
+      selectDestination: { _, completion in selected = completion })
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: { downloads })
+    let output = ReaderDownloadOutput(store: store, queue: queue)
+    let exported = expectation(description: "manual export without real panel")
+    exporter.save(["id": "manual", "filePath": source.path, "fileName": "manual.txt"]) { value in
+      XCTAssertEqual((value as? [String: Any])?["status"] as? String, "saved")
+      exported.fulfill()
+    }
+    XCTAssertNotNil(selected)
+    let cancelled = expectation(description: "queued download cancelled")
+    output.commit(["id": "queued", "sourcePath": source.path, "fileName": "book.txt"]) { value in
+      XCTAssertTrue(Thread.isMainThread)
+      XCTAssertEqual((value as? [String: Any])?["status"] as? String, "cancelled")
+      cancelled.fulfill()
+    }
+    queue.cancel("unrelated")
+    queue.cancel("queued")
+    selected?(target)
+    wait(for: [exported, cancelled], timeout: 10)
+    XCTAssertEqual(try Data(contentsOf: target), Data("complete original".utf8))
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: downloads.path).isEmpty)
+  }
+
+  func testDownloadQueueCancellationDuringCopyUsesSharedToken() throws {
+    let output = try downloadDirectory()
+    let queue = ReaderExportQueue()
+    let source = try file("shared-copy-source", Data(repeating: 0x61, count: 200000))
+    let cancelled = expectation(description: "shared cancellation while copying")
+    queue.enqueue(id: "copy", result: { value in
+      XCTAssertEqual((value as? [String: Any])?["status"] as? String, "cancelled")
+      cancelled.fulfill()
+    }) { request, finish in
+      queue.perform({
+        var checks = 0
+        do {
+          _ = try ReaderDownloadWriter().commit(
+            source, named: "book.txt", in: output, check: {
+              checks += 1
+              if checks == 3 { DispatchQueue.main.sync { queue.cancel("copy") } }
+              try request.check()
+            }, publish: { try request.publish($0) })
+          return ["status": "saved"]
+        } catch {
+          XCTAssertEqual(error as? ReaderFileError, .cancelled)
+          return ["status": "cancelled"]
+        }
+      }, completion: finish)
+    }
+    wait(for: [cancelled], timeout: 10)
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: output.path).isEmpty)
+  }
+
+  func testDownloadHandlerKeepsSavedResultWhenCancelArrivesBeforeReply() throws {
+    let downloads = try downloadDirectory()
+    let queue = ReaderExportQueue()
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: { downloads })
+    var cancellationDelivered = false
+    let writer = ReaderDownloadWriter(rename: { descriptor, staging, name in
+      try ReaderDownloadWriter.renameExclusive(descriptor, staging, name)
+      DispatchQueue.main.async {
+        queue.cancel("committed")
+        cancellationDelivered = true
+      }
+    })
+    let output = ReaderDownloadOutput(store: store, queue: queue, writer: writer)
+    let source = try file("native-committed-source", Data("complete original".utf8))
+    let finished = expectation(description: "committed success before reply")
+    output.commit(["id": "committed", "sourcePath": source.path, "fileName": "book.txt"]) { value in
+      XCTAssertTrue(cancellationDelivered)
+      let result = value as? [String: Any]
+      XCTAssertEqual(result?["status"] as? String, "saved")
+      let path = result?["path"] as? String ?? ""
+      XCTAssertEqual(try? Data(contentsOf: URL(fileURLWithPath: path)), Data("complete original".utf8))
+      finished.fulfill()
+    }
+    wait(for: [finished], timeout: 10)
+  }
+
+  func testDownloadActiveCancellationBeforeCopyReturnsCancelled() throws {
+    let downloads = try downloadDirectory()
+    let resolving = expectation(description: "active worker resolving directory")
+    let release = DispatchSemaphore(value: 0)
+    let queue = ReaderExportQueue()
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: {
+        XCTAssertFalse(Thread.isMainThread)
+        resolving.fulfill()
+        XCTAssertEqual(release.wait(timeout: .now() + 10), .success)
+        return downloads
+      })
+    let output = ReaderDownloadOutput(store: store, queue: queue)
+    let source = try file("active-cancel-source", Data("must survive".utf8))
+    let finished = expectation(description: "active cancellation")
+    output.commit(["id": "active-cancel", "sourcePath": source.path,
+      "fileName": "book.txt"]) { value in
+        XCTAssertEqual((value as? [String: Any])?["status"] as? String, "cancelled")
+        finished.fulfill()
+      }
+    wait(for: [resolving], timeout: 10)
+    queue.cancel("active-cancel")
+    release.signal()
+    wait(for: [finished], timeout: 10)
+    let outputRoot = downloads.appendingPathComponent("fanqie")
+    if FileManager.default.fileExists(atPath: outputRoot.path) {
+      XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: outputRoot.path).isEmpty)
+    }
+    XCTAssertEqual(try Data(contentsOf: source), Data("must survive".utf8))
+  }
+
+  func testDownloadQueueRejectsDuplicateIDsAndForgetsFinishedCancellation() throws {
+    let queue = ReaderExportQueue()
+    var firstFinish: ReaderExportQueue.Completion?
+    let first = expectation(description: "cancelled first request")
+    queue.enqueue(id: "reused", result: { value in
+      XCTAssertEqual((value as? [String: Any])?["status"] as? String, "cancelled")
+      first.fulfill()
+    }) { request, finish in
+      firstFinish = finish
+      request.onCancel = {
+        XCTAssertThrowsError(try request.check()) {
+          XCTAssertEqual($0 as? ReaderFileError, .cancelled)
+        }
+      }
+    }
+    let duplicate = expectation(description: "duplicate ID rejected")
+    queue.enqueue(id: "reused", result: { value in
+      XCTAssertEqual((value as? [String: Any])?["status"] as? String, "failed")
+      duplicate.fulfill()
+    }) { _, _ in XCTFail("A duplicate ID must not start") }
+    queue.cancel("reused")
+    firstFinish?(["status": "cancelled"])
+    let resumed = expectation(description: "fresh request ID may resume")
+    queue.enqueue(id: "reused", result: { value in
+      XCTAssertEqual((value as? [String: Any])?["status"] as? String, "saved")
+      resumed.fulfill()
+    }) { request, finish in
+      XCTAssertNoThrow(try request.check())
+      finish(["status": "saved"])
+    }
+    queue.cancel("already-finished")
+    wait(for: [first, duplicate, resumed], timeout: 3)
+  }
+
+  func testDownloadNativeMetadataHandlerFailsClosedForMalformedOrForeignRequests() throws {
+    let downloads = try downloadDirectory()
+    let store = ReaderDownloadDirectoryStore(
+      defaults: try downloadDefaults(), downloadsDirectory: { downloads })
+    let output = ReaderDownloadOutput(store: store)
+    let foreign = try file("foreign-history.txt", Data("not downloaded here".utf8))
+    let requests: [[String: Any]] = [
+      [:], ["filePath": 42], ["filePath": foreign.path, "contentUri": ""],
+      ["filePath": foreign.path, "contentUri": "content://unverified/17"],
+      ["filePath": foreign.path, "contentUri": 42],
+    ]
+    let finished = expectation(description: "invalid native metadata requests")
+    finished.expectedFulfillmentCount = requests.count
+    for args in requests {
+      output.checkFile(args) { value in
+        XCTAssertTrue(Thread.isMainThread)
+        let result = value as? [String: Any]
+        XCTAssertEqual(result?["exists"] as? Bool, false)
+        XCTAssertEqual((result?["size"] as? NSNumber)?.intValue, 0)
+        finished.fulfill()
+      }
+    }
+    wait(for: [finished], timeout: 10)
+    XCTAssertEqual(try Data(contentsOf: foreign), Data("not downloaded here".utf8))
+    XCTAssertTrue(try FileManager.default.contentsOfDirectory(atPath: downloads.path).isEmpty)
+  }
+
   func testUnknownBatteryIsNotAFabricatedPercentage() {
     let level = ReaderNativePlatform.batteryLevel()
     XCTAssertTrue(level == -1 || (0...100).contains(level))
@@ -317,5 +949,60 @@ final class RunnerTests: XCTestCase {
     wait(for: [expired], timeout: 3)
     XCTAssertEqual(calls, 1)
     playback.release()
+  }
+}
+
+/// Deterministic stale/denied/moved bookmark fixtures. Real bookmark creation
+/// and restoration are also exercised above, exclusively in our temporary root.
+private final class DownloadBookmarkFixture: ReaderDownloadBookmarkAccess {
+  var stale = Set<String>()
+  var denied = Set<String>()
+  var moved = [String: URL]()
+  var starts = [URL]()
+  var stops = [URL]()
+
+  func create(for directory: URL) throws -> Data { Data(directory.path.utf8) }
+
+  func resolve(_ data: Data) throws -> ReaderResolvedDownloadBookmark {
+    guard let path = String(data: data, encoding: .utf8), path.hasPrefix("/") else {
+      throw ReaderDownloadError.invalidBookmark
+    }
+    return ReaderResolvedDownloadBookmark(
+      directory: moved[path] ?? URL(fileURLWithPath: path, isDirectory: true),
+      isStale: stale.contains(path))
+  }
+
+  func start(_ directory: URL) -> Bool {
+    guard !denied.contains(directory.path) else { return false }
+    starts.append(directory)
+    return true
+  }
+
+  func stop(_ directory: URL) { stops.append(directory) }
+}
+
+private final class DownloadRaceResults {
+  private let lock = NSLock()
+  private var saved = [(URL, Data)]()
+  private var failures = [Error]()
+  var files: [(URL, Data)] {
+    lock.lock()
+    defer { lock.unlock() }
+    return saved
+  }
+  var errors: [Error] {
+    lock.lock()
+    defer { lock.unlock() }
+    return failures
+  }
+  func append(_ target: URL, bytes: Data) {
+    lock.lock()
+    defer { lock.unlock() }
+    saved.append((target, bytes))
+  }
+  func fail(_ error: Error) {
+    lock.lock()
+    defer { lock.unlock() }
+    failures.append(error)
   }
 }

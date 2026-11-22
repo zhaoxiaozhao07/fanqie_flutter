@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import '../app_theme.dart';
 import '../services/desktop_download_output.dart';
@@ -69,10 +71,10 @@ class DownloadDialog extends StatelessWidget {
             subtitle: '电子书格式，支持目录导航',
             format: 'EPUB',
           ),
-          // Windows 下载提交到固定输出目录，避免任务结束时突然弹窗
-          if (ReaderPlatform.isWindows) ...[
+          // 桌面下载提交到授权输出目录，避免任务结束时突然弹窗
+          if (ReaderPlatform.isDesktop) ...[
             const SizedBox(height: 16),
-            const _WindowsOutputDirectoryRow(),
+            const _DesktopOutputDirectoryRow(),
           ],
         ],
       ),
@@ -132,19 +134,21 @@ class DownloadDialog extends StatelessWidget {
   }
 }
 
-/// Windows 下载输出目录行：显示当前目录并可打开原生目录选择器更换。
-class _WindowsOutputDirectoryRow extends StatefulWidget {
-  const _WindowsOutputDirectoryRow();
+/// 桌面下载输出目录行：Mac 的授权与记忆由原生目录选择器持有。
+class _DesktopOutputDirectoryRow extends StatefulWidget {
+  const _DesktopOutputDirectoryRow();
 
   @override
-  State<_WindowsOutputDirectoryRow> createState() =>
-      _WindowsOutputDirectoryRowState();
+  State<_DesktopOutputDirectoryRow> createState() =>
+      _DesktopOutputDirectoryRowState();
 }
 
-class _WindowsOutputDirectoryRowState extends State<_WindowsOutputDirectoryRow> {
+class _DesktopOutputDirectoryRowState
+    extends State<_DesktopOutputDirectoryRow> {
   String? _directory;
   String? _error;
   bool _switching = false;
+  int _directoryRevision = 0;
 
   @override
   void initState() {
@@ -153,12 +157,15 @@ class _WindowsOutputDirectoryRowState extends State<_WindowsOutputDirectoryRow> 
   }
 
   Future<void> _load() async {
+    final revision = _directoryRevision;
     try {
       final directory = await DesktopDownloadOutput.resolve();
-      if (mounted) setState(() => _directory = directory);
-    } catch (_) {
-      if (mounted) {
-        setState(() => _error = '目录不可用，下载前请重新选择保存位置');
+      if (mounted && revision == _directoryRevision) {
+        setState(() => _directory = directory);
+      }
+    } catch (error) {
+      if (mounted && revision == _directoryRevision) {
+        setState(() => _error = _directoryError(error));
       }
     }
   }
@@ -169,14 +176,27 @@ class _WindowsOutputDirectoryRowState extends State<_WindowsOutputDirectoryRow> 
       final chosen = await DesktopDownloadOutput.choose();
       if (chosen != null && mounted) {
         setState(() {
+          _directoryRevision++;
           _directory = chosen;
           _error = null;
+        });
+      }
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _directoryRevision++;
+          _error = _directoryError(error);
         });
       }
     } finally {
       if (mounted) setState(() => _switching = false);
     }
   }
+
+  String _directoryError(Object error) =>
+      ReaderPlatform.isMacOS && error is FileSystemException
+      ? error.message
+      : '目录不可用，下载前请重新选择保存位置';
 
   @override
   Widget build(BuildContext context) {
