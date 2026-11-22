@@ -107,3 +107,96 @@ checks were not weakened to make fixtures pass.
 
 Implementation and portable gates are submitted for independent review; no
 discretionary follow-up audit or CI dispatch is being started here.
+
+## Fix round 1 / 5 — incremental evidence
+
+Fix base: `2c8e7051a23ffecaa1a9dc5a78f9a5d716924b88`.
+Implementation commit: **`b96bbf7b0400643969d3090c27035c721f3058ae`** `[skip ci]`;
+this append is a following report-only commit. The earlier internal-only
+interface disposition above describes 2c8e705, **not the restored current
+manual compatibility route**. Final review/CI should use the returned HEAD.
+
+### Findings fixed
+
+- **I1:** `snapshot_bundle` now raises `ValidationError` through `os.walk`
+  `onerror`. A real extra fixture directory/file and one injected PermissionError
+  at that actual scandir boundary prove bundle validation, snapshot creation and
+  comparison fail instead of accepting an omitted file. Valid framework links
+  and containment checks remain.
+- **I2:** explicit `package_macos.sh APP release OUT` dispatches only to new
+  `scripts/package_macos_release.sh`, with required Developer ID identity/notary
+  profile. Preserves leaf → nested → app signing, app ZIP notarization/stapling/
+  Gatekeeper, then private DMG signing/notarization/stapling/Gatekeeper, read-only
+  formal bundle/snapshot verification and exclusive two-file publication.
+  Filename is `fanqie-v3.3.6-342-macos-arm64.dmg`; no ad-hoc build-info or internal
+  context is read/generated. Internal CI/provenance remains unchanged and cannot
+  choose formal mode or fall back automatically. Enumeration producers in the
+  helper run fail-closed into private lists before signing consumers.
+- **I3 precise diagnosis:** reproduced the named test without parallel Flutter,
+  retaining 25s: first call exit 37 at 12.235s, second call `TimeoutExpired` at
+  **25.031s**. Captured stdout/stderr show both verifier passes reached 20
+  “Mach-O” components, tampered snapshot was rejected, fake detach returned and
+  mounted cleanup completed. Last boundary was package EXIT-trap private
+  `rm -rf`, at the elapsed deadline—not evidence of a persistent bridge/mount
+  deadlock. The faulty `file` double classified all 17 resource/plist files as
+  native code as well as the three actual fixture code files: two ~10s verifier
+  passes, 40 lipo calls and 53 native Python executions (30 path conversions).
+  Fixed only that classification; the real verifier now reports three components,
+  protected by a RED→GREEN output assertion. Same diagnostic entry afterward:
+  calls **6.969s / 13.062s**, exits 37/1, two three-component passes and 19 Python
+  executions. The runner watchdog remains exactly 25s; no skip, deadline increase
+  or success-on-timeout. No process-ownership mechanism changed. No legacy Task 4
+  process was inspected/killed by this worker or used to explain this failure.
+- **M1:** DMG root/Applications/notice checks and native minimum-OS rejection now
+  use explicit runtime failures. Four optimized-Python cases reproduce the former
+  bypasses and now fail correctly, including native minos 13.0.
+- **M2 evidence annotation only:** original/fresh 955/11 suite success includes
+  inherited injected download-error and headless MissingPluginException
+  diagnostics; it is not “pristine output” or native-plugin acceptance. No reader/
+  network behavior or diagnostic suppression changed.
+
+### Incremental RED/GREEN and logs
+
+Same Python/BASH_EXECUTABLE/environment and log directory as above. No Flutter
+process ran alongside these focused/covering runs.
+
+| Command suffix after `python scripts/test_macos_package.py` | Result | Log |
+|---|---|---|
+| `ShellPipelineTests.test_native_verifier_rejects_wrong_arch_and_broad_internal_permissions` with new count check, before classifier fix | RED: expected 3, actual 20 | `timeout-classification-red.log` |
+| Above plus `ShellPipelineTests.test_tampered_mounted_app_and_create_failure_publish_nothing` | GREEN: 2 | `timeout-classification-green.log` |
+| `ValidationTests.test_real_directory_scan_error_cannot_bless_partial_snapshot` | RED: incomplete tree accepted; GREEN after onerror | `round1-i1-{red,green}.log` |
+| Four `test_optimized_python_still_rejects_*` cases | RED: 4; GREEN: 4 | `round1-m1-{red,green}.log` |
+| Three explicit-formal credential/success/failure cases | RED: 6 failing subcases before route restoration | `round1-i2-red.log` |
+| `ShellPipelineTests.test_explicit_release_runs_formal_gates_and_never_replaces_outputs` | GREEN: 1, including repeated publication | `round1-i2-formal-success-green.log` |
+| No suffix: complete package suite | **GREEN: 26, 131.665s, exit 0** | `round1-package-green.log` |
+
+Diagnostic runner: `.dart_tool/codex-macos-followup/task-5/diagnose-package-timeout.py`;
+baseline success/timeout are in `timeout-diagnostic-run{1,2}.log`, with captured
+`timeout-diagnostic-2-2.{json,stdout.log,stderr.log}`. Fixed trace/timing/output:
+`timeout-diagnostic-fix1.log` and `timeout-diagnostic-fix1-{1,2}.*`.
+Controller's `final-controller-test_macos_package.log` and
+`final-controller-package-isolated.log` remain untouched, visible failures.
+Formal fixture development also exposed unavailable Cygwin `shasum` and native
+Python text stdout CRLF. Its controlled replacement hashes actual FS bytes with
+stdlib Python and emits binary LF, not a canned digest; production checksum/
+no-clobber checks were not relaxed (`round1-i2-checksum-adapter-red.log`).
+
+Additional covering commands:
+
+- `python scripts/test_macos_reader_performance_pipeline.py`: **6 / 42.119s**,
+  exit 0, all owned app/helpers dead; `round1-lifecycle-green.log`.
+- `python scripts/test_macos_native_pipeline.py`: **19 / 15.184s**, exit 0;
+  `round1-native-pipeline-green.log`.
+- All shell scripts through CRLF-normalized `/bin/bash -n`: exit 0,
+  `round1-shell-syntax.log`; actionlint `-shellcheck=` on unchanged macOS CI:
+  exit 0, `round1-actionlint.log`; staged `git diff --check`: exit 0,
+  `round1-diff-check.log`.
+- No Dart/Swift/dependency changes; per controller instruction, no redundant
+  full Flutter rerun. Its fresh **955 passed / 11 opt-in skips + clean analyze**
+  remains source-applicable, not proof of native/platform/physical acceptance.
+
+Round 1 scoped implementation and portable gates converge and are submitted for
+independent review. No credentials, network/CI/push/PR/merge or real user-data
+operations occurred. Actual hosted Mac native/platform/seven-scenario AOT,
+mounted final DMG/download, stock Bash 3.2 execution and physical gates remain
+controller-owned; no formal certificate/notarization success is claimed.
