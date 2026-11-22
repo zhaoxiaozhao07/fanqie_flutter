@@ -1,14 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Self-use only. No Developer ID/notarization fallback or formal-release claim.
+# Internal self-use by default. Formal signing is explicit manual selection,
+# never an automatic fallback or part of the self-use provenance/CI flow.
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 APP="${1:-$ROOT/build/macos/Build/Products/Release/FanqieReader.app}"
 MODE="${2:-internal}"
 OUT="${3:-$ROOT/build/macos/distribution}"
 VALIDATOR="$ROOT/scripts/macos_release_validation.py"
 [[ "$(uname -m)" == arm64 ]] || { echo 'Apple Silicon is required' >&2; exit 2; }
-[[ "$MODE" == internal ]] || { echo 'This verified packager supports self-use internal mode only; no signing fallback.' >&2; exit 2; }
+[[ "$MODE" == internal || "$MODE" == release ]] || exit 2
 [[ "$(awk '/^version:/{print $2}' "$ROOT/pubspec.yaml")" == 3.3.6+342 ]]
+if [[ "$MODE" == release ]]; then
+  exec "$ROOT/scripts/package_macos_release.sh" "$APP" "$OUT"
+fi
 : "${MACOS_RELEASE_CONTEXT:?Verified SDK/source/run/native-test context is required}"
 python3 "$VALIDATOR" bundle "$APP"
 python3 "$VALIDATOR" check-output "$OUT"

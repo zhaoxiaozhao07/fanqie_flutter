@@ -8,9 +8,12 @@
   versioned framework 资源/字体/ICU/NativeAssetsManifest.json（真实空 mapping 合法）、
   非空数据根（charset 是 list，其余三个为 dict）、链接 containment、
   文件快照、附件摘要/大小与完整 trigger/SDK 来源。
-- `scripts/package_macos.sh` 仅 self-use internal：签名后快照 → 私有 DMG
+- `scripts/package_macos.sh` 默认 self-use internal：签名后快照 → 私有 DMG
   （无 `-ov`）→ `scripts/verify_macos_dmg.sh` 只读挂载独立原生/资源验证和快照比较
   → 专属创建的 DMG、同名 SHA-256、build-info.json，无覆盖旧输出。
+  显式 `release` 手工兼容转交独立 helper，必须 Developer ID/notary profile、
+  native formal gates，输出独立的 formal DMG/校验文件，无 ad-hoc provenance
+  或自动 fallback；自用 CI 永远不进入此路径。
 - Task 1 XCTest 仍是必需 gate；CI 新增 portable package 与 Task 4 六项生命周期
   fixture。生命周期 read timeout 改为整数以兼容 `/bin/bash` 3.2，不依赖 Homebrew Bash。
 - 控制端审查最终提交后可请求 `publish=false/full_platform=true/reader_aot=true`

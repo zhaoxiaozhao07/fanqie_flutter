@@ -9,8 +9,9 @@ Actions”的决定由本次授权替代。正式 Developer ID / Apple 公证仍
 - 当前构建固定 Flutter `3.47.9` / Dart `3.13.7`，版本 `3.3.6+342`，
   最低构建目标 macOS `12.0` / `arm64`，生产入口 `lib/main.dart`，**Release AOT**。
 - 打包使用 `scripts/package_macos.sh … internal …`：临时 ad-hoc 签名，
-  不是 Debug，也不是 Developer ID 正式签名。当前来源校验打包器仅支持
-  `internal`，拒绝 `release`；不提供 Developer ID / 公证回退。
+  不是 Debug，也不是 Developer ID 正式签名。自用 CI 固定 `internal`；
+  `package_macos.sh APP release OUT` 仅保留显式手工兼容，必须提供 Developer ID
+  身份及 notary profile，绝不自动回退或接入自用 CI。
 - 只有发布任务声明 `contents: write`，使用 GitHub 自动提供的
   `GITHUB_TOKEN`，不使用仓库里现有的 `TOKEN` 或 Android 签名 secrets。
   构建任务保持只读权限，无需新增 Environment。
@@ -102,6 +103,19 @@ Linux 发布端先独立校验下载附件的精确文件集合、摘要、大�
 再拒绝已存在的独立 tag；仍 `--prerelease --latest=false`、仅 main 可公开发布。
 上传后重新读取远端 tag SHA、附件大小/digest，并下载全部附件核对实际 bytes。
 校验失败不会宣称发布成功，也不删除/改写远端已有资源。
+
+### 显式手工 formal 模式（非自用 CI）
+
+`scripts/package_macos.sh APP release OUT` 转交独立
+`scripts/package_macos_release.sh`。必须由操作者显式配置
+`MACOS_SIGN_IDENTITY`（`Developer ID Application:` 身份）和
+`MACOS_NOTARY_PROFILE`；无身份/profile 或任一 native gate 失败即终止，
+不选择 ad-hoc、不读取或生成自用 `build-info.json`。
+保留叶子 Mach-O → 嵌套组件 → 主 app 签名、app ZIP 公证/装订/执行评估，
+再私有 DMG 签名/公证/装订/打开评估、只读挂载的 formal bundle/快照验证。
+输出仅为 build-qualified `fanqie-v3.3.6-342-macos-arm64.dmg` 和同名 `.sha256`，
+也采用独占创建/no-clobber。本文/本轮受控 fixtures 不代表实际证书、公证、
+Gatekeeper 或正式发布验收；不在本轮运行实际凭据操作或 formal 发布。
 
 验证日志另存 Actions Artifact，保留 14 天。仓库公开，因此 GitHub Release
 附件也公开；只上传构建产物，不包含本机的阅读数据、字体导入、Keychain

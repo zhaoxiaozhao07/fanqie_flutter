@@ -19,6 +19,7 @@ import sys
 VERSION = "3.3.6+342"
 BUILD = "342"
 NAME = "fanqie-v3.3.6-342-macos-arm64-internal.dmg"
+FORMAL_NAME = "fanqie-v3.3.6-342-macos-arm64.dmg"
 ASSETS = "Contents/Frameworks/App.framework/Resources/flutter_assets"
 ICU = "Contents/Frameworks/FlutterMacOS.framework/Resources/icudtl.dat"
 FONTS = {
@@ -178,8 +179,11 @@ def validate_bundle(app):
 def snapshot_bundle(app):
     app = Path(app)
     require(app.is_dir() and not app.is_symlink(), "Expected real snapshot root")
+    def fail_scan(error):
+        raise ValidationError(f"Cannot scan bundle directory {error.filename}: {error}") from error
+
     snapshot = {}
-    for parent, dirs, files in os.walk(app, followlinks=False):
+    for parent, dirs, files in os.walk(app, followlinks=False, onerror=fail_scan):
         for name in sorted(dirs + files):
             path = Path(parent) / name
             key = path.relative_to(app).as_posix()
@@ -343,31 +347,64 @@ def validate_artifacts(directory, trigger):
     return info
 
 
-def check_output(output):
+def output_names(mode):
+    if mode == "internal":
+        return (NAME, f"{NAME}.sha256", "build-info.json")
+    require(mode == "release", "Unknown packaging mode")
+    return (FORMAL_NAME, f"{FORMAL_NAME}.sha256")
+
+
+def validate_formal_artifacts(directory):
+    """Byte/checksum checks only; formal native gates are owned by the shell.
+
+    Deliberately no ad-hoc build-info schema or CI trigger inference in this
+    explicitly selected manual mode.
+    """
+    directory = Path(directory)
+    require(directory.is_dir() and not directory.is_symlink(), "Invalid formal artifact directory")
+    names = output_names("release")
+    require({p.name for p in directory.iterdir()} == set(names), "Missing/extra formal artifact files")
+    for name in names:
+        path = directory / name
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size > 0,
+                f"Invalid formal artifact file: {name}")
+    expected = f"{digest(directory / FORMAL_NAME)}  {FORMAL_NAME}\n".encode()
+    require((directory / f"{FORMAL_NAME}.sha256").read_bytes() == expected,
+            "Invalid formal checksum content/path")
+
+
+def check_output(output, mode="internal"):
     output = Path(output)
     require(not output.is_symlink(), "Refusing symlink output directory")
-    for name in (NAME, f"{NAME}.sha256", "build-info.json"):
+    for name in output_names(mode):
         if os.path.lexists(output / name):
             raise FileExistsError(f"Refusing existing output: {output / name}")
 
 
-def publish_local_verified_artifacts(stage, output):
+def publish_local_verified_artifacts(stage, output, mode="internal"):
     stage, output = Path(stage), Path(output)
-    info = read_json(stage / "build-info.json")
-    validate_artifacts(stage, info)
-    check_output(output)
+    names = output_names(mode)
+    if mode == "internal":
+        info = read_json(stage / "build-info.json")
+        validate_artifacts(stage, info)
+    else:
+        validate_formal_artifacts(stage)
+    check_output(output, mode)
     output.mkdir(parents=True, exist_ok=True)
     # Exclusive file creation, never replace. On failure remove only files this
     # call actually created, not a concurrent publisher's or old artifacts.
     owned = []
     try:
-        for name in (NAME, f"{NAME}.sha256", "build-info.json"):
+        for name in names:
             dest = output / name
             with dest.open("xb") as target:
                 owned.append(dest)
                 with (stage / name).open("rb") as source:
                     shutil.copyfileobj(source, target)
-        validate_artifacts(output, info)
+        if mode == "internal":
+            validate_artifacts(output, info)
+        else:
+            validate_formal_artifacts(output)
     except BaseException:
         for path in owned:
             path.unlink()
@@ -423,6 +460,8 @@ def main():
         p.add_argument("path", type=Path)
         if name in ("snapshot", "compare", "publish-local"):
             p.add_argument("other", type=Path)
+        if name in ("check-output", "publish-local"):
+            p.add_argument("--mode", choices=("internal", "release"), default="internal")
     p = sub.add_parser("create")
     p.add_argument("stage", type=Path)
     p.add_argument("--snapshot", type=Path, required=True)
@@ -452,9 +491,9 @@ def main():
     elif args.command == "create":
         create_artifacts(args.stage, read_json(args.snapshot), read_json(args.context))
     elif args.command == "check-output":
-        check_output(args.path)
+        check_output(args.path, args.mode)
     elif args.command == "publish-local":
-        publish_local_verified_artifacts(args.path, args.other)
+        publish_local_verified_artifacts(args.path, args.other, args.mode)
     elif args.command == "artifacts":
         validate_artifacts(args.path, environment_trigger())
     elif args.command == "context":

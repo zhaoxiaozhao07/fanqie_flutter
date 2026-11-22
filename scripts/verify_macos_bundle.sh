@@ -19,9 +19,11 @@ while IFS= read -r -d '' binary; do
     fi
     python3 - "$minimum" <<'PY'
 import sys
-assert sys.argv[1], 'Missing minimum OS load command'
+if not sys.argv[1]:
+    sys.exit('Missing minimum OS load command')
 version = tuple(int(p) for p in sys.argv[1].split('.'))
-assert version[:2] <= (12, 0), f'Native component requires macOS {sys.argv[1]}'
+if version[:2] > (12, 0):
+    sys.exit(f'Native component requires macOS {sys.argv[1]}')
 PY
     codesign --verify --strict "$binary"
     if [[ "$MODE" == release ]]; then

@@ -16,6 +16,7 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 try:
     import macos_release_validation as v
@@ -24,6 +25,7 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parents[1]
 NAME = "fanqie-v3.3.6-342-macos-arm64-internal.dmg"
+FORMAL_NAME = "fanqie-v3.3.6-342-macos-arm64.dmg"
 ASSETS = "Contents/Frameworks/App.framework/Versions/A/Resources/flutter_assets"
 ICU = "Contents/Frameworks/FlutterMacOS.framework/Versions/A/Resources/icudtl.dat"
 FONT_MANIFEST = [
@@ -214,6 +216,30 @@ class ValidationTests(BundleFixture, unittest.TestCase):
         with self.assertRaises(v.ValidationError):
             v.compare_snapshot(self.app, {**snap, "../outside": {"type": "file"}})
 
+    def test_real_directory_scan_error_cannot_bless_partial_snapshot(self):
+        directory = self.app / "Contents/extra-real-content"
+        write(directory / "must-not-be-omitted.txt", b"real fixture bytes")
+        expected = v.snapshot_bundle(self.app)
+        self.assertIn("Contents/extra-real-content/must-not-be-omitted.txt", expected)
+        scandir = os.scandir
+        for operation in (lambda: v.validate_bundle(self.app),
+                          lambda: v.snapshot_bundle(self.app),
+                          lambda: v.compare_snapshot(self.app, expected)):
+            injected = False
+
+            def scan(path):
+                nonlocal injected
+                if Path(path) == directory and not injected:
+                    injected = True
+                    raise PermissionError(13, "single fixture scan boundary denied", str(path))
+                return scandir(path)
+
+            with mock.patch.object(v.os, "scandir", side_effect=scan):
+                with self.assertRaises(v.ValidationError):
+                    operation()
+            self.assertTrue(injected, "The real extra directory scan must be reached")
+        v.compare_snapshot(self.app, expected)
+
     def test_provenance_is_bound_to_trigger_full_version_sdk_and_snapshot(self):
         stage = self.stage()
         info = json.loads((stage / "build-info.json").read_text())
@@ -338,13 +364,17 @@ class ShellPipelineTests(BundleFixture, unittest.TestCase):
         scripts = self.checkout / "scripts"
         scripts.mkdir()
         for name in ("package_macos.sh", "verify_macos_dmg.sh",
-                     "verify_macos_bundle.sh", "macos_release_validation.py"):
+                     "verify_macos_bundle.sh", "macos_release_validation.py",
+                     "package_macos_release.sh"):
+            if name == "package_macos_release.sh" and not (ROOT / "scripts" / name).exists():
+                continue  # RED fixture for the explicitly restored route.
             path = scripts / name
             write(path, (ROOT / "scripts" / name).read_text(encoding="utf-8"))
             path.chmod(0o755)
         write(self.checkout / "pubspec.yaml", "version: 3.3.6+342\n")
         write(self.checkout / "macos/Runner/Release.entitlements", (ROOT / "macos/Runner/Release.entitlements").read_bytes())
-        self.command(scripts / "sign_macos_internal.sh", "exit 0")
+        self.command(scripts / "sign_macos_internal.sh",
+                     'printf internal > "$FIXTURE_ROOT/internal-sign-called"')
         self.shell_root = str(self.root)
         if os.name == "nt":
             self.shell_root = subprocess.check_output(
@@ -352,7 +382,8 @@ class ShellPipelineTests(BundleFixture, unittest.TestCase):
                 text=True, timeout=5).strip()
         shell_bin = f"{self.shell_root}/checkout with spaces/bin"
         self.env = os.environ.copy()
-        for key in ("BASH_ENV", "ENV", "SHELLOPTS", "CDPATH"):
+        for key in ("BASH_ENV", "ENV", "SHELLOPTS", "CDPATH",
+                    "MACOS_SIGN_IDENTITY", "MACOS_NOTARY_PROFILE"):
             self.env.pop(key, None)
         self.env.update(PATH=f"{shell_bin}:/usr/bin:/bin", TMPDIR=self.shell_root,
                         FIXTURE_ROOT=self.shell_root, FIXTURE_MOUNT_TAMPER="0",
@@ -407,9 +438,26 @@ Path(sys.argv[1]).symlink_to(Path('/Applications'), target_is_directory=True)
             self.command(self.bin / "ln",
                          '[[ "$1" == -s && "$2" == /Applications ]]; python3 "$FIXTURE_ROOT/link.py" "$3"')
         self.command(self.bin / "uname", 'echo arm64')
-        self.command(self.bin / "file", 'echo Mach-O')
+        self.command(self.bin / "file", """
+            case "$2" in
+              */Contents/MacOS/FanqieReader|*/Contents/Frameworks/App.framework/Versions/A/App|*/Contents/Frameworks/FlutterMacOS.framework/Versions/A/FlutterMacOS)
+                echo 'Mach-O 64-bit arm64';;
+              *) echo data;;
+            esac
+        """)
         self.command(self.bin / "lipo", 'echo "$FIXTURE_ARCH"')
-        self.command(self.bin / "xcrun", 'echo "minos 12.0"')
+        self.command(self.bin / "xcrun", """
+            case "$1" in
+              vtool) echo "minos ${FIXTURE_MINOS:-12.0}";;
+              notarytool)
+                [[ "$2" == submit && "$4" == --keychain-profile &&
+                   "$5" == "$MACOS_NOTARY_PROFILE" && "$6" == --wait ]] || exit 97
+                if [[ "$3" == *.zip ]]; then exit "${FIXTURE_NOTARY_APP_EXIT:-0}"
+                else exit "${FIXTURE_NOTARY_DMG_EXIT:-0}"; fi;;
+              stapler) exit "${FIXTURE_STAPLER_EXIT:-0}";;
+              *) exit 96;;
+            esac
+        """, record=True)
         entitlements = plistlib.loads((ROOT / "macos/Runner/Release.entitlements").read_bytes())
         write(self.root / "permissions-0.plist", plistlib.dumps(entitlements))
         write(self.root / "permissions-1.plist",
@@ -417,9 +465,36 @@ Path(sys.argv[1]).symlink_to(Path('/Applications'), target_is_directory=True)
         self.command(self.bin / "codesign", """
             if [[ "$1" == -d ]]; then
               cat "$FIXTURE_ROOT/permissions-$FIXTURE_JIT.plist"
+            elif [[ "$1" == -dv ]]; then
+              echo 'Authority=Developer ID Application: FIXTURE ONLY'
+              echo 'flags=0x10000(runtime)'
+            else
+              exit "${FIXTURE_CODESIGN_EXIT:-0}"
+            fi
+        """, record=True)
+        self.command(self.bin / "spctl", """
+            if [[ "$3" == open ]]; then exit "${FIXTURE_SPCTL_OPEN_EXIT:-0}"
+            else exit "${FIXTURE_SPCTL_EXECUTE_EXIT:-0}"; fi
+        """, record=True)
+        self.command(self.bin / "ditto", """
+            if [[ "$1" == -c ]]; then
+              [[ "$2" == -k && "$3" == --keepParent ]] || exit 95
+              shift 3
+              printf 'fixture zip' > "$2"
+            else
+              python3 "$FIXTURE_ROOT/copy.py" "$1" "$2"
             fi
         """)
-        self.command(self.bin / "ditto", 'python3 "$FIXTURE_ROOT/copy.py" "$1" "$2"')
+        # macOS shasum is not installed in the controller's Cygwin. Keep actual
+        # file hashing in stdlib Python, rather than echoing a canned digest.
+        write(self.root / "shasum.py", """
+import hashlib, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+sys.stdout.buffer.write((hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + path.name + '\\n').encode())
+""")
+        self.command(self.bin / "shasum",
+                     '[[ "$#" == 3 && "$1" == -a && "$2" == 256 ]]; '
+                     'python3 "$FIXTURE_ROOT/shasum.py" "$3"')
         self.command(self.bin / "hdiutil", """
             case "$1" in
               create)
@@ -457,8 +532,15 @@ Path(sys.argv[1]).symlink_to(Path('/Applications'), target_is_directory=True)
         """)
 
     @staticmethod
-    def command(path, body):
-        write(path, "#!/usr/bin/env bash\nset -euo pipefail\n" + textwrap.dedent(body) + "\n")
+    def command(path, body, *, record=False):
+        prefix = ""
+        if record:
+            prefix = (
+                '{ printf "%s" "' + path.name + '"; '
+                'for argument in "$@"; do printf "\\t%s" "$argument"; done; '
+                'printf "\\n"; } >> "$FIXTURE_ROOT/native-commands.log"\n'
+            )
+        write(path, "#!/usr/bin/env bash\nset -euo pipefail\n" + prefix + textwrap.dedent(body) + "\n")
         path.chmod(0o755)
 
     def run_shell(self, name, *args):
@@ -498,11 +580,120 @@ Path(sys.argv[1]).symlink_to(Path('/Applications'), target_is_directory=True)
         app = f"{self.shell_root}/production.app"
         result = self.run_shell("verify_macos_bundle.sh", app, "internal")
         self.assertEqual(result.returncode, 0, result.stderr)
+        # The fixture has three code files; resources must not inflate native
+        # checks into dozens of Windows/Cygwin subprocess launches.
+        self.assertIn("Verified 3 Mach-O components:", result.stdout)
         self.env["FIXTURE_ARCH"] = "x86_64"
         self.assertNotEqual(self.run_shell("verify_macos_bundle.sh", app, "internal").returncode, 0)
         self.env["FIXTURE_ARCH"] = "arm64"
         self.env["FIXTURE_JIT"] = "1"
         self.assertNotEqual(self.run_shell("verify_macos_bundle.sh", app, "internal").returncode, 0)
+
+    def test_optimized_python_still_rejects_native_minimum_above_12(self):
+        self.env.update(PYTHONOPTIMIZE="1", FIXTURE_MINOS="13.0")
+        result = self.run_shell("verify_macos_bundle.sh", f"{self.shell_root}/production.app", "internal")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def bad_image_optimized(self, fault):
+        content = self.root / "image-content"
+        app = content / "番茄Reader.app"
+        bundle(app)
+        link = content / "Applications"
+        link.symlink_to(Path("/not-Applications" if fault == "link" else "/Applications"),
+                        target_is_directory=True)
+        write(content / "INTERNAL_TESTING.txt", b"" if fault == "notice" else b"internal")
+        if fault == "root":
+            write(content / "extra-root-file")
+        write(self.root / "image.dmg", b"fixture image")
+        write(self.root / "snapshot.json", json.dumps(v.snapshot_bundle(app)))
+        self.env["PYTHONOPTIMIZE"] = "1"
+        result = self.run_shell("verify_macos_dmg.sh", f"{self.shell_root}/image.dmg",
+                                f"{self.shell_root}/snapshot.json")
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((self.root / "detached").exists())
+        self.assertFalse(list(self.root.glob("fanqie-dmg.*")))
+
+    def test_optimized_python_still_rejects_extra_image_root_file(self):
+        self.bad_image_optimized("root")
+
+    def test_optimized_python_still_rejects_wrong_applications_link(self):
+        self.bad_image_optimized("link")
+
+    def test_optimized_python_still_rejects_empty_internal_notice(self):
+        self.bad_image_optimized("notice")
+
+    def formal_environment(self):
+        self.env.pop("MACOS_RELEASE_CONTEXT", None)
+        self.env.update(MACOS_SIGN_IDENTITY="Developer ID Application: FIXTURE ONLY",
+                        MACOS_NOTARY_PROFILE="fixture-not-a-real-profile")
+
+    def test_explicit_release_requires_credentials_without_internal_fallback(self):
+        self.env.pop("MACOS_RELEASE_CONTEXT", None)
+        for identity, profile in ((None, None), ("Not Developer ID", "fixture"),
+                                  ("Developer ID Application: FIXTURE ONLY", None)):
+            for key, value in (("MACOS_SIGN_IDENTITY", identity), ("MACOS_NOTARY_PROFILE", profile)):
+                self.env.pop(key, None)
+                if value is not None:
+                    self.env[key] = value
+            result = self.run_shell("package_macos.sh", f"{self.shell_root}/production.app",
+                                    "release", f"{self.shell_root}/formal-out")
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(list((self.root / "formal-out").glob("*")))
+            self.assertFalse((self.root / "internal-sign-called").exists())
+            self.assertFalse((self.root / "native-commands.log").exists())
+
+    def test_explicit_release_runs_formal_gates_and_never_replaces_outputs(self):
+        self.formal_environment()
+        args = (f"{self.shell_root}/production.app", "release", f"{self.shell_root}/formal-out")
+        result = self.run_shell("package_macos.sh", *args)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        out = self.root / "formal-out"
+        self.assertEqual({p.name for p in out.iterdir()}, {FORMAL_NAME, f"{FORMAL_NAME}.sha256"})
+        self.assertEqual((out / f"{FORMAL_NAME}.sha256").read_bytes(),
+                         f"{hashlib.sha256(b'verified image').hexdigest()}  {FORMAL_NAME}\n".encode())
+        self.assertFalse((self.root / "internal-sign-called").exists())
+        self.assertFalse((self.root / "image-content/INTERNAL_TESTING.txt").exists())
+        commands = [line.split("\t") for line in (self.root / "native-commands.log").read_text().splitlines()]
+        signatures = [c for c in commands if c[:2] == ["codesign", "--force"]]
+        self.assertEqual(len(signatures), 7, "Three leaves, two frameworks, app and DMG must be signed")
+        self.assertTrue(all(c[c.index("--sign") + 1] == "Developer ID Application: FIXTURE ONLY"
+                            for c in signatures))
+        submits = [c for c in commands if c[:3] == ["xcrun", "notarytool", "submit"]]
+        self.assertEqual(len(submits), 2)
+        self.assertTrue(submits[0][3].endswith(".zip"))
+        self.assertTrue(submits[1][3].endswith(".dmg"))
+        self.assertTrue(all(c[-3:] == ["--keychain-profile", "fixture-not-a-real-profile", "--wait"]
+                            for c in submits))
+        self.assertEqual({c[3] for c in commands if c[:3] == ["spctl", "--assess", "--type"]},
+                         {"execute", "open"})
+        self.assertTrue(any(c[:3] == ["xcrun", "stapler", "validate"] and c[-1].endswith(".dmg")
+                            for c in commands))
+        before = {p.name: p.read_bytes() for p in out.iterdir()}
+        result = self.run_shell("package_macos.sh", *args)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual({p.name: p.read_bytes() for p in out.iterdir()}, before)
+        self.assertFalse(list(self.root.glob("fanqie-package.*")))
+        self.assertFalse(list(self.root.glob("fanqie-dmg.*")))
+
+    def test_formal_gate_failures_publish_nothing_and_never_fall_back(self):
+        self.formal_environment()
+        for key, code in (("FIXTURE_CODESIGN_EXIT", 36), ("FIXTURE_NOTARY_APP_EXIT", 37),
+                          ("FIXTURE_NOTARY_DMG_EXIT", 38), ("FIXTURE_STAPLER_EXIT", 39),
+                          ("FIXTURE_SPCTL_OPEN_EXIT", 40)):
+            with self.subTest(gate=key):
+                content = self.root / "image-content"
+                if content.exists():
+                    self.assertTrue(content.resolve().is_relative_to(self.root))
+                    shutil.rmtree(content)
+                self.env[key] = str(code)
+                result = self.run_shell("package_macos.sh", f"{self.shell_root}/production.app",
+                                        "release", f"{self.shell_root}/formal-out")
+                self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+                self.env.pop(key)
+                self.assertFalse(list((self.root / "formal-out").glob("*")))
+                self.assertFalse((self.root / "internal-sign-called").exists())
+                self.assertFalse(list(self.root.glob("fanqie-package.*")))
+                self.assertFalse(list(self.root.glob("fanqie-dmg.*")))
 
 
     def prepare_publish(self):
