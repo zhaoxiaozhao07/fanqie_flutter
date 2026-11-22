@@ -6,6 +6,8 @@ import 'package:fanqie_flutter/services/app_storage.dart';
 import 'package:fanqie_flutter/services/desktop_commands.dart';
 import 'package:fanqie_flutter/services/external_book_import_service.dart';
 import 'package:fanqie_flutter/services/local_book_service.dart';
+import 'package:fanqie_flutter/services/local_text_encoding.dart'
+    show normalizeLocalText;
 import 'package:fanqie_flutter/services/reader_platform.dart';
 import 'package:fanqie_flutter/widgets/local_book_import_dialog.dart';
 import 'package:fanqie_flutter/widgets/reader_settings_sheet.dart';
@@ -184,7 +186,33 @@ void main() {
       await tester.runAsync(
         () => source.writeAsString('第一章 开始\n${'完整正文与原文件必须保留。' * 20}'),
       );
-      final local = LocalBookService.forTesting(documents: () async => root);
+      Directory? previewStaging;
+      final local = LocalBookService.forTesting(
+        documents: () async => root,
+        normalizer: (file, encoding, temporary, token) {
+          previewStaging = temporary;
+          return normalizeLocalText(file, encoding, temporary, token);
+        },
+      );
+      Future<void> awaitPreviewCleanup() async {
+        final stage = previewStaging;
+        if (stage == null) fail('Real preview staging was not observed');
+        final elapsed = Stopwatch()..start();
+        while (true) {
+          // Disposal continuations belong to the widget's FakeAsync zone.
+          // Flush them between real I/O probes without advancing time/sleeping.
+          await tester.pump();
+          final exists = await tester.runAsync(stage.exists);
+          expect(exists, isNotNull, reason: 'Cannot observe preview staging');
+          if (exists == false) return;
+          if (elapsed.elapsed >= const Duration(seconds: 5)) {
+            fail(
+              'Preview staging cleanup did not finish within 5s: ${stage.path}',
+            );
+          }
+        }
+      }
+
       try {
         await tester.pumpWidget(
           MaterialApp(
@@ -220,15 +248,16 @@ void main() {
           false,
           reason: 'Preview must not commit a book',
         );
+        expect(previewStaging, isNotNull);
+        expect(await tester.runAsync(previewStaging!.exists), true);
         await tester.pumpWidget(const SizedBox.shrink());
-        await tester.runAsync(
-          () => Future<void>.delayed(const Duration(milliseconds: 30)),
-        );
+        await awaitPreviewCleanup();
         expect(await tester.runAsync(source.exists), true);
         expect(tester.takeException(), isNull);
       } finally {
         await tester.pumpWidget(const SizedBox.shrink());
         AppStorage.documentsOverride = null;
+        await awaitPreviewCleanup();
         await tester.runAsync(() => root.delete(recursive: true));
       }
     },
