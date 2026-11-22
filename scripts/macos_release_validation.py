@@ -197,6 +197,9 @@ def snapshot_bundle(app):
             elif stat.S_ISREG(mode):
                 snapshot[key] = {"type": "file", "mode": stat.S_IMODE(mode), **record(path)}
             elif stat.S_ISDIR(mode):
+                # os.walk suppresses DirEntry.is_dir errors into its files list.
+                # Never bless a real non-link directory it will not traverse.
+                require(name in dirs, f"Untraversed directory classified as a file: {key}")
                 snapshot[key] = {"type": "directory", "mode": stat.S_IMODE(mode)}
             else:
                 raise ValidationError(f"Special file in bundle: {key}")

@@ -240,6 +240,61 @@ class ValidationTests(BundleFixture, unittest.TestCase):
             self.assertTrue(injected, "The real extra directory scan must be reached")
         v.compare_snapshot(self.app, expected)
 
+    def test_real_directory_entry_classification_error_cannot_omit_children(self):
+        directory = self.app / "Contents/extra-dir-entry-content"
+        write(directory / "must-not-be-omitted.txt", b"real child bytes")
+        expected = v.snapshot_bundle(self.app)
+        self.assertIn("Contents/extra-dir-entry-content/must-not-be-omitted.txt", expected)
+        scandir = os.scandir
+        for label, operation in (
+            ("snapshot", lambda: v.snapshot_bundle(self.app)),
+            ("bundle", lambda: v.validate_bundle(self.app)),
+            ("comparison", lambda: v.compare_snapshot(self.app, expected)),
+        ):
+            with self.subTest(validator=label):
+                injected = False
+
+                class FaultEntry:
+                    def __init__(self, entry):
+                        self.entry = entry
+
+                    def __getattr__(self, name):
+                        return getattr(self.entry, name)
+
+                    def is_dir(self, *args, **kwargs):
+                        nonlocal injected
+                        if not injected:
+                            injected = True
+                            raise PermissionError(13, "single real entry classification denied", self.entry.path)
+                        return self.entry.is_dir(*args, **kwargs)
+
+                class ScanEntries:
+                    def __init__(self, stream):
+                        self.stream = stream
+
+                    def __enter__(self):
+                        self.stream.__enter__()
+                        return self
+
+                    def __exit__(self, *args):
+                        return self.stream.__exit__(*args)
+
+                    def __iter__(self):
+                        return self
+
+                    def __next__(self):
+                        entry = next(self.stream)
+                        return FaultEntry(entry) if Path(entry.path) == directory else entry
+
+                with mock.patch.object(v.os, "scandir", side_effect=lambda path: ScanEntries(scandir(path))):
+                    with self.assertRaises(v.ValidationError) as caught:
+                        operation()
+                self.assertTrue(injected, "The real directory entry must reach is_dir")
+                # Comparison must reject the classification boundary itself,
+                # not silently omit the child and only notice digest inequality.
+                self.assertIn(directory.name, str(caught.exception))
+        v.compare_snapshot(self.app, expected)
+
     def test_provenance_is_bound_to_trigger_full_version_sdk_and_snapshot(self):
         stage = self.stage()
         info = json.loads((stage / "build-info.json").read_text())
