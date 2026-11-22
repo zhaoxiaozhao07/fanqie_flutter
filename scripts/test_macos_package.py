@@ -861,6 +861,12 @@ sys.stdout.buffer.write((hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + 
         self.assertTrue((self.root / "release-created").exists(),
                         result.stdout + result.stderr + self.publish_diagnostic)
         self.assertIn("Verified remote", result.stdout, self.publish_diagnostic)
+        commands = [line.split("\t") for line in
+                    (self.root / "native-commands.log").read_text(encoding="utf-8").splitlines()]
+        creates = [command for command in commands if command[:3] == ["gh", "release", "create"]]
+        self.assertEqual(len(creates), 1, self.publish_diagnostic)
+        self.assertEqual(creates[0][creates[0].index("--title") + 1],
+                         "番茄Reader macOS 自用 v3.3.6（构建 1）")
 
     def test_real_publish_block_rejects_wrong_provenance_before_upload(self):
         stage = self.prepare_publish()

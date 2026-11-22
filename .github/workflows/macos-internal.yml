@@ -260,7 +260,7 @@ jobs:
           } > "$WORK/release-notes.md"
           gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" --prerelease --latest=false \
-            --title "番茄Reader macOS 自用 v$VERSION（构建 $GITHUB_RUN_NUMBER）" \
+            --title "番茄Reader macOS 自用 v${VERSION}（构建 ${GITHUB_RUN_NUMBER}）" \
             --notes-file "$WORK/release-notes.md" \
             "dist/macos/$NAME" "dist/macos/$NAME.sha256" dist/macos/build-info.json
           gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" > "$WORK/tag.json"
