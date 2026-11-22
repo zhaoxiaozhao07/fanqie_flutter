@@ -5,6 +5,7 @@ import 'dart:ui' as ui;
 import 'package:fanqie_flutter/models/book.dart';
 import 'package:fanqie_flutter/models/chapter.dart';
 import 'package:fanqie_flutter/models/reader_settings.dart';
+import 'package:fanqie_flutter/models/reading_snapshot.dart';
 import 'package:fanqie_flutter/screens/reader_screen.dart';
 import 'package:fanqie_flutter/screens/notes_workspace_screen.dart';
 import 'package:fanqie_flutter/services/app_lifecycle_service.dart';
@@ -79,6 +80,105 @@ Future<void> fullScreen(WidgetTester tester, bool enabled) async {
     }
   }
   fail('Native full-screen transition did not complete: $lastState');
+}
+
+// Test-only lifecycle boundary, shared with the focused suppressed-frame tests.
+Future<void> verifyMacHiddenWindowLifecycle({
+  required Future<Object?> Function(String method) native,
+  required Future<ReadingSnapshot?> Function() readSaved,
+  required ReadingSnapshot expected,
+  required Future<void> Function(Future<void> Function() action) runNativeIo,
+  required Future<void> Function() pumpVisible,
+  required void Function(String message) diagnostic,
+  Duration phaseTimeout = const Duration(seconds: 5),
+  Duration pollInterval = const Duration(milliseconds: 20),
+}) async {
+  var restored = false;
+  String describe(Object? value) => value is ReadingSnapshot
+      ? jsonEncode(value.toJson())
+      : '$value';
+
+  Future<T> observe<T>(
+    String phase,
+    Future<T> Function() read,
+    bool Function(T value) matches,
+  ) async {
+    diagnostic('MACOS_WINDOW_LIFECYCLE $phase begin');
+    final deadline = DateTime.now().add(phaseTimeout);
+    T? last;
+    StateError expired() => StateError(
+      'Mac window lifecycle $phase timed out; last=${describe(last)}',
+    );
+    try {
+      while (true) {
+        final remaining = deadline.difference(DateTime.now());
+        if (remaining <= Duration.zero) throw expired();
+        last = await read().timeout(
+          remaining,
+          onTimeout: () => throw expired(),
+        );
+        if (!DateTime.now().isBefore(deadline)) throw expired();
+        if (matches(last as T)) {
+          diagnostic(
+            'MACOS_WINDOW_LIFECYCLE $phase done ${describe(last)}',
+          );
+          return last as T;
+        }
+        final pause = deadline.difference(DateTime.now());
+        await Future<void>.delayed(pause < pollInterval ? pause : pollInterval);
+      }
+    } catch (error) {
+      diagnostic('MACOS_WINDOW_LIFECYCLE $phase failed $error');
+      rethrow;
+    }
+  }
+
+  bool hasWindowState(Object? value, bool visible) {
+    if (value is! Map) throw StateError('Native window state is missing: $value');
+    return value['visible'] == visible &&
+        (visible || value['displayAssertion'] == false);
+  }
+
+  try {
+    await runNativeIo(() async {
+      try {
+        diagnostic(
+          'MACOS_WINDOW_LIFECYCLE resized_anchor ${describe(expected)}',
+        );
+        await observe('hide_reply', () => native('hideTestWindow'), (_) => true);
+        await observe(
+          'hidden_observation',
+          () => native('getTestWindowState'),
+          (state) => hasWindowState(state, false),
+        );
+        await observe('stored_anchor_read', readSaved, (snapshot) {
+          final position = snapshot?.position;
+          final anchor = expected.position;
+          return snapshot != null &&
+              position != null &&
+              position.chapterId == anchor.chapterId &&
+              position.paragraphIndex == anchor.paragraphIndex &&
+              position.characterOffset == anchor.characterOffset &&
+              position.imageId == anchor.imageId &&
+              snapshot.updatedAt.isAfter(expected.updatedAt);
+        });
+      } finally {
+        // This is native/IO-only: hidden VSync must not gate either recovery
+        // or durable-save verification. Never synthesize a visible state.
+        await observe('show_reply', () => native('showMainWindow'), (_) => true);
+        await observe(
+          'visible_recovery',
+          () => native('getTestWindowState'),
+          (state) => hasWindowState(state, true),
+        );
+        restored = true;
+      }
+    });
+  } finally {
+    // Even on a failed hidden/read phase, resume widget work only after the
+    // native visibility probe confirms recovery, outside tester.runAsync.
+    if (restored) await pumpVisible();
+  }
 }
 
 void expectDesktopPagesFit(WidgetTester tester) {
@@ -824,25 +924,25 @@ void main() {
       });
       await tester.pumpAndSettle();
       await ReaderSystemService.flushParticipants();
-      final after = await ReaderPositionService().load('local_native_window');
-      expect(after!.paragraphIndex, before.paragraphIndex);
-      await ReaderPlatform.invoke('hideTestWindow');
-      await tester.pump(const Duration(milliseconds: 300));
-      final hidden = await ReaderPlatform.invoke<Map>('getTestWindowState');
-      expect(hidden!['visible'], false);
-      expect(hidden['displayAssertion'], false);
-      expect(
-        (await ReaderPositionService().load(
-          'local_native_window',
-        ))!.paragraphIndex,
-        after.paragraphIndex,
+      final after = await ReaderPositionService().loadSnapshot(
+        'local_native_window',
       );
-      await ReaderPlatform.invoke('showMainWindow');
+      expect(after!.position.paragraphIndex, before.paragraphIndex);
+      expect(after.position.chapterId, before.chapterId);
+      expect(after.position.characterOffset, before.characterOffset);
+      expect(after.position.imageId, before.imageId);
+      await verifyMacHiddenWindowLifecycle(
+        native: (method) => ReaderPlatform.invoke<Object?>(method),
+        readSaved: () =>
+            ReaderPositionService().loadSnapshot('local_native_window'),
+        expected: after,
+        runNativeIo: (action) async {
+          await tester.runAsync(action);
+        },
+        pumpVisible: () => tester.pump(const Duration(milliseconds: 300)),
+        diagnostic: debugPrint,
+      );
       await tester.pumpAndSettle();
-      expect(
-        (await ReaderPlatform.invoke<Map>('getTestWindowState'))!['visible'],
-        true,
-      );
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
     },
