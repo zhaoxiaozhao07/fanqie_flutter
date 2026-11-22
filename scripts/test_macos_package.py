@@ -96,12 +96,30 @@ class BundleFixture:
         self.assertIsNotNone(v, "Task5 portable validators are not implemented")
         self.tmp = tempfile.TemporaryDirectory(prefix="macos packaging ")
         self.addCleanup(self.tmp.cleanup)
-        self.root = Path(self.tmp.name)
+        self.root = Path(self.tmp.name).resolve(strict=True)
         self.app = self.root / "production.app"
         bundle(self.app)
 
 
 class ValidationTests(BundleFixture, unittest.TestCase):
+    def test_fixture_temp_parent_alias_preserves_real_cleanup_ownership(self):
+        with tempfile.TemporaryDirectory(prefix="macos temp-parent alias ") as temporary:
+            parent = Path(temporary)
+            real = parent / "real"
+            real.mkdir()
+            alias = parent / "alias"
+            alias.symlink_to(real, target_is_directory=True)
+            owned = ValidationTests("test_observed_versioned_aot_layout_and_empty_native_mapping")
+            try:
+                with mock.patch.object(tempfile, "tempdir", str(alias)):
+                    owned.setUp()
+                content = owned.root / "image-content"
+                write(content / "owned-bytes", b"owned")
+                self.assertEqual((content / "owned-bytes").read_bytes(), b"owned")
+                self.assertTrue(content.resolve().is_relative_to(owned.root))
+            finally:
+                owned.doCleanups()
+
     def stage(self):
         stage = self.root / "stage"
         stage.mkdir()
@@ -788,7 +806,7 @@ sys.stdout.buffer.write((hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + 
               done
               python3 "$FIXTURE_ROOT/copy.py" "$FIXTURE_ROOT/remote-source" "$dest"
             else exit 98; fi
-        """)
+        """, record=True)
         # Execute the real publication block, not source-string assertions.
         lines = (ROOT / ".github/workflows/macos-internal.yml").read_text(encoding="utf-8").splitlines()
         start = lines.index("      - name: 创建 macOS 预发布版本（不覆盖既有标签或附件）")
@@ -803,17 +821,46 @@ sys.stdout.buffer.write((hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + 
         return stage
 
     def run_publish(self):
-        return subprocess.run(
-            [self.bash, "--noprofile", "--norc",
+        self.publish_run = getattr(self, "publish_run", 0) + 1
+        logs = (ROOT / "build/macos/ci-logs/package-fragments" if
+                os.environ.get("GITHUB_ACTIONS") == "true" else
+                ROOT / ".dart_tool/codex-macos-followup/task-5/round3-publish-fragments")
+        logs.mkdir(parents=True, exist_ok=True)
+        prefix = logs / f"{self._testMethodName}-{self.publish_run}"
+        env = self.env | {"PS4": "+fixture:${BASH_VERSION}:${SECONDS}:${LINENO}: "}
+        script = self.checkout / "scripts/publish-fixture.sh"
+        prefix.with_suffix(".script.sh").write_bytes(script.read_bytes())
+        prefix.with_suffix(".fake-gh.sh").write_bytes((self.bin / "gh").read_bytes())
+        prefix.with_suffix(".refs.json").write_bytes((self.root / "refs.json").read_bytes())
+        result = subprocess.run(
+            [self.bash, "--noprofile", "--norc", "-x",
              f"{self.shell_root}/checkout with spaces/scripts/publish-fixture.sh"],
-            cwd=self.checkout, env=self.env, capture_output=True, text=True,
+            cwd=self.checkout, env=env, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=25)
+        prefix.with_suffix(".stdout.log").write_text(result.stdout, encoding="utf-8")
+        prefix.with_suffix(".stderr.log").write_text(result.stderr, encoding="utf-8")
+        calls = self.root / "native-commands.log"
+        prefix.with_suffix(".gh-calls.log").write_bytes(calls.read_bytes() if calls.exists() else b"")
+        prefix.with_suffix(".execution.json").write_text(json.dumps({
+            "command": result.args, "exit": result.returncode,
+            "fixture_root": str(self.root), "canonical_root": str(self.root.resolve()),
+            "cwd": str(self.checkout), "release_created": (self.root / "release-created").exists(),
+            # Only fixture-selected identity/environment fields; no real tokens.
+            "env": {key: env.get(key) for key in (
+                "GITHUB_ACTIONS", "GITHUB_SHA", "GITHUB_REF", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT",
+                "GITHUB_REPOSITORY", "VERSION", "BUILD_NUMBER", "FULL_VERSION", "FIXTURE_ROOT", "PATH",
+                "BASH_ENV", "SHELLOPTS", "BASHOPTS", "POSIXLY_CORRECT")},
+        }, indent=2), encoding="utf-8")
+        self.publish_diagnostic = f"Captured fragment/gh/env/stdout/stderr: {prefix}"
+        return result
 
     def test_real_publish_block_verifies_build_qualified_remote_bytes(self):
         self.prepare_publish()
         result = self.run_publish()
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
-        self.assertTrue((self.root / "release-created").exists())
+        self.assertTrue((self.root / "release-created").exists(),
+                        result.stdout + result.stderr + self.publish_diagnostic)
+        self.assertIn("Verified remote", result.stdout, self.publish_diagnostic)
 
     def test_real_publish_block_rejects_wrong_provenance_before_upload(self):
         stage = self.prepare_publish()
@@ -829,12 +876,12 @@ sys.stdout.buffer.write((hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + 
         self.prepare_publish()
         write(self.root / "refs.json", '[{"ref":"refs/tags/macos-internal-v3.3.6-123-1"}]')
         result = self.run_publish()
-        self.assertNotEqual(result.returncode, 0)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr + self.publish_diagnostic)
         self.assertFalse((self.root / "release-created").exists())
         write(self.root / "refs.json", "[]")
         write(self.root / "remote-source" / NAME, b"bad upload")
         result = self.run_publish()
-        self.assertNotEqual(result.returncode, 0)
+        self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr + self.publish_diagnostic)
         self.assertTrue((self.root / "release-created").exists(), result.stdout + result.stderr)
 
 

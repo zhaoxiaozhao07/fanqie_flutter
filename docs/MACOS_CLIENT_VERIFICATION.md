@@ -25,6 +25,16 @@
   最终真实 hosted Mac 运行、验证 DMG 下载及独立审查由控制端继续；本任务不推送/
   dispatch/发布。下方历史结果不作为最终源码通过证据。
 
+### 2026-11-22 hosted Mac 检查点（未接受最终产物）
+
+[Run 45028195948](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/runs/45028195948)
+来源 `f0a8916dd0c4fe47acb7ac6f09ae57415ccc917a`：arm64 / stock Bash 的
+native-pipeline 19 与 lifecycle 6 **受控 fixtures** 通过，package 27 出现四个
+fixture 失败。后续 analyze/Dart/XCTest/platform/AOT/Release/DMG 正确跳过；
+没有最终 DMG 或公开预发布。临时目录 canonical-root 修正有真实别名目录回归；
+publish fragment 的脚本/执行/假 gh 数据诊断会随 CI 日志保留。Windows 阳性/
+阴性通过不替代 stock Mac 的重跑，仍不声明原生产品或物理验收完成。
+
 ## 0. 2026-11-22：Task 1 原生验证基线
 
 - 本次基线：`eb9b48f05026820c621bf5697e38e6a0ac05061c`；
