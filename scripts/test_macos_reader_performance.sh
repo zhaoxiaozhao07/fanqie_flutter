@@ -44,7 +44,21 @@ cleanup() {
   fi
   if [[ -n "$AWAKE_PID" ]]; then
     kill -TERM "$AWAKE_PID" 2>/dev/null || true
-    wait "$AWAKE_PID" 2>/dev/null || true
+    local awake_grace=$((SECONDS + 5))
+    while kill -0 "$AWAKE_PID" 2>/dev/null && (( SECONDS < awake_grace )); do sleep 0.1; done
+    if kill -0 "$AWAKE_PID" 2>/dev/null; then
+      echo 'Test-scoped caffeinate ignored TERM; forcing helper exit' >&2
+      kill -KILL "$AWAKE_PID" 2>/dev/null || true
+      local awake_reap=$((SECONDS + 1))
+      while kill -0 "$AWAKE_PID" 2>/dev/null && (( SECONDS < awake_reap )); do sleep 0.1; done
+    fi
+    if kill -0 "$AWAKE_PID" 2>/dev/null; then
+      # Never turn an EXIT trap into another unbounded wait, even after KILL.
+      echo 'Test-scoped caffeinate did not exit after KILL; skipping blocking wait' >&2
+      [[ "$status" != 0 ]] || status=1
+    else
+      wait "$AWAKE_PID" 2>/dev/null || true
+    fi
   fi
   return "$status"
 }
@@ -79,12 +93,15 @@ if [[ -n "$AWAKE_PID" ]]; then
   while kill -0 "$AWAKE_PID" 2>/dev/null && (( SECONDS < AWAKE_DEADLINE )); do sleep 0.1; done
   if kill -0 "$AWAKE_PID" 2>/dev/null; then
     echo 'Test-scoped caffeinate did not finish after the benchmark app' >&2
-    exit 1
+    [[ "$RESULT" != 0 ]] || RESULT=1
+    exit "$RESULT"
   fi
-  wait "$AWAKE_PID" || RESULT=$?
+  AWAKE_RESULT=0
+  wait "$AWAKE_PID" || AWAKE_RESULT=$?
+  [[ "$RESULT" != 0 ]] || RESULT=$AWAKE_RESULT
   AWAKE_PID=''
 fi
 cat "$LOG"
-[[ "$RESULT" == 0 ]]
+if [[ "$RESULT" != 0 ]]; then exit "$RESULT"; fi
 [[ "$(grep -c '^FANQIE_WORKSPACE_PERF_MODE ' "$LOG")" == 7 ]]
 grep -q '^FANQIE_WORKSPACE_PERF_OK ' "$LOG"

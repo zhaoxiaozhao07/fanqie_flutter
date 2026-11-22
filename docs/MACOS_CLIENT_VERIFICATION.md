@@ -167,6 +167,7 @@ frame gap／total span 也不构成无停顿、物理输入延迟或前台 FPS �
 
 ```bash
 python3 scripts/test_macos_native_pipeline.py  # Python >=3.10；受控命令夹具
+python3 scripts/test_macos_reader_performance_pipeline.py # 受控进程生命周期夹具
 scripts/test_macos_platform.sh              # 不启用手工保存／系统全屏参数
 scripts/test_macos_reader_performance.sh    # 七场景 AOT，默认仅记录前台状态
 # 仅确实拥有可用前台图形会话时，可另跑严格门禁：
@@ -179,6 +180,10 @@ MACOS_REQUIRE_FOREGROUND=true scripts/test_macos_reader_performance.sh
 PID，以 `caffeinate -di -w PID` 作测试期防休眠；应用运行期限仍为 180 秒，
 TERM 协作收尾最多 30 秒，防休眠子进程收尾另限 5 秒。构建／签名时间不计入
 这 180 秒，仍由控制器／既有作业超时约束；没有修改常亮策略或系统电源偏好。
+I1 修复后，EXIT／INT／TERM 失败收尾也对防休眠 helper 使用 5 秒 TERM 宽限，
+随后 KILL 并另限 1 秒确认退出；仍存活则不执行阻塞 wait。已有非零应用／信号
+状态不会被 helper 清理覆盖。新增生命周期夹具运行复制的真实脚本，外部进程
+全部隔离，独立 18 秒 watchdog 回收测试进程；这不是实际 Mac AOT 测量。
 
 测试不启动生产 `main`，文档根为自有 OS 临时目录，偏好是该独立进程中的
 内存 backend，日常 native domain 不读取／备份／清空／改写。正常结束和异常
