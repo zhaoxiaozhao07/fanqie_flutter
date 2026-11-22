@@ -133,9 +133,17 @@ void main() {
       try {
         await body(tester);
       } finally {
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pumpAndSettle();
-        debugDefaultTargetPlatformOverride = null;
+        try {
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pumpAndSettle();
+        } finally {
+          try {
+            debugDefaultTargetPlatformOverride = TargetPlatform.android;
+            await nativeMessage(tester, 'onReaderScrollInput', null);
+          } finally {
+            debugDefaultTargetPlatformOverride = null;
+          }
+        }
       }
     });
   }
@@ -662,6 +670,87 @@ void main() {
     },
     platform: TargetPlatform.windows,
   );
+
+  for (final lateInput in [
+    'none',
+    'precise',
+    'unknown',
+    'stale',
+    'unmatched',
+  ]) {
+    desktopTest(
+      'Mac queue drain accepts the latest classified reversal once; late $lateInput cannot replace it',
+      (tester) async {
+        final reader = await open(tester, 'cover');
+        // The actual shared metadata handler runs before native pointer dispatch,
+        // including the signal injected synchronously in the queue-drain frame.
+        await nativeInput(tester, const Duration(milliseconds: 1800));
+        final lateTimestamp = lateInput == 'stale'
+            ? const Duration(microseconds: 700000)
+            : const Duration(milliseconds: 1850);
+        final payload = switch (lateInput) {
+          'precise' => {'timestampMicros': 1850000, 'precise': true},
+          'stale' => {'timestampMicros': 700000, 'precise': false},
+          'unmatched' => {'timestampMicros': 1850001, 'precise': false},
+          _ => null,
+        };
+        if (payload != null) {
+          await nativeMessage(tester, 'onReaderScrollInput', payload);
+        }
+        var injected = false;
+        reader.onSettled = (_) {
+          if (injected) return;
+          injected = true;
+          // Same ordering as the Windows regression: the second callback is
+          // registered before the pager's existing final queue-drain callback.
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              GestureBinding.instance.handlePointerEvent(
+                const PointerScrollEvent(
+                  timeStamp: Duration(milliseconds: 1800),
+                  kind: PointerDeviceKind.mouse,
+                  position: Offset(400, 350),
+                  scrollDelta: Offset(0, -120),
+                ),
+              );
+              if (lateInput != 'none') {
+                GestureBinding.instance.handlePointerEvent(
+                  PointerScrollEvent(
+                    timeStamp: lateTimestamp,
+                    kind: PointerDeviceKind.mouse,
+                    position: const Offset(400, 350),
+                    scrollDelta: const Offset(0, 120),
+                  ),
+                );
+              }
+            });
+          });
+        };
+        await macWheel(
+          tester,
+          const Offset(0, 120),
+          timeStamp: const Duration(seconds: 1),
+        );
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 200));
+        await macWheel(
+          tester,
+          const Offset(0, 120),
+          timeStamp: const Duration(milliseconds: 1200),
+        );
+        await tester.pumpAndSettle();
+        expect(injected, isTrue);
+        expect(reader.settled, [2, 1]);
+        expect(reader.userTurns, 3); // First, queued, newest replacement.
+        expect(reader.pager.currentState!.currentPageId, 1);
+        expect(reader.pager.currentState!.isBusy, isFalse);
+        await tester.pump(const Duration(seconds: 1));
+        await tester.pumpAndSettle();
+        expect(reader.settled, [2, 1]); // No hidden obsolete/negative turn.
+        await close(tester);
+      },
+    );
+  }
 
   desktopTest(
     'Windows sustained notches do not repeatedly request an unavailable chapter',

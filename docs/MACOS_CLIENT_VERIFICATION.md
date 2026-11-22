@@ -20,6 +20,10 @@
 
 在真实 arm64 Mac、上述 SDK 和已安装 Xcode 的项目根目录运行：
 
+原生流水线命令夹具需 **Python ≥3.10**：它使用
+`Path.write_text(newline=...)`。这是验证工具的前提，不改变客户端最低
+macOS 版本、Flutter／Dart、应用依赖或 lockfile；不要为运行夹具升级应用工具链。
+
 ```bash
 flutter pub get --enforce-lockfile
 python3 scripts/test_macos_native_pipeline.py
@@ -66,6 +70,129 @@ Dock 恢复或实际音频／媒体键记为已覆盖。启用手工参数仍须
 arm64、原生 XCTest 与最终生产 Release 日志；失败须记录可行动的错误。
 即使云端成功，也不能据此宣称 macOS 12.0 实机、完整手工交互、
 Developer ID／公证／Gatekeeper、安装或覆盖升级已通过。
+
+## 0.1. 2026-11-22：Task 4 字体、Retina 重排与七场景性能入口
+
+本轮从 `d3cfa2be4910e9318d51e85493a7948c091bbd44` 开始；版本／平台／SDK
+仍为 **3.3.6+342 / macOS 12.0 / arm64 / Flutter 3.47.9 / Dart 3.13.7**。
+只扩展阅读测试、Mac AOT 入口／脚本及本文档；未修改生产字体实现、依赖、
+lockfile、Windows／Android 默认行为、工作流或公开 main-only 发布边界。
+Task 3 的真实 Mac 907 Dart／13 skip／57 Native、生产 Release 与旧 bundle gate
+是控制器提供的前序证据，**不是 Task 4 新入口已经在 Mac 跑过的证据**。
+
+### 本地行为覆盖与证据边界
+
+- 字体测试分别写出 Windows／Mac 期望，不用被测字体解析函数推导期望。
+  Mac 系统字体为 `Roboto`、通用字体为 `sans-serif`，fallback 均为
+  `['sans-serif', 'Roboto']`；Windows 保留微软雅黑体系。内置楷／宋体及
+  导入字体名称不变，导入族名使用独立核对的资产 SHA-256 字面值。
+  分页／滚动正文、标题、设置预览、既存导入库、明暗预览和缺失字体均覆盖。
+  断言验证共享样式和 Flutter 描画配置，Mac 实际字形／栅格外观仍需前台查看。
+- Windows／Mac 五种页面效果均验证当前页挂载状态和 PageController 复用；
+  Mac 增加当前／缓存页纯配色更新不重排，以及真实边缘单击提交。
+- 2× DPI 测试先在逻辑 `1200×850` 挂载实际双栏，翻三组双页，再将物理尺寸
+  改为 `1480×1280`（逻辑 `740×640`），确认真实单栏回退、原锚点所属页面及
+  保存的章节／段落／字符偏移完全一致。**这是 WidgetTester 模拟 backing scale，
+  不代表物理 Retina 显示器或系统窗口缩放已验收。**
+- 新增实际阅读器 `104,000` UTF-16 单位超长单段的全量原文、连续偏移和
+  grapheme 边界检查；另以 40 个单页短章验证两次热身及 20 次真实跨章提交，
+  最终保存 `c22`／第 22 章／段落 0／字符 0。
+- T3 追加覆盖保留全部冲突测试；missing/null/0/1/string/list/map precision
+  各仅记录一次独立新时间戳，精确 lookup 必须为 false。Mac queue-drain
+  经真实共享元数据 handler 验证最新有效反向意图只替换一次；迟到
+  precise／unknown／stale／unmatched 信号不能改写已接受的队列意图。
+  这不是原生 NSEvent 分发顺序或物理鼠标／触控板验收。
+- 新行为首轮验证中的平台 override 清理错误已在测试夹具修复；没有以错误
+  夹具制造生产回归，也没有为测试增加生产 cleanup/helper 或替换 Mac 字体。
+  定向回归 **206 项通过**；在 Windows 上运行的 Mac 原生流水线受控命令夹具
+  **19 项通过**，
+  Mac 性能脚本语法与受控早期退出／构建失败夹具 **7 项通过**。
+  这些命令夹具不运行真实 Flutter Profile、Xcode 或签名。
+  本机离线全量回归 **955 通过／11 跳过**，analyze 无问题；平台条件与
+  前序 Mac 的 13 skip 不同，不能将本机计数冒充最终 Mac 通过计数。
+
+### 七个 AOT 场景，不能用请求的视口代替实际负载
+
+`integration_test/macos_reader_performance.dart` 固定测量：
+
+| 场景 | 实际栏数 | 每场景负载 |
+|---|---:|---|
+| cover / slide / fade / none / simulation | 1 | 各两次热身、20 次已提交翻页 |
+| double-cover | 2 | 两次热身、20 次已提交双页 spread |
+| cross-chapter-cover | 1 | 两次热身跨章、20 次已完成跨章；最终章号必须为 22 |
+
+原有 `102,338` 单位正文完整保留，再追加 `104,000` 单位超长单段，六个正文场景
+及本地搜索使用共 `206,340` 单位正文；计数是 Dart `String.length` 的 UTF-16
+单位，不是字数／用户感知字符数。跨章场景使用独立单页短章，逐次核对实际
+章号、章节身份、页号与源锚点；不以发出 20 个命令冒充完成 20 次转章。
+
+每次翻页须等到 pager 空闲、提交地址与 mounted widget 一致，再核对实际
+页／spread 前进和原文锚点。双栏检测从**当前提交页**的渲染列查找其实际
+spread，要求两张非空、有尺寸的页面卡；不读取任意缓存 spread 来凑栏数。
+所有场景明确设置单／双栏并核对实际模式、实际 RenderBox 尺寸和真实
+FlutterView backing scale。视口／栏数不符即失败，不能伪造 MediaQuery、
+使用 Debug-only 的 `setTestWindowSize` 或静默退化到单栏。Windows 已导入的
+`require/findElement/pager/until/nextFrame/percentile/turn` 接口及实现保持不变。
+
+### 预算和测量含义
+
+| 门禁 | 预算／检查 |
+|---|---|
+| 超长单段冷 CPU 分页 | `<1000ms`；完整 104k 原文、连续字符偏移和 grapheme 边界 |
+| 实际阅读器首次页就绪 | `<3000ms`；从重新挂载到实际提交页，不含应用构建／初始化 |
+| 原生 FrameTiming build／raster P95 | 各 `≤33.4ms`，每场景至少 20 个 native samples |
+| Dart 命令到第一次提交 frame P95 | `<1000ms`；**不是物理输入到可见像素延迟** |
+| 20 次完成操作总时长 | `<30000ms`；动画仍需完成原有工作量下限：cover/slide/fade 的 `20×320ms×0.8`、simulation 的 `20×360ms×0.8` |
+| 内存 | 保留热阶段末 RSS 增量 `<128MiB`；冷阶段／热身后基线各到采样峰值增量也 `<128MiB`；OS 报告的进程全程峰值 RSS `<512MiB` |
+| 本地搜索／5000 笔记 | 各首次结果 `<3000ms`；笔记挂载卡片 `<30`，不缩小搜索正文 |
+
+超长单段另用固定 `420×760` TextPainter layout 测冷 CPU 分页，输出明确标记
+它不是实际提交视口；实际双栏的证据只能来自上述 mounted 渲染树与提交。
+“冷”指新的分页缓存／阅读器首次布局，系统字体、引擎和 shader cache 不保证
+全冷，不能视为 OS 冷启动或 font-cache 冷启动。
+P95 沿用 nearest-index 统计；FrameTiming 来自引擎回调，热身后等一秒再监听，
+测量后等两秒收齐批量回调。RSS 同时报告阶段开始、结束、回调／完成操作时的
+采样峰值和 OS 全程峰值；阶段采样不是连续瞬时峰值，也不等于 Dart heap／GPU
+显存。预算适用于固定负载，**33.4ms 门槛不构成 30/60/120 FPS 承诺**，
+frame gap／total span 也不构成无停顿、物理输入延迟或前台 FPS 证据。
+
+每场景记录 `foregroundAtStart/End`、`windowVisibleAtStart/End` 和真实 DPR。
+前台字段只是原生 `NSWindow.isKeyWindow` 在端点的采样，不证明全程无遮挡；
+默认为记录而非前台门禁。严格模式最多等 30 秒取得 key window，且全部场景
+首／末必须为 true；即使通过也不能外推物理 Retina 或硬件输入流畅度。
+
+### 控制器的最终 Mac 命令与安全收尾
+
+在真实 arm64 Mac 的**最终 Task 4 提交**上、已获取锁定依赖后，顺序运行：
+
+```bash
+python3 scripts/test_macos_native_pipeline.py  # Python >=3.10；受控命令夹具
+scripts/test_macos_platform.sh              # 不启用手工保存／系统全屏参数
+scripts/test_macos_reader_performance.sh    # 七场景 AOT，默认仅记录前台状态
+# 仅确实拥有可用前台图形会话时，可另跑严格门禁：
+MACOS_REQUIRE_FOREGROUND=true scripts/test_macos_reader_performance.sh
+```
+
+保留 `FLUTTER` 和 `MACOS_READER_PERF_LOG` 接口；后者默认
+`/tmp/fanqie-workspace-performance.log`。脚本拒绝非 Darwin／arm64、非法前台开关
+及符号链接／目录日志，保留 `--no-pub` 和 Profile 测试 target。它直接持有应用
+PID，以 `caffeinate -di -w PID` 作测试期防休眠；应用运行期限仍为 180 秒，
+TERM 协作收尾最多 30 秒，防休眠子进程收尾另限 5 秒。构建／签名时间不计入
+这 180 秒，仍由控制器／既有作业超时约束；没有修改常亮策略或系统电源偏好。
+
+测试不启动生产 `main`，文档根为自有 OS 临时目录，偏好是该独立进程中的
+内存 backend，日常 native domain 不读取／备份／清空／改写。正常结束和异常
+都尝试卸载、刷写、取消信号订阅并恢复原文档 override／错误 handler；仅在
+写入者已收尾，且路径与创建时的 canonical root、自有临时父目录、非链接目录
+及指定前缀一致后删除隔离根。清理失败不输出成功标记；写入者未收尾或被
+SIGKILL 时可能保留该隔离临时根，日志的 `FANQIE_WORKSPACE_PERF_ROOT` 可定位，
+**不会改为删除或写入用户文档**。脚本还要求零退出码及恰好七条场景结果。
+
+本轮没有执行 Mac Native／AOT／Release、真实前台、物理 Retina、最低 macOS 12、
+中文 IME、系统全屏、保存面板或物理滚轮验收，也没有联网、触发 CI、push 或
+发布。必须由控制器补齐最终提交上的完整平台和 AOT 日志；若任何场景、预算、
+前台 gate 或恢复检查失败，记录实际 red 后最小修复，不能降低负载／内存／
+锚点约束来获得通过。
 
 ---
 

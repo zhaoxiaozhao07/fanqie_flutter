@@ -131,6 +131,47 @@ void main() {
     });
   }
 
+  // Each malformed precision has one fresh record. Duplicate-key ambiguity
+  // above must not accidentally be the reason these exact lookups fail.
+  for (final sample in const [
+    (name: 'missing', micros: 3100000, payload: {'timestampMicros': 3100000}),
+    (
+      name: 'null',
+      micros: 3200000,
+      payload: {'timestampMicros': 3200000, 'precise': null},
+    ),
+    (
+      name: 'zero',
+      micros: 3300000,
+      payload: {'timestampMicros': 3300000, 'precise': 0},
+    ),
+    (
+      name: 'one',
+      micros: 3400000,
+      payload: {'timestampMicros': 3400000, 'precise': 1},
+    ),
+    (
+      name: 'string',
+      micros: 3500000,
+      payload: {'timestampMicros': 3500000, 'precise': 'false'},
+    ),
+    (
+      name: 'list',
+      micros: 3600000,
+      payload: {'timestampMicros': 3600000, 'precise': <Object?>[]},
+    ),
+    (
+      name: 'map',
+      micros: 3700000,
+      payload: {'timestampMicros': 3700000, 'precise': <String, Object?>{}},
+    ),
+  ]) {
+    test('single ${sample.name} precision fails closed on its exact key', () {
+      ReaderScrollInput.record(sample.payload);
+      expect(ReaderScrollInput.takeDiscrete(scroll(sample.micros)), isFalse);
+    });
+  }
+
   for (final value in <Object?>[
     null,
     true,

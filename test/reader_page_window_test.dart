@@ -89,53 +89,61 @@ class _WindowReaderState extends State<_WindowReader> {
 }
 
 void main() {
-  for (final mode in ['cover', 'slide', 'fade', 'none', 'simulation']) {
-    testWidgets(
-      '$mode prepending a cached page retains the mounted current page',
-      (tester) async {
-        debugDefaultTargetPlatformOverride = TargetPlatform.windows;
-        final key = GlobalKey<_WindowReaderState>();
-        try {
-          await tester.pumpWidget(_WindowReader(key: key, mode: mode));
-          await tester.pumpAndSettle();
-          final content = tester.state(find.byKey(const ValueKey('content-2')));
-          final pageView = find.byType(PageView);
-          final controller = pageView.evaluate().isEmpty
-              ? null
-              : tester.widget<PageView>(pageView).controller;
-          key.currentState!.prepend();
-          await tester.pumpAndSettle();
-          expect(key.currentState!.pager.currentState!.currentPageId, 2);
-          expect(
-            tester.state(find.byKey(const ValueKey('content-2'))),
-            same(content),
-          );
-          if (controller != null) {
-            expect(
-              tester.widget<PageView>(pageView).controller,
-              same(controller),
+  for (final platform in [TargetPlatform.windows, TargetPlatform.macOS]) {
+    for (final mode in ['cover', 'slide', 'fade', 'none', 'simulation']) {
+      testWidgets(
+        '${platform == TargetPlatform.macOS ? "Mac" : "Windows"} $mode prepending a cached page retains the mounted current page',
+        (tester) async {
+          final previousPlatform = debugDefaultTargetPlatformOverride;
+          debugDefaultTargetPlatformOverride = platform;
+          final key = GlobalKey<_WindowReaderState>();
+          try {
+            await tester.pumpWidget(_WindowReader(key: key, mode: mode));
+            await tester.pumpAndSettle();
+            final content = tester.state(
+              find.byKey(const ValueKey('content-2')),
             );
+            final pageView = find.byType(PageView);
+            final controller = pageView.evaluate().isEmpty
+                ? null
+                : tester.widget<PageView>(pageView).controller;
+            key.currentState!.prepend();
+            await tester.pumpAndSettle();
+            expect(key.currentState!.pager.currentState!.currentPageId, 2);
+            expect(
+              tester.state(find.byKey(const ValueKey('content-2'))),
+              same(content),
+            );
+            if (controller != null) {
+              expect(
+                tester.widget<PageView>(pageView).controller,
+                same(controller),
+              );
+            }
+            expect(key.currentState!.settled, isEmpty);
+            key.currentState!.pager.currentState!.turnToNextPage();
+            await tester.pumpAndSettle();
+            expect(key.currentState!.settled, [3]);
+            final next = tester.state(find.byKey(const ValueKey('content-3')));
+            key.currentState!.trim();
+            await tester.pumpAndSettle();
+            expect(key.currentState!.pager.currentState!.currentPageId, 3);
+            expect(
+              tester.state(find.byKey(const ValueKey('content-3'))),
+              same(next),
+            );
+            expect(key.currentState!.settled, [3]);
+            expect(tester.takeException(), isNull);
+          } finally {
+            try {
+              await tester.pumpWidget(const SizedBox.shrink());
+              await tester.pumpAndSettle();
+            } finally {
+              debugDefaultTargetPlatformOverride = previousPlatform;
+            }
           }
-          expect(key.currentState!.settled, isEmpty);
-          key.currentState!.pager.currentState!.turnToNextPage();
-          await tester.pumpAndSettle();
-          expect(key.currentState!.settled, [3]);
-          final next = tester.state(find.byKey(const ValueKey('content-3')));
-          key.currentState!.trim();
-          await tester.pumpAndSettle();
-          expect(key.currentState!.pager.currentState!.currentPageId, 3);
-          expect(
-            tester.state(find.byKey(const ValueKey('content-3'))),
-            same(next),
-          );
-          expect(key.currentState!.settled, [3]);
-          expect(tester.takeException(), isNull);
-        } finally {
-          await tester.pumpWidget(const SizedBox.shrink());
-          await tester.pumpAndSettle();
-          debugDefaultTargetPlatformOverride = null;
-        }
-      },
-    );
+        },
+      );
+    }
   }
 }
