@@ -34,6 +34,7 @@ class _WindowFixture {
   var acknowledgeHiddenSave = true;
   var usePositionService = false;
   var mismatchedAcknowledgement = false;
+  var newerStoredGeneration = false;
   var hiddenProbeBlocked = false;
   var savedReadBlocked = false;
   var acknowledgementBlocked = false;
@@ -121,6 +122,12 @@ class _WindowFixture {
           'hidden-fixture',
         );
       }
+      if (newerStoredGeneration) {
+        await ReaderPositionService().save(
+          'hidden-fixture',
+          publishedPosition ?? expected.position,
+        );
+      }
       return;
     }
     final snapshot = ReadingSnapshot(
@@ -130,7 +137,13 @@ class _WindowFixture {
           : DateTime.now().toUtc(),
     );
     final staging = File('${root.path}/anchor.pending.json');
-    await staging.writeAsString(jsonEncode(snapshot.toJson()), flush: true);
+    final stored = newerStoredGeneration
+        ? ReadingSnapshot(
+            position: snapshot.position,
+            updatedAt: snapshot.updatedAt.add(const Duration(microseconds: 1)),
+          )
+        : snapshot;
+    await staging.writeAsString(jsonEncode(stored.toJson()), flush: true);
     // Publish an immutable file reference, like the preference record's atomic
     // value replacement. Windows cannot rename over a JSON file held by a
     // concurrent read; that is a fixture artifact, not a reader save failure.
@@ -139,7 +152,7 @@ class _WindowFixture {
       hiddenSave = mismatchedAcknowledgement
           ? ReadingSnapshot(
               position: snapshot.position,
-              updatedAt: snapshot.updatedAt.subtract(
+              updatedAt: snapshot.updatedAt.add(
                 const Duration(microseconds: 1),
               ),
             )
@@ -380,13 +393,35 @@ void main() {
     expect(fixture.visiblePumps, 1);
   });
 
-  test('hidden acknowledgement must match the stored generation', () async {
+  test('stored generation cannot predate the hidden acknowledgement', () async {
     fixture.mismatchedAcknowledgement = true;
     await expectLater(fixture.verify(), throwsA(isA<StateError>()));
     expect(fixture.visible, isTrue);
     expect(fixture.hiddenPumps, 0);
     expect(fixture.visiblePumps, 1);
   });
+
+  test('a newer hidden save retains the confirmed original anchor', () async {
+    fixture.newerStoredGeneration = true;
+    await fixture.verify();
+    final stored = await fixture.readSaved();
+    expect(stored!.updatedAt.isAfter(fixture.hiddenSave!.updatedAt), isTrue);
+    expect(stored.position.toJson(), fixture.expected.position.toJson());
+    expect(fixture.hiddenPumps, 0);
+  });
+
+  test(
+    'ReaderPositionService accepts a same-anchor follow-up lifecycle save',
+    () async {
+      fixture.initializePositionService();
+      fixture.newerStoredGeneration = true;
+      await fixture.verify();
+      final stored = await fixture.readSaved();
+      expect(stored!.updatedAt.isAfter(fixture.hiddenSave!.updatedAt), isTrue);
+      expect(stored.position.toJson(), fixture.expected.position.toJson());
+      expect(fixture.hiddenPumps, 0);
+    },
+  );
 
   for (final field in ['chapter', 'paragraph', 'offset', 'image']) {
     test('fresh generation cannot hide a changed $field anchor', () async {

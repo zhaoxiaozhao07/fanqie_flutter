@@ -101,6 +101,38 @@ class IdentityTests(unittest.TestCase):
                     read_identity(path)
 
 
+class AndroidSignerTests(unittest.TestCase):
+    def report(self, prefix, certificate):
+        return (
+            "Verifies\nVerified using v2 scheme (APK Signature Scheme v2): true\n"
+            f"Number of signers: 1\n{prefix} certificate SHA-256 digest: {certificate}\n"
+        )
+
+    def test_actual_current_build_tools_v2_section_and_legacy_prefix(self):
+        for prefix in ["V2 Signer:", "Signer #1", "V3.1 Signer:"]:
+            with self.subTest(prefix=prefix):
+                self.assertEqual(release.signing_certificate(
+                    self.report(prefix, "b" * 64), "b" * 64,
+                ), "b" * 64)
+
+    def test_all_signature_schemes_must_match_the_one_configured_certificate(self):
+        report = self.report("V2 Signer:", "b" * 64)
+        same = report + f"V3 Signer: certificate SHA-256 digest: {'b' * 64}\n"
+        self.assertEqual(release.signing_certificate(same, "b" * 64), "b" * 64)
+        different = report + f"V3 Signer: certificate SHA-256 digest: {'c' * 64}\n"
+        with self.assertRaises(ValueError):
+            release.signing_certificate(different, "b" * 64)
+
+    def test_wrong_signer_multiple_signers_unverified_signature_or_public_key_fail(self):
+        good = self.report("V2 Signer:", "b" * 64)
+        for bad in [good.replace("b" * 64, "c" * 64),
+                    good.replace("Number of signers: 1", "Number of signers: 2"),
+                    good.replace("): true", "): false"),
+                    good.replace("certificate SHA-256", "public key SHA-256")]:
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                release.signing_certificate(bad, "b" * 64)
+
+
 class ReleaseTests(unittest.TestCase):
     def setUp(self):
         self.assertIsNotNone(release, "Unified release is not implemented")

@@ -348,6 +348,25 @@ def publish(api, directory, trigger, repository, notes):
     return result
 
 
+def signing_certificate(report, expected):
+    require(re.fullmatch("[0-9a-f]{64}", expected.lower()), "Invalid configured certificate digest")
+    counts = re.findall(r"^Number of signers:\s*([0-9]+)\s*$", report, re.MULTILINE)
+    require(counts == ["1"], "Expected exactly one real APK signer")
+    require(re.search(r"^Verified using v2 scheme \(APK Signature Scheme v2\): true\s*$",
+                      report, re.MULTILINE), "APK v2 signature did not verify")
+    # Recent Android build-tools report V2/V3 Signer sections instead of the
+    # older Signer #1 prefix. Multiple schemes must all bind the same cert;
+    # public-key digests and source-stamp signers are not certificate evidence.
+    digests = re.findall(
+        r"^(?:Signer #[0-9]+|V[1-4](?:\.[0-9]+)? Signer:)\s+"
+        r"certificate SHA-256 digest:\s*([0-9a-fA-F]{64})\s*$",
+        report, re.MULTILINE,
+    )
+    require(bool(digests) and {digest.lower() for digest in digests} == {expected.lower()},
+            "APK is not signed with the configured release certificate")
+    return expected.lower()
+
+
 def create_android(args, trigger):
     sdk = mac.read_json(args.sdk)
     mac.validate_sdk(sdk)
@@ -358,11 +377,7 @@ def create_android(args, trigger):
     require(package and package.groups() == (
         "com.fanqie.fanqie_flutter", IDENTITY.build, IDENTITY.version,
     ), "APK package/versionCode/versionName differs from pubspec")
-    signers = re.findall(r"^Signer #[0-9]+ certificate SHA-256 digest: ([0-9a-fA-F]+)\s*$",
-                         args.signature.read_text(), re.MULTILINE)
-    require(len(signers) == 1 and signers[0].lower() == args.certificate_sha256.lower()
-            and re.fullmatch("[0-9a-f]{64}", args.certificate_sha256.lower()),
-            "APK is not signed with the configured release certificate")
+    certificate = signing_certificate(args.signature.read_text(), args.certificate_sha256)
     abis = android_payload(args.apk)
     require(not args.output.exists() and not args.output.is_symlink(), "No overwrite: Android output")
     args.output.mkdir(parents=True)
@@ -375,7 +390,7 @@ def create_android(args, trigger):
         "release_tag": IDENTITY.tag, "architecture": "universal", "build_mode": "Release",
         "build_target": "lib/main.dart", "application_id": "com.fanqie.fanqie_flutter",
         "signing": "release-keystore", "signed": True, "native_abis": abis, "flutter": sdk,
-        "signing_certificate_sha256": args.certificate_sha256.lower(),
+        "signing_certificate_sha256": certificate,
         "assets": {n: mac.record(args.output / n) for n in [name, sidecar]},
     }
     (args.output / metadata).write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")

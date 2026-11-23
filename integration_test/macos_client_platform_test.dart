@@ -199,7 +199,10 @@ Future<void> verifyMacHiddenWindowLifecycle({
             (snapshots) {
               return hasFreshAnchor(snapshots.hidden) &&
                   hasFreshAnchor(snapshots.stored) &&
-                  snapshots.stored!.updatedAt.isAtSameMomentAs(
+                  // Inactive/hidden lifecycle callbacks may commit another
+                  // valid same-anchor save after onWindowHidden's observer.
+                  // Never accept an older record or any changed source anchor.
+                  !snapshots.stored!.updatedAt.isBefore(
                     snapshots.hidden!.updatedAt,
                   );
             },
