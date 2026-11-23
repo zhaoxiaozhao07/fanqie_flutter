@@ -2,6 +2,13 @@
 
 交接日期：2026-11-23（Asia/Shanghai）。用户要求暂停 Windows 上的开发，仅保存 WIP、编写说明并通过 Git 迁移；本次交接不继续修复、不启动测试或 CI。
 
+> **Mac 续工状态（2026-11-23）：** 隐藏窗口 WIP 已在 `2f5d30f` 修复；
+> focused/analyze、全量离线、实际 Mac 平台与 57 项 XCTest 已通过，
+> 七场景 AOT、完整 CI 45121742680、最终 DMG 下载/只读挂载复验也已通过。
+> 代码与自动化验收完成，物理/人工项目仍单独待验。最新状态及证据见
+> [Mac 接手验证记录](MACOS_RESUME_VERIFICATION_2026-11-23.md)。
+> 下文保留 Windows 暂停时的历史状态，不代表续工后的当前验收状态。
+
 ## 1. 在 Mac 上接手
 
 仓库：[zhaoxiaozhao07/fanqie_flutter](https://github.com/zhaoxiaozhao07/fanqie_flutter)。
@@ -60,7 +67,7 @@ AOT 观测：104,000 UTF-16 单位单段冷分页 377ms；六个大正文场景�
 - SHA-256：`ddc8d449830902c656ddeed5e313029d462bb22a9b0195cfdd79b1f3afbe85ed`
 - 来源仍是上面的 **9deb13a**，不是 WIP；ad-hoc、未公证，不承诺 Gatekeeper/安装升级验收。
 
-## 3. 当前 WIP：先完成隐藏窗口测试
+## 3. 交接时 WIP：先完成隐藏窗口测试（历史）
 
 本次只原样保存两份暂停时的文件，没有继续修改其逻辑：
 
@@ -70,7 +77,7 @@ AOT 观测：104,000 UTF-16 单位单段冷分页 377ms；六个大正文场景�
 2. `test/macos_hidden_window_lifecycle_test.dart`
    - 新增 suppressed-frame、恢复、超时、保存/IO/权限失败的模拟行为测试；有真实隔离临时文件。
 
-**状态：WIP，尚未 GREEN、尚未 analyze、尚未独立复审、尚未实际 Mac 验证。**
+**交接时状态：WIP，尚未 GREEN、尚未 analyze、尚未独立复审、尚未实际 Mac 验证。**
 暂停前只完成了旧行为的 RED 复现：隐藏帧不可用时触发独立 500ms 期限。刚写入的修复不能当作已通过。
 
 重点：
