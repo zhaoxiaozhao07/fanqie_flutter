@@ -135,7 +135,7 @@ function Get-PublishProgram {
 function Test-FlutterBootstrap {
   # Execute the actual build step only through its SDK JSON read, not a copy of
   # the wrapper. The SDK boundary simulates a fresh installation's noisy launch.
-  $lines = Get-Content -LiteralPath (Join-Path $repo '.github/workflows/windows-release.yml')
+  $lines = Get-Content -LiteralPath (Join-Path $repo '.github/workflows/windows-build.yml')
   $selected = $false; $inRun = $false
   $programLines = [Collections.Generic.List[string]]::new()
   foreach ($line in $lines) {

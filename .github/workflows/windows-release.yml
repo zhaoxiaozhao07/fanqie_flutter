@@ -3,20 +3,6 @@ run-name: Windows x64 Release · ${{ github.ref_name }}
 
 # Reusable build gates; standalone publication retains the windows-* namespace.
 on:
-  workflow_call:
-    inputs:
-      version:
-        type: string
-        default: ''
-      publish:
-        type: boolean
-        default: false
-      release_tag:
-        type: string
-        default: ''
-    outputs:
-      artifact_name:
-        value: ${{ jobs.build.outputs.artifact_name }}
   workflow_dispatch:
     inputs:
       version:
@@ -41,144 +27,10 @@ defaults:
 
 jobs:
   build:
-    runs-on: windows-2022
-    timeout-minutes: 60
-    permissions:
-      contents: read
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      build: ${{ steps.version.outputs.build }}
-      full_version: ${{ steps.version.outputs.full_version }}
-      release_tag: ${{ steps.version.outputs.release_tag }}
-      package_name: ${{ steps.version.outputs.package_name }}
-      artifact_name: ${{ steps.version.outputs.artifact_name }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-      - name: Validate exact source, version and scope
-        id: version
-        env:
-          REQUESTED_VERSION: ${{ inputs.version }}
-          PUBLISH: ${{ inputs.publish }}
-          SHARED_RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') { throw 'x64 runner required' }
-          $head = git rev-parse HEAD
-          $code = $LASTEXITCODE
-          if ($code -ne 0 -or $head -cne $env:GITHUB_SHA) { throw "Exact triggering SHA checkout required (git exit $code)" }
-          if ($env:PUBLISH -eq 'true' -and $env:GITHUB_REF -cne 'refs/heads/main') { throw 'Only main may publish; disable publish for branch verification' }
-          $text = Get-Content -LiteralPath pubspec.yaml -Raw
-          if ($text -notmatch '(?m)^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$') { throw 'Invalid pubspec version' }
-          $version = $Matches[1]; $build = $Matches[2]
-          if ($env:REQUESTED_VERSION -and $env:REQUESTED_VERSION -cne $version) { throw 'Requested version differs from pubspec' }
-          $releaseTag = "windows-v$version-$build"
-          if ($env:SHARED_RELEASE_TAG) {
-            if ($env:SHARED_RELEASE_TAG -cne "v$version") { throw 'Unified tag differs from pubspec' }
-            $releaseTag = $env:SHARED_RELEASE_TAG
-          }
-          @(
-            "version=$version", "build=$build", "full_version=$version+$build",
-            "release_tag=$releaseTag",
-            "package_name=FanqieReader-$version-$build-windows-x64",
-            "artifact_name=windows-x64-$version-$build-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
-          ) | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
-          foreach ($script in @('scripts/package_windows.ps1', 'scripts/verify_windows_package.ps1', 'scripts/test_windows_package.ps1')) {
-            $tokens = $null; $errors = $null
-            $null = [Management.Automation.Language.Parser]::ParseFile((Join-Path $PWD $script), [ref]$tokens, [ref]$errors)
-            if ($errors.Count) { throw ($errors | Out-String) }
-          }
-          git diff --check
-          $code = $LASTEXITCODE
-          if ($code -ne 0) { throw "git diff check failed (exit $code)" }
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.47.9'
-          channel: stable
-          architecture: x64
-          cache: true
-      - name: Enforce lock, offline analyze/test, production build and verified package
-        env:
-          SHARED_RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $PSNativeCommandUseErrorActionPreference = $false
-          . ./scripts/verify_windows_package.ps1
-          $root = $PWD.Path
-          $logs = Resolve-WindowsReleasePath 'build/windows/ci-logs' $root
-          $out = Resolve-WindowsReleasePath 'dist/windows-ci' $root
-          Assert-WindowsWithin $logs (Join-Path $root 'build')
-          Assert-WindowsWithin $out (Join-Path $root 'dist')
-          New-Item -ItemType Directory -Path $logs -Force | Out-Null
-          function Invoke-CheckedFlutter([string[]]$Arguments, [string]$LogName) {
-            $mutex = [Threading.Mutex]::new($false, 'Local\FanqieCodexReaderFlutterChecks')
-            $owned = $false
-            try {
-              try { $owned = $mutex.WaitOne([TimeSpan]::FromMinutes(30)) }
-              catch [Threading.AbandonedMutexException] { $owned = $true }
-              if (-not $owned) { throw 'Flutter checks mutex timed out' }
-              & flutter @Arguments 2>&1 | Tee-Object -FilePath (Join-Path $logs $LogName)
-              $code = $LASTEXITCODE
-              if ($code -ne 0) { throw "flutter $Arguments failed (exit $code)" }
-            } finally {
-              if ($owned) { $mutex.ReleaseMutex() }
-              $mutex.Dispose()
-            }
-          }
-          # A fresh SDK bootstraps its tool with non-JSON diagnostics. Finish
-          # that first launch separately before requesting strict machine JSON.
-          Invoke-CheckedFlutter @('--version') 'flutter-bootstrap.log'
-          Invoke-CheckedFlutter @('--version', '--machine') 'flutter-version.json'
-          $sdk = Get-Content -LiteralPath (Join-Path $logs 'flutter-version.json') -Raw | ConvertFrom-Json
-          if ($sdk.frameworkVersion -ne '3.47.9' -or $sdk.dartSdkVersion -ne '3.13.7') { throw 'Pinned SDK mismatch' }
-          Invoke-CheckedFlutter @('config', '--enable-windows-desktop') 'flutter-config.log'
-          Invoke-CheckedFlutter @('pub', 'get', '--enforce-lockfile') 'flutter-pub.log'
-          git diff --exit-code -- pubspec.lock
-          $code = $LASTEXITCODE
-          if ($code -ne 0) { throw "Committed lock changed (git exit $code)" }
-          Invoke-CheckedFlutter @('analyze', '--no-pub') 'flutter-analyze.log'
-          Invoke-CheckedFlutter @('test', '--no-pub', '--reporter', 'expanded') 'flutter-test.log'
-          # This script alone performs exactly one Release build of lib/main.dart.
-          & ./scripts/package_windows.ps1 -OutputDir dist/windows-ci -ReleaseTag $env:SHARED_RELEASE_TAG 2>&1 | Tee-Object -FilePath (Join-Path $logs 'package.log')
-          if (-not $?) { throw 'Package script failed' }
-          git diff --exit-code -- pubspec.lock
-          $code = $LASTEXITCODE
-          if ($code -ne 0) { throw "Committed lock changed after checks/build (git exit $code)" }
-          # The harness consumes the just-built EXE for Windows resource checks; Flutter is stubbed.
-          & pwsh -NoLogo -NoProfile -File scripts/test_windows_package.ps1 -Suite All -LogPath (Join-Path $logs 'package-tests.log')
-          $code = $LASTEXITCODE
-          if ($code -ne 0) { throw "Packaging behavior tests failed (exit $code)" }
-          & pwsh -NoLogo -NoProfile -File scripts/test_windows_package.ps1 -Suite Publish -LogPath (Join-Path $logs 'publication-tests.log')
-          $code = $LASTEXITCODE
-          if ($code -ne 0) { throw "Publication behavior tests failed (exit $code)" }
-          & pwsh -NoLogo -NoProfile -File scripts/test_windows_package.ps1 -Suite Review -LogPath (Join-Path $logs 'review-repairs-tests.log')
-          $code = $LASTEXITCODE
-          if ($code -ne 0) { throw "Snapshot/archive/path race regressions failed (exit $code)" }
-          & pwsh -NoLogo -NoProfile -File scripts/test_windows_package.ps1 -Suite Bootstrap -LogPath (Join-Path $logs 'sdk-bootstrap-tests.log')
-          $code = $LASTEXITCODE
-          if ($code -ne 0) { throw "SDK cold-start regressions failed (exit $code)" }
-          git diff --exit-code
-          $code = $LASTEXITCODE
-          if ($code -ne 0) { throw "Tracked source changed from triggering SHA (git exit $code)" }
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.version.outputs.artifact_name }}
-          path: |
-            dist/windows-ci/${{ steps.version.outputs.package_name }}.zip
-            dist/windows-ci/${{ steps.version.outputs.package_name }}.zip.sha256
-            dist/windows-ci/windows-build-info.json
-          if-no-files-found: error
-          retention-days: 30
-      - name: Preserve diagnostic logs
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-ci-logs-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/windows/ci-logs/
-          if-no-files-found: warn
-          retention-days: 14
+    uses: ./.github/workflows/windows-build.yml
+    with:
+      version: ${{ inputs.version }}
+      publish: ${{ inputs.publish }}
 
   publish:
     needs: build

@@ -26,8 +26,10 @@ gh workflow run release.yml --ref main -f version=3.3.7 -f publish=true
 ```
 
 独立 Windows/macOS workflows 继续提供历史 namespace 的手工兼容入口；
-标准 `v*` 发布只由统一 workflow 负责。统一入口调用它们时强制 `publish=false`，
-避免多个 job 争抢/覆盖同一个 Release。
+标准 `v*` 发布只由统一 workflow 负责。统一入口只调用
+`windows-build.yml` / `macos-build.yml` 的只读构建工作流，不调用含写权限
+publish job 的控制器；即使 skipped publish job 也不能突破 caller 权限上限。
+只读 builder 与独立控制器使用不同 concurrency group，防止父/子互相等待。
 
 ## 门禁与“同时公开”
 

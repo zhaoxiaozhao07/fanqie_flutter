@@ -3,29 +3,6 @@ run-name: macOS arm64 自用 Release · ${{ github.ref_name }}
 
 # Reusable native gates; standalone self-use publishing has its own namespace.
 on:
-  workflow_call:
-    inputs:
-      version:
-        type: string
-        default: ''
-      publish:
-        type: boolean
-        default: false
-      full_platform:
-        type: boolean
-        default: false
-      reader_aot:
-        type: boolean
-        default: false
-      require_foreground:
-        type: boolean
-        default: false
-      live_api:
-        type: boolean
-        default: false
-    outputs:
-      artifact_name:
-        value: ${{ jobs.build.outputs.artifact_name }}
   workflow_dispatch:
     inputs:
       version:
@@ -72,167 +49,14 @@ defaults:
 
 jobs:
   build:
-    name: 测试并构建 arm64 Release DMG
-    # A standard, non-larger Apple Silicon runner; do not use an Intel label.
-    runs-on: macos-26
-    timeout-minutes: 90
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-      full_version: ${{ steps.version.outputs.full_version }}
-      build: ${{ steps.version.outputs.build }}
-      artifact_name: ${{ steps.version.outputs.artifact_name }}
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - name: 校验架构、版本与发布范围
-        id: version
-        env:
-          REQUESTED_VERSION: ${{ inputs.version }}
-          PUBLISH: ${{ inputs.publish }}
-        run: |
-          set -euo pipefail
-          [[ "$(uname -m)" == arm64 ]] || { echo 'Apple Silicon runner is required'; exit 1; }
-          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
-          FULL_VERSION=$(awk '/^version:/{print $2}' pubspec.yaml)
-          VERSION=${FULL_VERSION%%+*}
-          BUILD=${FULL_VERSION##*+}
-          [[ "$FULL_VERSION" == *+* && "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$BUILD" =~ ^[0-9]+$ ]]
-          [[ "$(python3 scripts/release_identity.py pubspec.yaml)" == "$FULL_VERSION" ]]
-          if [[ -n "$REQUESTED_VERSION" && "$REQUESTED_VERSION" != "$VERSION" ]]; then
-            echo '手动版本与代码版本不一致'; exit 1
-          fi
-          if [[ "$PUBLISH" == true && "$GITHUB_REF" != refs/heads/main ]]; then
-            echo '仅 main 可发布自用预发布版本；其他分支请关闭 publish'; exit 1
-          fi
-          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
-          echo "full_version=$FULL_VERSION" >> "$GITHUB_OUTPUT"
-          echo "build=$BUILD" >> "$GITHUB_OUTPUT"
-          echo "artifact_name=fanqie-macos-arm64-$VERSION-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
-          mkdir -p build/macos/ci-logs
-          sw_vers
-          xcodebuild -version
-          for script in scripts/*.sh; do bash -n "$script"; done
-          git diff --check
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: '3.47.9'
-          channel: stable
-          architecture: arm64
-          cache: true
-      - name: 准备 macOS 依赖
-        run: |
-          set -euo pipefail
-          flutter --version
-          flutter config --enable-macos-desktop
-          flutter pub get --enforce-lockfile
-          flutter --version --machine > build/macos/ci-logs/flutter-version.json
-      - name: 原生门禁受控命令回归（不等于 Mac 实机验证）
-        timeout-minutes: 3
-        run: |
-          set -euo pipefail
-          python3 scripts/test_macos_native_pipeline.py \
-            2>&1 | tee build/macos/ci-logs/native-pipeline-fixtures.log
-      - name: AOT 生命周期回归（Bash 3.2 兼容进程 doubles）
-        timeout-minutes: 3
-        env:
-          BASH_EXECUTABLE: /bin/bash
-        run: |
-          set -euo pipefail
-          python3 scripts/test_macos_reader_performance_pipeline.py \
-            2>&1 | tee build/macos/ci-logs/reader-lifecycle-fixtures.log
-      - name: 打包与来源受控文件系统回归
-        timeout-minutes: 5
-        env:
-          BASH_EXECUTABLE: /bin/bash
-        run: |
-          set -euo pipefail
-          python3 scripts/test_macos_package.py \
-            2>&1 | tee build/macos/ci-logs/package-provenance-fixtures.log
-      - name: 静态分析
-        run: |
-          set -euo pipefail
-          flutter analyze --no-pub 2>&1 | tee build/macos/ci-logs/flutter-analyze.log
-      - name: 离线单元与组件回归
-        run: |
-          set -euo pipefail
-          flutter test --no-pub --reporter expanded 2>&1 | tee build/macos/ci-logs/flutter-test.log
-      - name: 原生 XCTest（生产 Debug 主机）
-        timeout-minutes: 15
-        run: |
-          set -euo pipefail
-          scripts/test_macos_native.sh 2>&1 | tee build/macos/ci-logs/native-xctest.log
-      - name: 完整平台集成（独立最终验证 opt-in）
-        if: inputs.full_platform
-        timeout-minutes: 15
-        run: |
-          set -euo pipefail
-          scripts/test_macos_platform.sh \
-            --dart-define=MACOS_NATIVE_FULLSCREEN_TEST=false \
-            --dart-define=MACOS_SAVE_PANEL_TEST=false \
-            2>&1 | tee build/macos/ci-logs/full-platform.log
-      - name: 七场景 AOT Profile（独立最终验证 opt-in）
-        if: inputs.reader_aot
-        timeout-minutes: 12
-        env:
-          MACOS_REQUIRE_FOREGROUND: ${{ inputs.require_foreground }}
-          MACOS_READER_PERF_LOG: ${{ github.workspace }}/build/macos/ci-logs/reader-aot-app.log
-        run: |
-          set -euo pipefail
-          scripts/test_macos_reader_performance.sh \
-            2>&1 | tee build/macos/ci-logs/reader-aot-runner.log
-      - name: 有界真实 API smoke（独立 opt-in）
-        if: inputs.live_api
-        timeout-minutes: 8
-        run: |
-          set -euo pipefail
-          flutter test --no-pub test/api_integration_test.dart \
-            --dart-define=FANQIE_LIVE_API=true --concurrency=1 --reporter expanded \
-            2>&1 | tee build/macos/ci-logs/live-api.log
-      - name: 构建生产入口 Release
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-          BUILD_NUMBER: ${{ steps.version.outputs.build }}
-        run: |
-          set -euo pipefail
-          flutter build macos --release --no-pub --target lib/main.dart \
-            --build-name="$VERSION" --build-number="$BUILD_NUMBER" \
-            2>&1 | tee build/macos/ci-logs/flutter-build.log
-      - name: 内部签名、架构校验与 DMG 打包
-        timeout-minutes: 10
-        env:
-          FULL_VERSION: ${{ steps.version.outputs.full_version }}
-        run: |
-          set -euo pipefail
-          # "internal" is ad-hoc signing of a Release build, not a Debug build.
-          export MACOS_XCODE_VERSION="$(xcodebuild -version)"
-          python3 scripts/macos_release_validation.py context \
-            --sdk build/macos/ci-logs/flutter-version.json \
-            --native-log build/macos/ci-logs/native-xctest.log \
-            --output build/macos/ci-logs/release-context.json
-          export MACOS_RELEASE_CONTEXT="$PWD/build/macos/ci-logs/release-context.json"
-          scripts/package_macos.sh \
-            build/macos/Build/Products/Release/FanqieReader.app \
-            internal build/macos/distribution/ci \
-            2>&1 | tee build/macos/ci-logs/package.log
-          python3 scripts/macos_release_validation.py artifacts build/macos/distribution/ci
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ steps.version.outputs.artifact_name }}
-          path: |
-            build/macos/distribution/ci/*.dmg
-            build/macos/distribution/ci/*.dmg.sha256
-            build/macos/distribution/ci/build-info.json
-          if-no-files-found: error
-          retention-days: 30
-      - name: 保存验证日志
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos-ci-logs-${{ github.run_id }}-${{ github.run_attempt }}
-          path: build/macos/ci-logs/
-          if-no-files-found: warn
-          retention-days: 14
+    uses: ./.github/workflows/macos-build.yml
+    with:
+      version: ${{ inputs.version }}
+      publish: ${{ inputs.publish }}
+      full_platform: ${{ inputs.full_platform }}
+      reader_aot: ${{ inputs.reader_aot }}
+      require_foreground: ${{ inputs.require_foreground }}
+      live_api: ${{ inputs.live_api }}
 
   publish:
     name: 发布独立的自用预发布附件

@@ -36,8 +36,8 @@ class WorkflowTests(unittest.TestCase):
 
     def test_existing_native_build_gates_are_reused_without_independent_release(self):
         jobs = workflow("release.yml")["jobs"]
-        self.assertEqual(jobs["windows"]["uses"], "./.github/workflows/windows-release.yml")
-        self.assertEqual(jobs["macos"]["uses"], "./.github/workflows/macos-internal.yml")
+        self.assertEqual(jobs["windows"]["uses"], "./.github/workflows/windows-build.yml")
+        self.assertEqual(jobs["macos"]["uses"], "./.github/workflows/macos-build.yml")
         self.assertIs(jobs["windows"]["with"]["publish"], False)
         self.assertIs(jobs["macos"]["with"]["publish"], False)
         self.assertIs(jobs["macos"]["with"]["full_platform"], True)
@@ -51,7 +51,7 @@ class WorkflowTests(unittest.TestCase):
         for platform in ["android", "windows", "macos"]:
             self.assertEqual(release_jobs[platform]["with"]["version"],
                              "${{ needs.prepare.outputs.version }}")
-        for name in ["release.yml", "android-release.yml", "windows-release.yml", "macos-internal.yml"]:
+        for name in ["release.yml", "android-release.yml", "windows-build.yml", "macos-build.yml"]:
             document = workflow(name)
             if name != "release.yml":
                 self.assertIn("workflow_call", events(document))
@@ -70,6 +70,26 @@ class WorkflowTests(unittest.TestCase):
         self.assertEqual(jobs["publish"]["permissions"]["contents"], "write")
         for name in ["prepare", "quality", "android", "windows", "macos", "assemble"]:
             self.assertNotEqual(jobs[name].get("permissions", {}).get("contents"), "write")
+        # A skipped publish job in a callee still violates the caller's read
+        # ceiling during GitHub startup validation. Build-only callees must
+        # have no such job, regardless of false inputs/if expressions.
+        for platform in ["android", "windows", "macos"]:
+            path = jobs[platform]["uses"].rsplit("/", 1)[1]
+            callee = workflow(path)
+            self.assertEqual(callee["permissions"]["contents"], "read")
+            for job in callee["jobs"].values():
+                self.assertNotEqual(job.get("permissions", {}).get("contents"), "write")
+
+    def test_wrapper_and_callee_concurrency_never_deadlock_each_other(self):
+        for wrapper_name, builder_name in [
+            ("windows-release.yml", "windows-build.yml"),
+            ("macos-internal.yml", "macos-build.yml"),
+        ]:
+            wrapper, builder = workflow(wrapper_name), workflow(builder_name)
+            self.assertNotEqual(wrapper["concurrency"]["group"], builder["concurrency"]["group"])
+            self.assertEqual(wrapper["jobs"]["build"]["uses"], f"./.github/workflows/{builder_name}")
+            self.assertIn("publish", wrapper["jobs"])
+            self.assertNotIn("publish", builder["jobs"])
 
     def test_android_verifies_real_certificate_and_never_uploads_keystore(self):
         steps = workflow("android-release.yml")["jobs"]["build"]["steps"]
