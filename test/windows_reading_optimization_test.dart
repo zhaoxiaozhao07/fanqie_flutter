@@ -563,7 +563,7 @@ void main() {
     );
   }
 
-  desktopTest('fullscreen chapter text keeps normal text contrast', (
+  desktopTest('fullscreen keeps body contrast without a corner chapter label', (
     tester,
   ) async {
     await open(
@@ -576,11 +576,12 @@ void main() {
     );
     await tester.sendKeyEvent(LogicalKeyboardKey.f11);
     await tester.pumpAndSettle();
-    final text = tester.widget<Text>(
+    expect(
       find.byKey(const ValueKey('desktop-immersive-chapter-title')),
+      findsNothing,
     );
-    final bg = ReaderTheme.presets[2].backgroundColor;
-    final fg = Color.alphaBlend(text.style!.color!, bg);
+    final bg = background(tester);
+    final fg = Color.alphaBlend(foreground(tester), bg);
     final a = fg.computeLuminance(), b = bg.computeLuminance();
     final ratio = a > b ? (a + .05) / (b + .05) : (b + .05) / (a + .05);
     expect(ratio, greaterThanOrEqualTo(4.5));

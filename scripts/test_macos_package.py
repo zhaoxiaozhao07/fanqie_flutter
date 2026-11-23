@@ -17,6 +17,7 @@ import tempfile
 import textwrap
 import unittest
 from unittest import mock
+from release_identity import repository_identity
 
 try:
     import macos_release_validation as v
@@ -24,8 +25,12 @@ except ModuleNotFoundError:
     v = None
 
 ROOT = Path(__file__).resolve().parents[1]
-NAME = "fanqie-v3.3.6-342-macos-arm64-internal.dmg"
-FORMAL_NAME = "fanqie-v3.3.6-342-macos-arm64.dmg"
+IDENTITY = repository_identity()
+VERSION = IDENTITY.version
+FULL_VERSION = IDENTITY.full_version
+BUILD = IDENTITY.build
+NAME = f"fanqie-v{VERSION}-{BUILD}-macos-arm64-internal.dmg"
+FORMAL_NAME = f"fanqie-v{VERSION}-{BUILD}-macos-arm64.dmg"
 ASSETS = "Contents/Frameworks/App.framework/Versions/A/Resources/flutter_assets"
 ICU = "Contents/Frameworks/FlutterMacOS.framework/Versions/A/Resources/icudtl.dat"
 FONT_MANIFEST = [
@@ -51,7 +56,7 @@ def write(path, data=b"fixture"):
 
 def bundle(app):
     write(app / "Contents/Info.plist", plistlib.dumps({
-        "CFBundleShortVersionString": "3.3.6", "CFBundleVersion": "342",
+        "CFBundleShortVersionString": VERSION, "CFBundleVersion": BUILD,
         "FanqieBuildTarget": "lib/main.dart", "CFBundleIdentifier": "com.fanqie.reader.macos",
         "CFBundleExecutable": "FanqieReader", "LSMinimumSystemVersion": "12.0",
     }))
@@ -395,7 +400,7 @@ class ValidationTests(BundleFixture, unittest.TestCase):
         stage = self.stage()
         remote = self.root / "downloaded"
         shutil.copytree(stage, remote)
-        tag = "macos-internal-v3.3.6-123-1"
+        tag = f"macos-internal-v{VERSION}-123-1"
         tag_info = {"ref": f"refs/tags/{tag}", "object": {"type": "commit", "sha": "a" * 40}}
         release = {"tag_name": tag, "prerelease": True, "draft": False,
                    "assets": [{"name": p.name, "size": p.stat().st_size} for p in stage.iterdir()]}
@@ -437,14 +442,14 @@ class ShellPipelineTests(BundleFixture, unittest.TestCase):
         scripts = self.checkout / "scripts"
         scripts.mkdir()
         for name in ("package_macos.sh", "verify_macos_dmg.sh",
-                     "verify_macos_bundle.sh", "macos_release_validation.py",
+                     "verify_macos_bundle.sh", "macos_release_validation.py", "release_identity.py",
                      "package_macos_release.sh"):
             if name == "package_macos_release.sh" and not (ROOT / "scripts" / name).exists():
                 continue  # RED fixture for the explicitly restored route.
             path = scripts / name
             write(path, (ROOT / "scripts" / name).read_text(encoding="utf-8"))
             path.chmod(0o755)
-        write(self.checkout / "pubspec.yaml", "version: 3.3.6+342\n")
+        write(self.checkout / "pubspec.yaml", f"version: {FULL_VERSION}\n")
         write(self.checkout / "macos/Runner/Release.entitlements", (ROOT / "macos/Runner/Release.entitlements").read_bytes())
         self.command(scripts / "sign_macos_internal.sh",
                      'printf internal > "$FIXTURE_ROOT/internal-sign-called"')
@@ -776,7 +781,7 @@ sys.stdout.buffer.write((hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + 
         ctx = context() | {"source_ref": "refs/heads/main"}
         v.create_artifacts(stage, v.snapshot_bundle(self.app), ctx)
         shutil.copytree(stage, self.root / "remote-source")
-        tag = "macos-internal-v3.3.6-123-1"
+        tag = f"macos-internal-v{VERSION}-123-1"
         write(self.root / "tag.json", json.dumps({
             "ref": f"refs/tags/{tag}", "object": {"type": "commit", "sha": "a" * 40, "url": "fixture"}}))
         write(self.root / "release.json", json.dumps({
@@ -787,8 +792,8 @@ sys.stdout.buffer.write((hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + 
                         GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1", GITHUB_RUN_NUMBER="1",
                         GITHUB_SERVER_URL="https://github.com", GITHUB_REPOSITORY="owner/repo",
                         GITHUB_STEP_SUMMARY=f"{self.shell_root}/summary",
-                        GH_TOKEN="fixture-not-a-token", VERSION="3.3.6", FULL_VERSION="3.3.6+342",
-                        BUILD_NUMBER="342")
+                        GH_TOKEN="fixture-not-a-token", VERSION=VERSION, FULL_VERSION=FULL_VERSION,
+                        BUILD_NUMBER=BUILD)
         self.command(self.bin / "gh", """
             if [[ "$1" == api ]]; then
               case "$2" in
@@ -866,7 +871,7 @@ sys.stdout.buffer.write((hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + 
         creates = [command for command in commands if command[:3] == ["gh", "release", "create"]]
         self.assertEqual(len(creates), 1, self.publish_diagnostic)
         self.assertEqual(creates[0][creates[0].index("--title") + 1],
-                         "番茄Reader macOS 自用 v3.3.6（构建 1）")
+                         f"番茄Reader macOS 自用 v{VERSION}（构建 1）")
 
     def test_real_publish_block_rejects_wrong_provenance_before_upload(self):
         stage = self.prepare_publish()
@@ -880,7 +885,7 @@ sys.stdout.buffer.write((hashlib.sha256(path.read_bytes()).hexdigest() + '  ' + 
 
     def test_real_publish_block_refuses_existing_tag_and_tampered_upload(self):
         self.prepare_publish()
-        write(self.root / "refs.json", '[{"ref":"refs/tags/macos-internal-v3.3.6-123-1"}]')
+        write(self.root / "refs.json", json.dumps([{"ref": f"refs/tags/macos-internal-v{VERSION}-123-1"}]))
         result = self.run_publish()
         self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr + self.publish_diagnostic)
         self.assertFalse((self.root / "release-created").exists())

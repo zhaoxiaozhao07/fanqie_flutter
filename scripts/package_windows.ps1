@@ -1,5 +1,5 @@
 ﻿# FanqieReader unsigned Windows x64 portable Release. Requires PowerShell 7.
-param([string]$OutputDir = 'dist', [string]$RuntimeDir)
+param([string]$OutputDir = 'dist', [string]$RuntimeDir, [string]$ReleaseTag)
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 if ($PSVersionTable.PSVersion.Major -lt 7) { throw 'Use pwsh (PowerShell 7), not Windows PowerShell 5.1' }
@@ -14,6 +14,10 @@ Assert-WindowsWithin $output $dist -AllowParent
 $pubspec = Get-Content -LiteralPath (Join-Path $root 'pubspec.yaml') -Raw
 if ($pubspec -notmatch '(?m)^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$') { throw 'pubspec.yaml version not found' }
 $version = $Matches[1]; $build = $Matches[2]; $fullVersion = "$version+$build"
+if (-not $ReleaseTag) { $ReleaseTag = "windows-v$version-$build" }
+if ($ReleaseTag -cne "windows-v$version-$build" -and $ReleaseTag -cne "v$version") {
+  throw 'Release tag must match the exact standalone or unified version'
+}
 $packageName = "FanqieReader-$version-$build-windows-x64"
 $stage = Resolve-WindowsReleasePath (Join-Path $output $packageName) $root
 $zipPath = Resolve-WindowsReleasePath (Join-Path $output "$packageName.zip") $root
@@ -148,7 +152,7 @@ foreach ($path in @($zipPath, $checksumPath)) {
 $runtimeDigests = [ordered]@{}
 foreach ($file in $runtimeFiles) { $runtimeDigests[$file.Name] = (Get-FileHash -LiteralPath $file.FullName).Hash.ToLowerInvariant() }
 $info = [ordered]@{
-  schema_version = 1; version = $fullVersion; release_tag = "windows-v$version-$build"
+  schema_version = 1; version = $fullVersion; release_tag = $ReleaseTag
   source_commit = $sourceSha; source_ref = $sourceRef
   workflow_run = if ($env:GITHUB_RUN_ID) { "$env:GITHUB_SERVER_URL/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID" } else { $null }
   run_id = $env:GITHUB_RUN_ID; run_attempt = $env:GITHUB_RUN_ATTEMPT

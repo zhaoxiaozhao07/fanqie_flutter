@@ -4106,8 +4106,6 @@ class _ReaderScreenState extends State<ReaderScreen>
                                   ],
                                 ),
                                 if (_readingFullScreen) _immersiveEdgeToolbar(),
-                                if (_readingFullScreen)
-                                  _immersiveChapterBadge(),
                               ],
                             ),
                           ),
@@ -4380,52 +4378,6 @@ class _ReaderScreenState extends State<ReaderScreen>
     ),
   );
 
-  /// 沉浸阅读时左下角常驻当前章节名，避免全屏下丢失阅读位置线索。
-  Widget _immersiveChapterBadge() {
-    final theme = _themes[_themeIndex];
-    return Positioned(
-      left: 0,
-      right: 0,
-      bottom: 0,
-      child: IgnorePointer(
-        child: AnimatedBuilder(
-          animation: Listenable.merge([
-            _activeChapterNotifier,
-            _positionVersion,
-          ]),
-          builder: (context, _) {
-            final index = _activeChapterNotifier.value;
-            final chapter = (index >= 0 && index < widget.chapters.length)
-                ? widget.chapters[index]
-                : widget.chapters.first;
-            return Padding(
-              padding: EdgeInsets.only(
-                left: 24,
-                right: 24,
-                // 听书播放条占据底部时，章节名上移避让。
-                bottom: _ttsLayoutActive
-                    ? TtsPlayerPanel.desktopHeight + 12
-                    : 16,
-              ),
-              child: Text(
-                chapter.title,
-                key: const ValueKey('desktop-immersive-chapter-title'),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 12,
-                  height: 1.2,
-                  letterSpacing: .2,
-                  color: theme.secondaryColor,
-                ),
-              ),
-            );
-          },
-        ),
-      ),
-    );
-  }
-
   Widget _desktopToolbar() {
     final theme = _themes[_themeIndex];
     final mod = ReaderPlatform.isWindows ? 'Ctrl+' : '⌘';
@@ -4474,10 +4426,22 @@ class _ReaderScreenState extends State<ReaderScreen>
                 onPressed: _toggleDesktopDirectory,
               ),
               Expanded(
-                child: Text(
-                  widget.book.bookName,
-                  style: TextStyle(color: theme.secondaryColor, fontSize: 12),
-                  overflow: TextOverflow.ellipsis,
+                child: ValueListenableBuilder<int>(
+                  valueListenable: _activeChapterNotifier,
+                  builder: (context, index, _) => Tooltip(
+                    key: const ValueKey('desktop-reader-chapter-context'),
+                    message:
+                        '${widget.book.bookName}\n'
+                        '${widget.chapters[index.clamp(0, widget.chapters.length - 1)].title}',
+                    child: Text(
+                      widget.book.bookName,
+                      style: TextStyle(
+                        color: theme.secondaryColor,
+                        fontSize: 12,
+                      ),
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
                 ),
               ),
               IconButton(

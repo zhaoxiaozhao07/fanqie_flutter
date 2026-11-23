@@ -9,7 +9,9 @@ OUT="${3:-$ROOT/build/macos/distribution}"
 VALIDATOR="$ROOT/scripts/macos_release_validation.py"
 [[ "$(uname -m)" == arm64 ]] || { echo 'Apple Silicon is required' >&2; exit 2; }
 [[ "$MODE" == internal || "$MODE" == release ]] || exit 2
-[[ "$(awk '/^version:/{print $2}' "$ROOT/pubspec.yaml")" == 3.3.6+342 ]]
+FULL_VERSION="$(python3 "$ROOT/scripts/release_identity.py" "$ROOT/pubspec.yaml")"
+VERSION="${FULL_VERSION%%+*}"
+BUILD="${FULL_VERSION##*+}"
 if [[ "$MODE" == release ]]; then
   exec "$ROOT/scripts/package_macos_release.sh" "$APP" "$OUT"
 fi
@@ -30,9 +32,9 @@ printf '%s\n' '内部测试包，非正式分发。未使用 Developer ID 签名
 "$ROOT/scripts/sign_macos_internal.sh" "$STAGED" release
 "$ROOT/scripts/verify_macos_bundle.sh" "$STAGED" internal
 python3 "$VALIDATOR" snapshot "$STAGED" "$WORK/bundle-snapshot.json"
-NAME="fanqie-v3.3.6-342-macos-arm64-internal.dmg"
+NAME="fanqie-v${VERSION}-${BUILD}-macos-arm64-internal.dmg"
 # Create only inside this operation's private directory; never use -ov.
-hdiutil create -volname '番茄Reader 3.3.6 (342)' -srcfolder "$WORK/content" \
+hdiutil create -volname "番茄Reader ${VERSION} (${BUILD})" -srcfolder "$WORK/content" \
   -format UDZO "$WORK/artifacts/$NAME"
 "$ROOT/scripts/verify_macos_dmg.sh" "$WORK/artifacts/$NAME" "$WORK/bundle-snapshot.json"
 python3 "$VALIDATOR" create "$WORK/artifacts" \

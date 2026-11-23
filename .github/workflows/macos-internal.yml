@@ -1,8 +1,31 @@
 name: 构建 macOS 自用 DMG
 run-name: macOS arm64 自用 Release · ${{ github.ref_name }}
 
-# Deliberately independent of the Android release workflow and signing secrets.
+# Reusable native gates; standalone self-use publishing has its own namespace.
 on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ''
+      publish:
+        type: boolean
+        default: false
+      full_platform:
+        type: boolean
+        default: false
+      reader_aot:
+        type: boolean
+        default: false
+      require_foreground:
+        type: boolean
+        default: false
+      live_api:
+        type: boolean
+        default: false
+    outputs:
+      artifact_name:
+        value: ${{ jobs.build.outputs.artifact_name }}
   workflow_dispatch:
     inputs:
       version:
@@ -75,7 +98,7 @@ jobs:
           VERSION=${FULL_VERSION%%+*}
           BUILD=${FULL_VERSION##*+}
           [[ "$FULL_VERSION" == *+* && "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$BUILD" =~ ^[0-9]+$ ]]
-          [[ "$FULL_VERSION" == 3.3.6+342 ]]
+          [[ "$(python3 scripts/release_identity.py pubspec.yaml)" == "$FULL_VERSION" ]]
           if [[ -n "$REQUESTED_VERSION" && "$REQUESTED_VERSION" != "$VERSION" ]]; then
             echo '手动版本与代码版本不一致'; exit 1
           fi
@@ -236,7 +259,8 @@ jobs:
           BUILD_NUMBER: ${{ needs.build.outputs.build }}
         run: |
           set -euo pipefail
-          [[ "$GITHUB_REF" == refs/heads/main && "$FULL_VERSION" == 3.3.6+342 ]]
+          [[ "$GITHUB_REF" == refs/heads/main ]]
+          [[ "$(python3 scripts/release_identity.py pubspec.yaml)" == "$FULL_VERSION" ]]
           python3 scripts/macos_release_validation.py artifacts dist/macos
           NAME="fanqie-v$VERSION-$BUILD_NUMBER-macos-arm64-internal.dmg"
           # Separate namespace + immutable run identity; never move Android v* tags.

@@ -168,10 +168,7 @@ void main() {
       expect(request['sourcePath'], source.path);
       expect(request['fileName'], '书 (1).txt');
       expect(request['directory'], isNotEmpty);
-      expect(
-        calls.where((c) => c.method == 'saveExportFile'),
-        isEmpty,
-      );
+      expect(calls.where((c) => c.method == 'saveExportFile'), isEmpty);
       commitResponse = {'status': 'cancelled'};
       expect(
         (await DesktopDownloadOutput.commit(source, '书 (1).txt')).status,
@@ -283,24 +280,27 @@ void main() {
     expect(DesktopCommands.dispatch('find'), false);
   });
 
-  test('quit waits for participants and refuses failed durable writes', () async {
-    final owner = Object();
-    ReaderSystemService.registerSaveParticipant(
-      owner,
-      () async => throw StateError('disk full'),
-    );
-    expect(await AppLifecycleService.prepareToQuit(), false);
-    var saved = false;
-    ReaderSystemService.registerSaveParticipant(owner, () async {
-      saved = true;
-    });
-    try {
-      expect(await AppLifecycleService.prepareToQuit(), true);
-      expect(saved, true);
-    } finally {
-      ReaderSystemService.registerSaveParticipant(owner, null);
-    }
-  });
+  test(
+    'quit waits for participants and refuses failed durable writes',
+    () async {
+      final owner = Object();
+      ReaderSystemService.registerSaveParticipant(
+        owner,
+        () async => throw StateError('disk full'),
+      );
+      expect(await AppLifecycleService.prepareToQuit(), false);
+      var saved = false;
+      ReaderSystemService.registerSaveParticipant(owner, () async {
+        saved = true;
+      });
+      try {
+        expect(await AppLifecycleService.prepareToQuit(), true);
+        expect(saved, true);
+      } finally {
+        ReaderSystemService.registerSaveParticipant(owner, null);
+      }
+    },
+  );
 
   Future<void> mountReader(
     WidgetTester tester,
@@ -670,18 +670,15 @@ void main() {
       find.byKey(const ValueKey('reader-immersive-toolbar-edge')),
       findsOneWidget,
     );
-    // 全屏阅读时左下角常驻当前章节名称。
-    final badge = find.byKey(
-      const ValueKey('desktop-immersive-chapter-title'),
+    // Immersion exposes chapter context on demand, never over the body.
+    expect(
+      find.byKey(const ValueKey('desktop-immersive-chapter-title')),
+      findsNothing,
     );
-    expect(badge, findsOneWidget);
-    expect(tester.widget<Text>(badge).data, '第1章');
     final viewport = tester.getRect(
       find.byKey(const ValueKey('desktop-reader-viewport')),
     );
-    final badgeRect = tester.getRect(badge);
-    expect(badgeRect.left, closeTo(viewport.left + 24, 1));
-    expect(badgeRect.bottom, closeTo(viewport.bottom - 16, 1));
+    expect(viewport, const Rect.fromLTWH(0, 0, 1024, 768));
     await tester.sendKeyEvent(LogicalKeyboardKey.escape);
     await tester.pumpAndSettle();
     expect(
@@ -884,4 +881,3 @@ void main() {
     },
   );
 }
-

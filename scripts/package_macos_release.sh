@@ -12,7 +12,9 @@ VALIDATOR="$ROOT/scripts/macos_release_validation.py"
   echo 'Not a Developer ID identity' >&2; exit 2;
 }
 [[ "$(uname -m)" == arm64 ]]
-[[ "$(awk '/^version:/{print $2}' "$ROOT/pubspec.yaml")" == 3.3.6+342 ]]
+FULL_VERSION="$(python3 "$ROOT/scripts/release_identity.py" "$ROOT/pubspec.yaml")"
+VERSION="${FULL_VERSION%%+*}"
+BUILD="${FULL_VERSION##*+}"
 python3 "$VALIDATOR" bundle "$APP"
 python3 "$VALIDATOR" check-output "$OUT" --mode release
 mkdir -p "$OUT"
@@ -52,9 +54,9 @@ xcrun notarytool submit "$WORK/notarize.zip" --keychain-profile "$MACOS_NOTARY_P
 xcrun stapler staple "$STAGED"
 "$ROOT/scripts/verify_macos_bundle.sh" "$STAGED" release
 python3 "$VALIDATOR" snapshot "$STAGED" "$WORK/bundle-snapshot.json"
-NAME="fanqie-v3.3.6-342-macos-arm64.dmg"
+NAME="fanqie-v${VERSION}-${BUILD}-macos-arm64.dmg"
 IMAGE="$WORK/artifacts/$NAME"
-hdiutil create -volname '番茄Reader 3.3.6 (342)' -srcfolder "$WORK/content" -format UDZO "$IMAGE"
+hdiutil create -volname "番茄Reader ${VERSION} (${BUILD})" -srcfolder "$WORK/content" -format UDZO "$IMAGE"
 codesign --force --timestamp --sign "$MACOS_SIGN_IDENTITY" "$IMAGE"
 xcrun notarytool submit "$IMAGE" --keychain-profile "$MACOS_NOTARY_PROFILE" --wait
 xcrun stapler staple "$IMAGE"

@@ -1,8 +1,22 @@
 name: Windows 正式便携版
 run-name: Windows x64 Release · ${{ github.ref_name }}
 
-# Independent namespace: never create v* tags or modify Android releases.
+# Reusable build gates; standalone publication retains the windows-* namespace.
 on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        default: ''
+      publish:
+        type: boolean
+        default: false
+      release_tag:
+        type: string
+        default: ''
+    outputs:
+      artifact_name:
+        value: ${{ jobs.build.outputs.artifact_name }}
   workflow_dispatch:
     inputs:
       version:
@@ -48,6 +62,7 @@ jobs:
         env:
           REQUESTED_VERSION: ${{ inputs.version }}
           PUBLISH: ${{ inputs.publish }}
+          SHARED_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           $ErrorActionPreference = 'Stop'
           if ([Runtime.InteropServices.RuntimeInformation]::OSArchitecture -ne 'X64') { throw 'x64 runner required' }
@@ -59,9 +74,14 @@ jobs:
           if ($text -notmatch '(?m)^version:\s*(\d+\.\d+\.\d+)\+(\d+)\s*$') { throw 'Invalid pubspec version' }
           $version = $Matches[1]; $build = $Matches[2]
           if ($env:REQUESTED_VERSION -and $env:REQUESTED_VERSION -cne $version) { throw 'Requested version differs from pubspec' }
+          $releaseTag = "windows-v$version-$build"
+          if ($env:SHARED_RELEASE_TAG) {
+            if ($env:SHARED_RELEASE_TAG -cne "v$version") { throw 'Unified tag differs from pubspec' }
+            $releaseTag = $env:SHARED_RELEASE_TAG
+          }
           @(
             "version=$version", "build=$build", "full_version=$version+$build",
-            "release_tag=windows-v$version-$build",
+            "release_tag=$releaseTag",
             "package_name=FanqieReader-$version-$build-windows-x64",
             "artifact_name=windows-x64-$version-$build-$env:GITHUB_RUN_ID-$env:GITHUB_RUN_ATTEMPT"
           ) | Add-Content -LiteralPath $env:GITHUB_OUTPUT -Encoding utf8
@@ -80,6 +100,8 @@ jobs:
           architecture: x64
           cache: true
       - name: Enforce lock, offline analyze/test, production build and verified package
+        env:
+          SHARED_RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           $ErrorActionPreference = 'Stop'
           $PSNativeCommandUseErrorActionPreference = $false
@@ -119,7 +141,7 @@ jobs:
           Invoke-CheckedFlutter @('analyze', '--no-pub') 'flutter-analyze.log'
           Invoke-CheckedFlutter @('test', '--no-pub', '--reporter', 'expanded') 'flutter-test.log'
           # This script alone performs exactly one Release build of lib/main.dart.
-          & ./scripts/package_windows.ps1 -OutputDir dist/windows-ci 2>&1 | Tee-Object -FilePath (Join-Path $logs 'package.log')
+          & ./scripts/package_windows.ps1 -OutputDir dist/windows-ci -ReleaseTag $env:SHARED_RELEASE_TAG 2>&1 | Tee-Object -FilePath (Join-Path $logs 'package.log')
           if (-not $?) { throw 'Package script failed' }
           git diff --exit-code -- pubspec.lock
           $code = $LASTEXITCODE

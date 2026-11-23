@@ -16,10 +16,13 @@ import shutil
 import stat
 import sys
 
-VERSION = "3.3.6+342"
-BUILD = "342"
-NAME = "fanqie-v3.3.6-342-macos-arm64-internal.dmg"
-FORMAL_NAME = "fanqie-v3.3.6-342-macos-arm64.dmg"
+from release_identity import repository_identity
+
+IDENTITY = repository_identity()
+VERSION = IDENTITY.full_version
+BUILD = IDENTITY.build
+NAME = f"fanqie-v{IDENTITY.version}-{BUILD}-macos-arm64-internal.dmg"
+FORMAL_NAME = f"fanqie-v{IDENTITY.version}-{BUILD}-macos-arm64.dmg"
 ASSETS = "Contents/Frameworks/App.framework/Resources/flutter_assets"
 ICU = "Contents/Frameworks/FlutterMacOS.framework/Resources/icudtl.dat"
 FONTS = {
@@ -115,7 +118,7 @@ def validate_bundle(app):
     except (ValueError, plistlib.InvalidFileException) as error:
         raise ValidationError(f"Invalid app plist: {error}") from error
     for key, expected in {
-        "CFBundleShortVersionString": "3.3.6", "CFBundleVersion": BUILD,
+        "CFBundleShortVersionString": IDENTITY.version, "CFBundleVersion": BUILD,
         "FanqieBuildTarget": "lib/main.dart", "CFBundleIdentifier": "com.fanqie.reader.macos",
         "CFBundleExecutable": "FanqieReader", "LSMinimumSystemVersion": "12.0",
     }.items():
@@ -251,8 +254,10 @@ def validate_trigger(trigger):
     require(isinstance(trigger, dict), "Missing trigger identity")
     require(isinstance(trigger.get("source_commit"), str)
             and re.fullmatch("[0-9a-f]{40}", trigger["source_commit"]), "Invalid source SHA")
-    require(isinstance(trigger.get("source_ref"), str) and
-            re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", trigger["source_ref"]), "Invalid source ref")
+    require(isinstance(trigger.get("source_ref"), str) and (
+        re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", trigger["source_ref"])
+        or trigger["source_ref"] == f"refs/tags/{IDENTITY.tag}"
+    ), "Invalid source ref or tag/version mismatch")
     for key in ("run_id", "run_attempt"):
         require(isinstance(trigger.get(key), str) and re.fullmatch("[1-9][0-9]*", trigger[key]),
                 f"Invalid {key}")
@@ -415,7 +420,7 @@ def publish_local_verified_artifacts(stage, output, mode="internal"):
 
 
 def release_tag(trigger):
-    return f"macos-internal-v3.3.6-{trigger['run_id']}-{trigger['run_attempt']}"
+    return f"macos-internal-v{IDENTITY.version}-{trigger['run_id']}-{trigger['run_attempt']}"
 
 
 def validate_remote(local, remote, trigger, tag, release):

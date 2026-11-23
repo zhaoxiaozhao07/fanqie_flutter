@@ -777,6 +777,11 @@ void main() {
       expect(find.byKey(const ValueKey('reader-chapter-header')), findsNothing);
       expect(find.byKey(const ValueKey('reader-status-bar')), findsNothing);
       expect(
+        find.byKey(const ValueKey('desktop-immersive-chapter-title')),
+        findsNothing,
+        reason: 'Immersion must not paint a second chapter label over the body',
+      );
+      expect(
         find.byKey(const ValueKey('desktop-reader-toolbar')).hitTestable(),
         findsNothing,
       );

@@ -2,9 +2,15 @@
 
 基于 Flutter 的小说阅读客户端，提供 Android、Windows PC 版及 macOS 自用构建，内置 Dart 服务引擎，无需单独部署后端。
 
-[最新 Android 版本](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/latest) · [Windows 正式下载](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/tag/windows-v3.3.6-342) · [Windows 发布](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/windows-release.yml) · [Android 发布](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/release.yml) · [macOS 自用构建](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/macos-internal.yml)
+[最新发布](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/latest) · [三平台统一发布](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/release.yml) · [统一发布说明](docs/UNIFIED_RELEASE.md) · [历史 Windows 正式包](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/tag/windows-v3.3.6-342) · [macOS 独立自用构建](https://github.com/zhaoxiaozhao07/fanqie_flutter/actions/workflows/macos-internal.yml)
 
-### Windows 正式 PC 版（2026-11-22）
+### 3.3.7：阅读去遮挡与三平台统一 Release（2026-11-23）
+
+- Windows/macOS 阅读全屏不再把章节名常驻叠在正文左下角。保留正常信息栏、目录和顶部工具栏的按需章节提示；进入/退出全屏、悬停与翻页保留原文锚点。
+- 当前源码 `3.3.7+343`；标准 `v*` 发布将同一源码的 Android 签名 APK、Windows x64 便携 ZIP、macOS arm64 自用 DMG 一起校验、汇总，全部成功后才公开同一个完整 Release。分支可用 `publish=false` 做真实三端生产验证，main 普通 push 不创建 Release。
+- Android 沿用已有发布证书，Windows 未 Authenticode 签名，macOS 为 ad-hoc、未公证；不把三端齐备误写成正式 Apple 签名或实机验收。见 [统一流程与发布边界](docs/UNIFIED_RELEASE.md)。
+
+### 历史 Windows 正式 PC 版（2026-11-22）
 
 - **3.3.6+342 / Windows x64 便携 ZIP**：[下载 ZIP、SHA-256 与构建来源](https://github.com/zhaoxiaozhao07/fanqie_flutter/releases/tag/windows-v3.3.6-342)。解压到可写目录后运行 `FanqieReader.exe`；升级先退出旧实例，不删除 `%APPDATA%\com.fanqie\FanqieReader` 阅读数据。
 - 正文、章节标题与设置预览统一字体解析，正文保持常规字重；保留楷体、宋体及导入字体选择。优化五种翻页效果、连续滚轮、异步换章与长段落分页，背景扩展至九套；支持桌面选区、双栏、快捷键和听书。
@@ -238,15 +244,20 @@ macOS 阅读文件、缓存和恢复日志使用 Application Support；导出通
 
 用户已授权使用独立的 [macOS 自用工作流](.github/workflows/macos-internal.yml)：手动触发，生产入口 Release 构建，临时签名 DMG、SHA-256 与构建来源附件。默认创建独立预发布，不改写 Android 标签／Release／APK，不成为 Latest；无需新增 secrets 或 Apple ID。推送使用 `[skip ci]` 避免无关的 Android 构建，macOS 单独通过 `workflow_dispatch` 启动。参数、下载与首次打开说明见 [自用打包文档](docs/MACOS_INTERNAL_RELEASE.md)。Developer ID、公证及正式安装验收仍未完成。
 
-## Android 发布
+## Android / Windows / macOS 统一发布
 
-版本号来自 `pubspec.yaml`，发布标签必须与其一致。发布 workflow 恢复为单个快速构建任务：
+版本号和 build 只来自 `pubspec.yaml`，标准发布标签必须为同版本 `v<version>`。
+`.github/workflows/release.yml` 先完成共享 analyze/离线回归，再并行构建三种客户端，
+原生、签名、版本、资源、包和来源校验全部成功后才公开完整 draft。
 
-1. 版本校验与依赖拉取。
-2. 使用配置的正式签名密钥构建 APK。
-3. 生成 SHA-256，上传产物；标签或手动发布时更新 GitHub Release。
+1. Android 使用原配置的发布证书构建 APK，并验证实际 signer、版本和三种 AOT ABI。
+2. Windows 复用完整 x64/VC143/字体/ZIP 校验；Mac 复用 XCTest、完整平台、七场景 AOT
+   以及只读 DMG/签名/权限/资源门禁。
+3. 每端提供原包、SHA-256 与 build-info，另附共同 `release-manifest.json`。
+   唯一 publish job 验证完整 10 个远端附件后一次性公开，不覆盖旧发布。
 
-静态分析、单元测试、真实接口测试、模拟器与 30 分钟关屏实验均不再作为默认构建的前置条件，仍可按上文命令手动运行。
+真实外部 API、物理显示/输入、声音、最低系统与安装升级不是自动化通过即可代替的验收。
+发布/分支验证命令及失败重试、安全边界见 [统一发布说明](docs/UNIFIED_RELEASE.md)。
 
 发布需要仓库签名 secrets：`KEYSTORE_BASE64`、`KEYSTORE_PASSWORD`、`KEY_PASSWORD`、`KEY_ALIAS`。不会将无签名配置的临时调试签名作为正式发布回退。
 

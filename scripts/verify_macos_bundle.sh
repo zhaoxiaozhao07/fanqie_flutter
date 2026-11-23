@@ -6,7 +6,7 @@ MODE="${2:-internal}"
 [[ "$MODE" == internal || "$MODE" == release ]] || exit 2
 PLIST="$APP/Contents/Info.plist"
 [[ -f "$PLIST" ]] || { echo 'Missing app bundle' >&2; exit 1; }
-# Includes full 3.3.6/342 plist, production entry point, AOT resources, ICU,
+# Includes the full pubspec version/build, production entry point, AOT resources, ICU,
 # font/native-assets manifests and non-escaping framework links.
 python3 "$ROOT/scripts/macos_release_validation.py" bundle "$APP"
 COUNT=0

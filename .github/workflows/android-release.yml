@@ -1,0 +1,145 @@
+name: Android 签名生产 APK
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      artifact_name:
+        type: string
+        required: true
+    secrets:
+      KEYSTORE_BASE64:
+        required: true
+      KEYSTORE_PASSWORD:
+        required: true
+      KEY_PASSWORD:
+        required: true
+      KEY_ALIAS:
+        required: true
+    outputs:
+      artifact_name:
+        value: ${{ jobs.build.outputs.artifact_name }}
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    outputs:
+      artifact_name: ${{ inputs.artifact_name }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.9'
+          channel: stable
+          cache: true
+      - name: 锁定 SDK、依赖和生产版本
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]]
+          mkdir -p build/android/ci-logs
+          FULL_VERSION=$(python3 scripts/release_identity.py pubspec.yaml)
+          [[ "${FULL_VERSION%%+*}" == "$REQUESTED_VERSION" ]]
+          flutter --version
+          flutter --version --machine > build/android/ci-logs/flutter-version.json
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.lock
+          printf 'flutter.sdk=%s\nsdk.dir=%s\n' "$FLUTTER_ROOT" "$ANDROID_HOME" > android/local.properties
+      - name: 配置已有发布密钥（不会回退 debug 签名）
+        env:
+          KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+        run: |
+          set -euo pipefail
+          umask 077
+          python3 - <<'PY'
+          import base64, json, os
+          from pathlib import Path
+          for key in ['KEYSTORE_BASE64', 'KEYSTORE_PASSWORD', 'KEY_PASSWORD', 'KEY_ALIAS']:
+              if not os.environ.get(key):
+                  raise RuntimeError('Missing required release signing configuration: ' + key)
+          encoded = ''.join(os.environ['KEYSTORE_BASE64'].split())
+          Path('android/app/upload-keystore.jks').write_bytes(base64.b64decode(encoded, validate=True))
+          def escaped(value):
+              return json.dumps(value, ensure_ascii=True)[1:-1].replace(' ', r'\ ')
+          properties = {
+              'storePassword': os.environ['KEYSTORE_PASSWORD'],
+              'keyPassword': os.environ['KEY_PASSWORD'],
+              'keyAlias': os.environ['KEY_ALIAS'],
+              'storeFile': 'upload-keystore.jks',
+          }
+          Path('android/key.properties').write_text(
+              ''.join(key + '=' + escaped(value) + '\n' for key, value in properties.items()),
+              encoding='ascii',
+          )
+          PY
+          keytool -exportcert -alias "$KEY_ALIAS" \
+            -keystore android/app/upload-keystore.jks -storepass:env KEYSTORE_PASSWORD \
+            -file build/android/ci-logs/release-certificate.der
+      - name: 构建实际生产 Release APK
+        run: |
+          set -euo pipefail
+          FULL_VERSION=$(python3 scripts/release_identity.py pubspec.yaml)
+          flutter build apk --release --no-pub --target lib/main.dart \
+            --build-name="${FULL_VERSION%%+*}" --build-number="${FULL_VERSION##*+}" \
+            2>&1 | tee build/android/ci-logs/flutter-build.log
+          git diff --exit-code -- pubspec.lock
+      - name: 校验真实签名、版本、AOT ABI 与来源
+        run: |
+          set -euo pipefail
+          TOOLS=$(find "$ANDROID_HOME/build-tools" -mindepth 1 -maxdepth 1 -type d | sort -V | tail -1)
+          test -x "$TOOLS/apksigner" && test -x "$TOOLS/aapt"
+          APK=build/app/outputs/flutter-apk/app-release.apk
+          "$TOOLS/apksigner" verify --verbose --print-certs "$APK" > build/android/ci-logs/signature.log
+          "$TOOLS/aapt" dump badging "$APK" > build/android/ci-logs/badging.log
+          CERTIFICATE_SHA=$(sha256sum build/android/ci-logs/release-certificate.der | cut -d' ' -f1)
+          python3 scripts/unified_release.py android --apk "$APK" \
+            --sdk build/android/ci-logs/flutter-version.json \
+            --badging build/android/ci-logs/badging.log \
+            --signature build/android/ci-logs/signature.log \
+            --certificate-sha256 "$CERTIFICATE_SHA" --output dist/android-ci
+          flutter test --no-pub test/epub_download_reliability_test.dart \
+            --plain-name 'R6 optional name-query exceptions preserve a published Android export' \
+            --reporter expanded 2>&1 | tee build/android/ci-logs/native-export-query.log
+          flutter test --no-pub test/epub_download_reliability_test.dart \
+            --plain-name 'R7 Android export returns its URI without guessing primary-user storage' \
+            --reporter expanded 2>&1 | tee build/android/ci-logs/native-export-uri.log
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: dist/android-ci/
+          if-no-files-found: error
+          retention-days: 30
+      - name: 移除本次签名文件
+        if: always()
+        run: rm -f android/key.properties android/app/upload-keystore.jks
+      - name: 保存无私钥的诊断日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-ci-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/android/ci-logs/
+          if-no-files-found: warn
+          retention-days: 14
