@@ -39,6 +39,9 @@ publish job 的控制器；即使 skipped publish job 也不能突破 caller 权
 3. 并行构建：
    - Android：Java 21、真实 Release APK、原始发布证书匹配、aapt
      applicationId/versionCode/versionName、真实三 ABI AOT 内容及 Kotlin 导出回归。
+     Flutter 3.47.9 的 `--no-pub` 同时跳过原生插件再生成，因此先用官方
+     Release `--config-only` 生成生产配置并立即核对 lock，再执行一次
+     no-pub APK 构建；不向正式 APK 添加测试插件、不修改 SDK。
    - Windows：复用实际 Windows 生产构建、PE/DLL/字体/运行库/ZIP/SHA/原始
      文件快照及五组包装/发布阴性测试。
    - macOS：复用必需生产 Debug XCTest、完整 Mac 平台集成、七场景 AOT、

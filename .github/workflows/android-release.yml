@@ -102,6 +102,19 @@ jobs:
         run: |
           set -euo pipefail
           FULL_VERSION=$(python3 scripts/release_identity.py pubspec.yaml)
+          # In Flutter 3.47.9, --no-pub also skips platform plugin regeneration.
+          # pub get emits a dev registrant; Release Gradle excludes those
+          # plugins. Generate the official production config first, checking
+          # the committed lock immediately, then do one no-pub APK build.
+          flutter build apk --release --config-only --target lib/main.dart \
+            --build-name="${FULL_VERSION%%+*}" --build-number="${FULL_VERSION##*+}" \
+            2>&1 | tee build/android/ci-logs/production-config.log
+          git diff --exit-code -- pubspec.lock
+          if grep -q 'dev.flutter.plugins.integration_test' \
+            android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java; then
+            echo 'Test-only native plugin remained in production config' >&2
+            exit 1
+          fi
           flutter build apk --release --no-pub --target lib/main.dart \
             --build-name="${FULL_VERSION%%+*}" --build-number="${FULL_VERSION##*+}" \
             2>&1 | tee build/android/ci-logs/flutter-build.log

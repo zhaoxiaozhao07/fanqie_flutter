@@ -54,10 +54,12 @@ class _WindowFixture {
   Future<void>? operation;
   ReadingSnapshot? hiddenSave;
   ReadingPosition? publishedPosition;
+  File? publishedRecord;
+  final pendingReads = <Future<void>>{};
 
   _WindowFixture(this.root);
 
-  File get record => File('${root.path}/anchor.json');
+  File get record => publishedRecord ?? File('${root.path}/anchor.json');
 
   void initializePositionService() {
     usePositionService = true;
@@ -129,7 +131,10 @@ class _WindowFixture {
     );
     final staging = File('${root.path}/anchor.pending.json');
     await staging.writeAsString(jsonEncode(snapshot.toJson()), flush: true);
-    await staging.rename(record.path);
+    // Publish an immutable file reference, like the preference record's atomic
+    // value replacement. Windows cannot rename over a JSON file held by a
+    // concurrent read; that is a fixture artifact, not a reader save failure.
+    publishedRecord = staging;
     if (afterHide && acknowledgeHiddenSave) {
       hiddenSave = mismatchedAcknowledgement
           ? ReadingSnapshot(
@@ -142,7 +147,17 @@ class _WindowFixture {
     }
   }
 
-  Future<ReadingSnapshot?> readSaved() async {
+  Future<ReadingSnapshot?> readSaved() {
+    final reading = readSavedRecord();
+    late final Future<void> finished;
+    finished = reading
+        .then<void>((_) {}, onError: (Object _, StackTrace _) {})
+        .whenComplete(() => pendingReads.remove(finished));
+    pendingReads.add(finished);
+    return reading;
+  }
+
+  Future<ReadingSnapshot?> readSavedRecord() async {
     calls.add('readSaved');
     if (readFailure) {
       throw FileSystemException('Controlled anchor read failure');
@@ -221,6 +236,9 @@ class _WindowFixture {
     if (operation != null) {
       await operationFinished.future.timeout(const Duration(milliseconds: 500));
     }
+    // Future.timeout does not cancel an owned File.readAsString. Wait for each
+    // real read's completion before deleting the Windows fixture directory.
+    await Future.wait(pendingReads.toList());
     if (usePositionService) await ReaderPositionService.flush();
   }
 }
@@ -281,6 +299,20 @@ void main() {
       );
     },
   );
+
+  test('a live old-record handle does not block hidden publication', () async {
+    final oldRecord = fixture.record;
+    final original = await oldRecord.readAsString();
+    final handle = await oldRecord.open();
+    try {
+      await fixture.verify();
+      expect(fixture.record.path, isNot(oldRecord.path));
+      expect(await oldRecord.readAsString(), original);
+      expect((await fixture.readSaved())!.position.characterOffset, 11);
+    } finally {
+      await handle.close();
+    }
+  });
 
   for (final failure in ['visibility', 'power', 'anchor', 'generation']) {
     test('$failure failure is bounded and restores before pumping', () async {

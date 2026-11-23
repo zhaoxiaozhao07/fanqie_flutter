@@ -14,9 +14,11 @@ import subprocess
 import tempfile
 import textwrap
 import unittest
+from release_identity import repository_identity
 
 
 ROOT = Path(__file__).resolve().parents[1]
+IDENTITY = repository_identity()
 NATIVE_COMMANDS = [
     ("flutter", "build", "macos", "--debug", "--no-pub", "--target", "lib/main.dart"),
     ("sign", "build/macos/Build/Products/Debug/FanqieReader.app", "debug"),
@@ -35,7 +37,7 @@ ANALYZE_COMMAND = ("flutter", "analyze", "--no-pub")
 DART_COMMAND = ("flutter", "test", "--no-pub", "--reporter", "expanded")
 RELEASE_COMMAND = (
     "flutter", "build", "macos", "--release", "--no-pub", "--target", "lib/main.dart",
-    "--build-name=3.3.6", "--build-number=342",
+    f"--build-name={IDENTITY.version}", f"--build-number={IDENTITY.build}",
 )
 
 
@@ -51,7 +53,7 @@ def ci_verification_commands():
         "静态分析", "离线单元与组件回归", "原生 XCTest（生产 Debug 主机）",
         "构建生产入口 Release",
     }
-    lines = (ROOT / ".github/workflows/macos-internal.yml").read_text(
+    lines = (ROOT / ".github/workflows/macos-build.yml").read_text(
         encoding="utf-8"
     ).splitlines()
     in_build = False
@@ -73,6 +75,8 @@ def ci_verification_commands():
                     break
                 body.append(following[10:])
             blocks.append("\n".join(body))
+    if len(blocks) != len(names):
+        raise RuntimeError("The executable read-only Mac build gates were not found")
     return "\n".join(blocks)
 
 
@@ -159,7 +163,7 @@ class NativePipelineTests(unittest.TestCase):
             "FIXTURE_ANALYZE_EXIT": "0", "FIXTURE_DART_EXIT": "0",
             "FIXTURE_INTEGRATION_EXIT": "0", "FIXTURE_BUILD_EXIT": "0",
             "FIXTURE_SIGN_EXIT": "0", "FIXTURE_XCTEST_EXIT": "0",
-            "FIXTURE_RELEASE_EXIT": "0", "VERSION": "3.3.6", "BUILD_NUMBER": "342",
+            "FIXTURE_RELEASE_EXIT": "0", "VERSION": IDENTITY.version, "BUILD_NUMBER": IDENTITY.build,
         })
         self.write(self.bin / "uname", """\
             #!/usr/bin/env bash

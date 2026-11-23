@@ -104,6 +104,19 @@ class WorkflowTests(unittest.TestCase):
         cleanup = next(step for step in steps if step.get("name") == "移除本次签名文件")
         self.assertEqual(cleanup["if"], "always()")
 
+    def test_android_release_reconfigures_native_plugins_without_sdk_or_dependency_patch(self):
+        steps = workflow("android-release.yml")["jobs"]["build"]["steps"]
+        script = next(step["run"] for step in steps if step.get("name") == "构建实际生产 Release APK")
+        configure = script.index("flutter build apk --release --config-only --target lib/main.dart")
+        lock = script.index("git diff --exit-code -- pubspec.lock", configure)
+        guard = script.index("dev.flutter.plugins.integration_test", lock)
+        build = script.index("flutter build apk --release --no-pub --target lib/main.dart", guard)
+        self.assertLess(configure, lock)
+        self.assertLess(lock, guard)
+        self.assertLess(guard, build)
+        gradle = (ROOT / "android/app/build.gradle.kts").read_text()
+        self.assertNotIn('implementation(project(":integration_test"))', gradle)
+
 
 class ScopeTests(unittest.TestCase):
     def setUp(self):
