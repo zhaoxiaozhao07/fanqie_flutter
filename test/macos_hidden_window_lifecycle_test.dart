@@ -4,8 +4,10 @@ import 'dart:io';
 
 import 'package:fanqie_flutter/models/reading_position.dart';
 import 'package:fanqie_flutter/models/reading_snapshot.dart';
+import 'package:fanqie_flutter/services/reader_position_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as path;
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../integration_test/macos_client_platform_test.dart' as platform;
 
@@ -28,6 +30,15 @@ class _WindowFixture {
   var saveOnHide = true;
   var keepOldGeneration = false;
   var readFailure = false;
+  var swallowAsyncErrors = false;
+  var acknowledgeHiddenSave = true;
+  var usePositionService = false;
+  var mismatchedAcknowledgement = false;
+  var hiddenProbeBlocked = false;
+  var savedReadBlocked = false;
+  var acknowledgementBlocked = false;
+  var showReplyBlocked = false;
+  var recoveryProbeBlocked = false;
   var showFailure = false;
   var showRemainsHidden = false;
   var hideReplyBlocked = false;
@@ -35,12 +46,25 @@ class _WindowFixture {
   var visiblePumps = 0;
   Completer<void>? blockedFrame;
   final hideReply = Completer<Object?>();
+  final showReply = Completer<Object?>();
+  final blockedProbe = Completer<Object?>();
+  final blockedRead = Completer<ReadingSnapshot?>();
+  final operationFinished = Completer<void>();
   Future<void>? publishing;
   Future<void>? operation;
+  ReadingSnapshot? hiddenSave;
+  ReadingPosition? publishedPosition;
 
   _WindowFixture(this.root);
 
   File get record => File('${root.path}/anchor.json');
+
+  void initializePositionService() {
+    usePositionService = true;
+    SharedPreferences.setMockInitialValues({
+      'reader_position_hidden-fixture': jsonEncode(expected.toJson()),
+    });
+  }
 
   Future<void> initialize() async {
     await record.writeAsString(
@@ -66,37 +90,67 @@ class _WindowFixture {
         if (saveOnHide) publishing = publish();
         return hideReplyBlocked ? hideReply.future : true;
       case 'getTestWindowState':
+        if ((!visible && hiddenProbeBlocked) ||
+            (visible && recoveryProbeBlocked)) {
+          return blockedProbe.future;
+        }
         return {'visible': visible, 'displayAssertion': displayAssertion};
       case 'showMainWindow':
         if (showFailure) throw StateError('Controlled show failure');
         visible = !showRemainsHidden;
         if (visible) releaseFrames();
-        return true;
+        return showReplyBlocked ? showReply.future : true;
       default:
         throw StateError('Unexpected native call: $method');
     }
   }
 
-  Future<void> publish() async {
+  Future<void> publish({bool afterHide = true}) async {
     // A pending intent is not saved before hide. The hidden native/IO path
     // publishes it while frames remain unavailable.
     await Future<void>.delayed(const Duration(milliseconds: 10));
-    await record.writeAsString(
-      jsonEncode(
-        ReadingSnapshot(
-          position: expected.position,
-          updatedAt: keepOldGeneration
-              ? expected.updatedAt
-              : expected.updatedAt.add(const Duration(seconds: 1)),
-        ).toJson(),
-      ),
+    if (usePositionService) {
+      await ReaderPositionService().save(
+        'hidden-fixture',
+        publishedPosition ?? expected.position,
+      );
+      if (afterHide && acknowledgeHiddenSave) {
+        hiddenSave = await ReaderPositionService().loadSnapshot(
+          'hidden-fixture',
+        );
+      }
+      return;
+    }
+    final snapshot = ReadingSnapshot(
+      position: publishedPosition ?? expected.position,
+      updatedAt: keepOldGeneration
+          ? expected.updatedAt
+          : DateTime.now().toUtc(),
     );
+    final staging = File('${root.path}/anchor.pending.json');
+    await staging.writeAsString(jsonEncode(snapshot.toJson()), flush: true);
+    await staging.rename(record.path);
+    if (afterHide && acknowledgeHiddenSave) {
+      hiddenSave = mismatchedAcknowledgement
+          ? ReadingSnapshot(
+              position: snapshot.position,
+              updatedAt: snapshot.updatedAt.subtract(
+                const Duration(microseconds: 1),
+              ),
+            )
+          : snapshot;
+    }
   }
 
   Future<ReadingSnapshot?> readSaved() async {
     calls.add('readSaved');
-    if (readFailure)
+    if (readFailure) {
       throw FileSystemException('Controlled anchor read failure');
+    }
+    if (savedReadBlocked) return blockedRead.future;
+    if (usePositionService) {
+      return ReaderPositionService().loadSnapshot('hidden-fixture');
+    }
     return ReadingSnapshot.fromJson(
       jsonDecode(await record.readAsString()) as Map<String, dynamic>,
     );
@@ -117,16 +171,39 @@ class _WindowFixture {
     if (pending != null && !pending.isCompleted) pending.complete();
   }
 
-  Future<void> verify() {
+  Future<ReadingSnapshot?> readHiddenSave() async {
+    if (acknowledgementBlocked) return blockedRead.future;
+    return hiddenSave;
+  }
+
+  Future<void> verify({
+    Future<void> Function(Future<void> Function() action)? runNativeIo,
+  }) {
     operation = platform.verifyMacHiddenWindowLifecycle(
       native: native,
       readSaved: readSaved,
+      readHiddenSave: readHiddenSave,
       expected: expected,
-      runNativeIo: (action) => action(),
+      runNativeIo:
+          runNativeIo ??
+          (action) async {
+            try {
+              await action();
+            } catch (_) {
+              // WidgetTester.runAsync reports callback errors and returns null.
+              if (!swallowAsyncErrors) rethrow;
+            }
+          },
       pumpVisible: pump,
       diagnostic: phases.add,
       phaseTimeout: const Duration(milliseconds: 40),
       pollInterval: const Duration(milliseconds: 2),
+    );
+    // Completion-only ownership signal: tearDown runs outside a widget test's
+    // FakeAsync error zone and must not re-await its failed operation there.
+    operation!.then<void>(
+      (_) => operationFinished.complete(),
+      onError: (Object _, StackTrace _) => operationFinished.complete(),
     );
     // Independent of the helper's phase deadline, including a forbidden pump
     // that would wait forever for hidden VSync.
@@ -137,10 +214,14 @@ class _WindowFixture {
     visible = true;
     releaseFrames();
     if (!hideReply.isCompleted) hideReply.complete(true);
+    if (!showReply.isCompleted) showReply.complete(true);
+    if (!blockedProbe.isCompleted) blockedProbe.complete(null);
+    if (!blockedRead.isCompleted) blockedRead.complete(null);
     await publishing;
-    await operation
-        ?.catchError((Object _) {})
-        .timeout(const Duration(milliseconds: 500));
+    if (operation != null) {
+      await operationFinished.future.timeout(const Duration(milliseconds: 500));
+    }
+    if (usePositionService) await ReaderPositionService.flush();
   }
 }
 
@@ -239,6 +320,137 @@ void main() {
     expect(fixture.visible, isTrue);
     expect(fixture.hiddenPumps, 0);
     expect(fixture.visiblePumps, 1);
+  });
+
+  test('runAsync cannot swallow a hidden verification failure', () async {
+    fixture.readFailure = true;
+    fixture.swallowAsyncErrors = true;
+    await expectLater(fixture.verify(), throwsA(isA<FileSystemException>()));
+    expect(fixture.visible, isTrue);
+    expect(fixture.hiddenPumps, 0);
+    expect(fixture.visiblePumps, 1);
+  });
+
+  test('a fresh pre-hide snapshot is not evidence of a hidden save', () async {
+    fixture.saveOnHide = false;
+    await fixture.publish(afterHide: false);
+    await expectLater(fixture.verify(), throwsA(isA<StateError>()));
+    expect(fixture.visible, isTrue);
+    expect(fixture.hiddenPumps, 0);
+    expect(fixture.visiblePumps, 1);
+  });
+
+  test('a stored snapshot without hidden save acknowledgement fails', () async {
+    fixture.acknowledgeHiddenSave = false;
+    await expectLater(fixture.verify(), throwsA(isA<StateError>()));
+    expect(fixture.visible, isTrue);
+    expect(fixture.hiddenPumps, 0);
+    expect(fixture.visiblePumps, 1);
+  });
+
+  test('hidden acknowledgement must match the stored generation', () async {
+    fixture.mismatchedAcknowledgement = true;
+    await expectLater(fixture.verify(), throwsA(isA<StateError>()));
+    expect(fixture.visible, isTrue);
+    expect(fixture.hiddenPumps, 0);
+    expect(fixture.visiblePumps, 1);
+  });
+
+  for (final field in ['chapter', 'paragraph', 'offset', 'image']) {
+    test('fresh generation cannot hide a changed $field anchor', () async {
+      final anchor = fixture.expected.position;
+      fixture.publishedPosition = ReadingPosition(
+        chapterId: field == 'chapter' ? 'different-chapter' : anchor.chapterId,
+        paragraphIndex: field == 'paragraph' ? 74 : anchor.paragraphIndex,
+        characterOffset: field == 'offset' ? 12 : anchor.characterOffset,
+        imageId: field == 'image' ? 'different-image' : anchor.imageId,
+      );
+      await expectLater(fixture.verify(), throwsA(isA<StateError>()));
+      expect(fixture.visible, isTrue);
+      expect(fixture.hiddenPumps, 0);
+      expect(fixture.visiblePumps, 1);
+    });
+  }
+
+  test('ReaderPositionService saves a new hidden generation', () async {
+    fixture.initializePositionService();
+    final beforeHide = DateTime.now().toUtc();
+    await fixture.verify();
+    final saved = await ReaderPositionService().loadSnapshot('hidden-fixture');
+    expect(saved!.position.toJson(), fixture.expected.position.toJson());
+    expect(saved.updatedAt.isAfter(beforeHide), isTrue);
+    expect(saved.updatedAt, fixture.hiddenSave!.updatedAt);
+    expect(fixture.hiddenPumps, 0);
+    expect(fixture.visiblePumps, 1);
+  });
+
+  test('ReaderPositionService cannot acknowledge a pre-hide save', () async {
+    fixture.initializePositionService();
+    await fixture.publish(afterHide: false);
+    fixture.hiddenSave = await ReaderPositionService().loadSnapshot(
+      'hidden-fixture',
+    );
+    fixture.saveOnHide = false;
+    // Even a late observer handing back this same cached record is insufficient:
+    // save() timestamps intent creation, not completion of its queued write.
+    expect(
+      fixture.hiddenSave!.updatedAt.isAfter(fixture.expected.updatedAt),
+      isTrue,
+    );
+    await expectLater(fixture.verify(), throwsA(isA<StateError>()));
+    expect(fixture.visible, isTrue);
+    expect(fixture.hiddenPumps, 0);
+    expect(fixture.visiblePumps, 1);
+  });
+
+  for (final phase in ['hidden probe', 'saved read', 'acknowledgement']) {
+    test('blocked $phase is bounded and restores before pumping', () async {
+      fixture.hiddenProbeBlocked = phase == 'hidden probe';
+      fixture.savedReadBlocked = phase == 'saved read';
+      fixture.acknowledgementBlocked = phase == 'acknowledgement';
+      await expectLater(fixture.verify(), throwsA(isA<StateError>()));
+      expect(fixture.calls, contains('showMainWindow'));
+      expect(fixture.visible, isTrue);
+      expect(fixture.hiddenPumps, 0);
+      expect(fixture.visiblePumps, 1);
+    });
+  }
+
+  test('show reply timeout still probes real visible recovery', () async {
+    fixture.showReplyBlocked = true;
+    await expectLater(fixture.verify(), throwsA(isA<StateError>()));
+    expect(fixture.visible, isTrue);
+    expect(fixture.hiddenPumps, 0);
+    expect(fixture.visiblePumps, 1);
+    expect(
+      fixture.phases.any((phase) => phase.contains('visible_recovery done')),
+      isTrue,
+    );
+  });
+
+  test('blocked recovery probe cannot pump an unverified window', () async {
+    fixture.recoveryProbeBlocked = true;
+    await expectLater(fixture.verify(), throwsA(isA<StateError>()));
+    expect(fixture.hiddenPumps, 0);
+    expect(fixture.visiblePumps, 0);
+  });
+
+  testWidgets('real tester.runAsync preserves IO errors after recovery', (
+    tester,
+  ) async {
+    fixture.readFailure = true;
+    await expectLater(
+      fixture.verify(
+        runNativeIo: (action) async {
+          await tester.runAsync(action);
+        },
+      ),
+      throwsA(isA<FileSystemException>()),
+    );
+    expect(fixture.visible, isTrue);
+    expect(fixture.hiddenPumps, 0);
+    expect(fixture.visiblePumps, 1);
+    expect(tester.takeException(), isNull);
   });
 
   for (final failure in ['show reply', 'visible recovery']) {

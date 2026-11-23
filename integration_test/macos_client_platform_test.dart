@@ -83,9 +83,15 @@ Future<void> fullScreen(WidgetTester tester, bool enabled) async {
 }
 
 // Test-only lifecycle boundary, shared with the focused suppressed-frame tests.
+typedef _HiddenSavedSnapshots = ({
+  ReadingSnapshot? hidden,
+  ReadingSnapshot? stored,
+});
+
 Future<void> verifyMacHiddenWindowLifecycle({
   required Future<Object?> Function(String method) native,
   required Future<ReadingSnapshot?> Function() readSaved,
+  required Future<ReadingSnapshot?> Function() readHiddenSave,
   required ReadingSnapshot expected,
   required Future<void> Function(Future<void> Function() action) runNativeIo,
   required Future<void> Function() pumpVisible,
@@ -94,9 +100,19 @@ Future<void> verifyMacHiddenWindowLifecycle({
   Duration pollInterval = const Duration(milliseconds: 20),
 }) async {
   var restored = false;
-  String describe(Object? value) => value is ReadingSnapshot
-      ? jsonEncode(value.toJson())
-      : '$value';
+  Object? verificationError;
+  StackTrace? verificationStack;
+  late DateTime hideRequestedAt;
+  String describe(Object? value) {
+    if (value is ReadingSnapshot) return jsonEncode(value.toJson());
+    if (value is _HiddenSavedSnapshots) {
+      return jsonEncode({
+        'hidden': value.hidden?.toJson(),
+        'stored': value.stored?.toJson(),
+      });
+    }
+    return '$value';
+  }
 
   Future<T> observe<T>(
     String phase,
@@ -104,27 +120,27 @@ Future<void> verifyMacHiddenWindowLifecycle({
     bool Function(T value) matches,
   ) async {
     diagnostic('MACOS_WINDOW_LIFECYCLE $phase begin');
-    final deadline = DateTime.now().add(phaseTimeout);
+    final elapsed = Stopwatch()..start();
     T? last;
     StateError expired() => StateError(
       'Mac window lifecycle $phase timed out; last=${describe(last)}',
     );
     try {
       while (true) {
-        final remaining = deadline.difference(DateTime.now());
+        final remaining = phaseTimeout - elapsed.elapsed;
         if (remaining <= Duration.zero) throw expired();
-        last = await read().timeout(
+        final value = await read().timeout(
           remaining,
           onTimeout: () => throw expired(),
         );
-        if (!DateTime.now().isBefore(deadline)) throw expired();
-        if (matches(last as T)) {
-          diagnostic(
-            'MACOS_WINDOW_LIFECYCLE $phase done ${describe(last)}',
-          );
-          return last as T;
+        last = value;
+        if (elapsed.elapsed >= phaseTimeout) throw expired();
+        if (matches(value)) {
+          diagnostic('MACOS_WINDOW_LIFECYCLE $phase done ${describe(last)}');
+          return value;
         }
-        final pause = deadline.difference(DateTime.now());
+        final pause = phaseTimeout - elapsed.elapsed;
+        if (pause <= Duration.zero) throw expired();
         await Future<void>.delayed(pause < pollInterval ? pause : pollInterval);
       }
     } catch (error) {
@@ -134,50 +150,92 @@ Future<void> verifyMacHiddenWindowLifecycle({
   }
 
   bool hasWindowState(Object? value, bool visible) {
-    if (value is! Map) throw StateError('Native window state is missing: $value');
+    if (value is! Map) {
+      throw StateError('Native window state is missing: $value');
+    }
     return value['visible'] == visible &&
         (visible || value['displayAssertion'] == false);
+  }
+
+  bool hasFreshAnchor(ReadingSnapshot? snapshot) {
+    final position = snapshot?.position;
+    final anchor = expected.position;
+    return snapshot != null &&
+        position != null &&
+        position.chapterId == anchor.chapterId &&
+        position.paragraphIndex == anchor.paragraphIndex &&
+        position.characterOffset == anchor.characterOffset &&
+        position.imageId == anchor.imageId &&
+        snapshot.updatedAt.isAfter(expected.updatedAt) &&
+        snapshot.updatedAt.isAfter(hideRequestedAt);
   }
 
   try {
     await runNativeIo(() async {
       try {
-        diagnostic(
-          'MACOS_WINDOW_LIFECYCLE resized_anchor ${describe(expected)}',
-        );
-        await observe('hide_reply', () => native('hideTestWindow'), (_) => true);
-        await observe(
-          'hidden_observation',
-          () => native('getTestWindowState'),
-          (state) => hasWindowState(state, false),
-        );
-        await observe('stored_anchor_read', readSaved, (snapshot) {
-          final position = snapshot?.position;
-          final anchor = expected.position;
-          return snapshot != null &&
-              position != null &&
-              position.chapterId == anchor.chapterId &&
-              position.paragraphIndex == anchor.paragraphIndex &&
-              position.characterOffset == anchor.characterOffset &&
-              position.imageId == anchor.imageId &&
-              snapshot.updatedAt.isAfter(expected.updatedAt);
-        });
-      } finally {
-        // This is native/IO-only: hidden VSync must not gate either recovery
-        // or durable-save verification. Never synthesize a visible state.
-        await observe('show_reply', () => native('showMainWindow'), (_) => true);
-        await observe(
-          'visible_recovery',
-          () => native('getTestWindowState'),
-          (state) => hasWindowState(state, true),
-        );
-        restored = true;
+        try {
+          diagnostic(
+            'MACOS_WINDOW_LIFECYCLE resized_anchor ${describe(expected)}',
+          );
+          hideRequestedAt = DateTime.now().toUtc();
+          await observe(
+            'hide_reply',
+            () => native('hideTestWindow'),
+            (_) => true,
+          );
+          await observe(
+            'hidden_observation',
+            () => native('getTestWindowState'),
+            (state) => hasWindowState(state, false),
+          );
+          await observe<_HiddenSavedSnapshots>(
+            'stored_anchor_read',
+            () async {
+              return (
+                hidden: await readHiddenSave(),
+                stored: await readSaved(),
+              );
+            },
+            (snapshots) {
+              return hasFreshAnchor(snapshots.hidden) &&
+                  hasFreshAnchor(snapshots.stored) &&
+                  snapshots.stored!.updatedAt.isAtSameMomentAs(
+                    snapshots.hidden!.updatedAt,
+                  );
+            },
+          );
+        } finally {
+          // This is native/IO-only: hidden VSync must not gate recovery or
+          // save verification. Probe real visibility even if show replies fail.
+          try {
+            await observe(
+              'show_reply',
+              () => native('showMainWindow'),
+              (_) => true,
+            );
+          } finally {
+            await observe(
+              'visible_recovery',
+              () => native('getTestWindowState'),
+              (state) => hasWindowState(state, true),
+            );
+            restored = true;
+          }
+        }
+      } catch (error, stack) {
+        // WidgetTester.runAsync otherwise reports and swallows this exception.
+        // Carry it out explicitly, after the frame-independent recovery.
+        verificationError = error;
+        verificationStack = stack;
       }
     });
   } finally {
     // Even on a failed hidden/read phase, resume widget work only after the
     // native visibility probe confirms recovery, outside tester.runAsync.
     if (restored) await pumpVisible();
+  }
+  if (verificationError != null) {
+    Error.throwWithStackTrace(verificationError!, verificationStack!);
   }
 }
 
@@ -931,17 +989,39 @@ void main() {
       expect(after.position.chapterId, before.chapterId);
       expect(after.position.characterOffset, before.characterOffset);
       expect(after.position.imageId, before.imageId);
-      await verifyMacHiddenWindowLifecycle(
-        native: (method) => ReaderPlatform.invoke<Object?>(method),
-        readSaved: () =>
-            ReaderPositionService().loadSnapshot('local_native_window'),
-        expected: after,
-        runNativeIo: (action) async {
-          await tester.runAsync(action);
-        },
-        pumpVisible: () => tester.pump(const Duration(milliseconds: 300)),
-        diagnostic: debugPrint,
-      );
+      ReadingSnapshot? hiddenSave;
+      final hiddenSaveObserver = Object();
+      // Registered only after the baseline flush. The reader's own participant
+      // runs first; this observer never saves anything or replaces the real
+      // onWindowHidden handler. A pre-hide snapshot cannot satisfy the check.
+      ReaderSystemService.registerSaveParticipant(hiddenSaveObserver, () async {
+        final state = await ReaderPlatform.invoke<Map>('getTestWindowState');
+        if (state?['visible'] == false && state?['displayAssertion'] == false) {
+          hiddenSave = await ReaderPositionService().loadSnapshot(
+            'local_native_window',
+          );
+          debugPrint(
+            'MACOS_WINDOW_LIFECYCLE hidden_save_ack '
+            '${jsonEncode(hiddenSave?.toJson())}',
+          );
+        }
+      });
+      try {
+        await verifyMacHiddenWindowLifecycle(
+          native: (method) => ReaderPlatform.invoke<Object?>(method),
+          readSaved: () =>
+              ReaderPositionService().loadSnapshot('local_native_window'),
+          readHiddenSave: () async => hiddenSave,
+          expected: after,
+          runNativeIo: (action) async {
+            await tester.runAsync(action);
+          },
+          pumpVisible: () => tester.pump(const Duration(milliseconds: 300)),
+          diagnostic: debugPrint,
+        );
+      } finally {
+        ReaderSystemService.registerSaveParticipant(hiddenSaveObserver, null);
+      }
       await tester.pumpAndSettle();
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pumpAndSettle();
