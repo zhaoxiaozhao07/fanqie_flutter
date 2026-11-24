@@ -351,6 +351,17 @@ class ReleaseTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.assemble()
 
+    def test_apk_resource_names_remain_case_sensitive_but_exact_duplicates_fail(self):
+        path = self.root / "android" / self.android_name
+        with zipfile.ZipFile(path, "a") as archive:
+            archive.writestr("res/drawable/Resource.xml", b"upper")
+            archive.writestr("res/drawable/resource.xml", b"lower")
+        self.assertEqual(set(release.android_payload(path)), release.ABIS)
+        with zipfile.ZipFile(path, "a") as archive:
+            archive.writestr("res/drawable/resource.xml", b"duplicate")
+        with self.assertRaises(ValueError):
+            release.android_payload(path)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)

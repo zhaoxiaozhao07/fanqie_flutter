@@ -69,7 +69,7 @@ def checksums(directory, info, field, package):
             "Invalid exact checksum sidecar")
 
 
-def zip_files(archive):
+def zip_files(archive, *, case_sensitive=False):
     seen = set()
     total = 0
     files = []
@@ -77,8 +77,9 @@ def zip_files(archive):
     for entry in archive.infolist():
         name = entry.filename.rstrip("/") if entry.is_dir() else entry.filename
         mac.relative_path(name)
-        require(name.casefold() not in seen, "Duplicate/aliased archive path")
-        seen.add(name.casefold())
+        key = name if case_sensitive else name.casefold()
+        require(key not in seen, "Duplicate/aliased archive path")
+        seen.add(key)
         require(stat.S_IFMT(entry.external_attr >> 16) != stat.S_IFLNK, "Archive symlink is forbidden")
         require(not (entry.flag_bits & 1), "Encrypted archive is forbidden")
         total += entry.file_size
@@ -91,7 +92,13 @@ def zip_files(archive):
 def android_payload(apk):
     try:
         with zipfile.ZipFile(apk) as archive:
-            entries = {entry.filename: entry for entry in zip_files(archive)}
+            # APK paths are case-sensitive, including legitimate Android
+            # resource names differing only by case. We inspect this archive,
+            # never extract it onto a case-insensitive desktop filesystem.
+            entries = {
+                entry.filename: entry
+                for entry in zip_files(archive, case_sensitive=True)
+            }
             for name in ["AndroidManifest.xml", "classes.dex", "resources.arsc",
                          "assets/flutter_assets/AssetManifest.bin",
                          "assets/flutter_assets/FontManifest.json"]:

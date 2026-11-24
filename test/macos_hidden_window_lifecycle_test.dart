@@ -224,7 +224,10 @@ class _WindowFixture {
           },
       pumpVisible: pump,
       diagnostic: phases.add,
-      phaseTimeout: const Duration(milliseconds: 40),
+      // Real flushed filesystem IO on a loaded Windows runner can exceed
+      // 40ms. Keep the independent 500ms whole-operation bound below; this
+      // fixture phase budget is not the production helper's five-second gate.
+      phaseTimeout: const Duration(milliseconds: 100),
       pollInterval: const Duration(milliseconds: 2),
     );
     // Completion-only ownership signal: tearDown runs outside a widget test's
