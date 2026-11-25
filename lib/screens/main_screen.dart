@@ -229,7 +229,13 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     );
     if (ReaderPlatform.isDesktop) {
       return Scaffold(
-        bottomNavigationBar: TtsPlayerPanel(onClose: () {}),
+        bottomNavigationBar: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TtsPlayerPanel(onClose: () {}),
+            ImmersivePlayerPanel(onClose: () {}),
+          ],
+        ),
         body: LayoutBuilder(
           builder: (context, constraints) {
             final extended = constraints.maxWidth >= 1000;

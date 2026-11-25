@@ -84,6 +84,7 @@ class ReaderScreen extends StatefulWidget {
   chapterCommentStatsLoader;
   final bool offlineOnly;
   final TtsService? ttsService;
+  final ImmersivePlaybackCoordinator? immersiveService;
 
   const ReaderScreen({
     super.key,
@@ -99,6 +100,7 @@ class ReaderScreen extends StatefulWidget {
     this.chapterCommentStatsLoader,
     this.offlineOnly = false,
     this.ttsService,
+    this.immersiveService,
   });
 
   @override
@@ -218,7 +220,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   Future<void> _preferencesWrites = Future.value();
   Future<void>? _notesRequest;
   Object? _ttsPaintKey;
-  bool _ttsLayoutActive = false;
+  double _desktopAudioBarHeight = 0.0;
   bool _ttsAttached = false;
   DateTime _manualScrollUntil = DateTime.fromMillisecondsSinceEpoch(0);
   Duration _lastAutoElapsed = Duration.zero;
@@ -281,8 +283,8 @@ class _ReaderScreenState extends State<ReaderScreen>
   late final ValueNotifier<int> _activeChapterNotifier;
   double _lastDetectPixels = 0.0;
   late final TtsService _ttsService = widget.ttsService ?? TtsService();
-  final ImmersivePlaybackCoordinator _immersiveService =
-      ImmersivePlaybackCoordinator();
+  late final ImmersivePlaybackCoordinator _immersiveService =
+      widget.immersiveService ?? ImmersivePlaybackCoordinator();
   Object? _immersivePaintKey;
   bool _isLoadingHead = true;
   bool _isLoadingPrev = false;
@@ -559,6 +561,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     _ttsAttached = true;
     _ttsService.addListener(_onTtsStateChanged);
     _immersiveService.addListener(_onImmersiveStateChanged);
+    if (ReaderPlatform.isDesktop) {
+      _desktopAudioBarHeight = _expectedDesktopAudioBarHeight();
+    }
 
     // 启用阅读屏幕常亮与定时电量/时间更新
     ReaderSystemService.setKeepScreenOn(
@@ -644,6 +649,30 @@ class _ReaderScreenState extends State<ReaderScreen>
     super.dispose();
   }
 
+  double _expectedDesktopAudioBarHeight() {
+    if (!ReaderPlatform.isDesktop || !ReaderPlatform.capabilities.tts) {
+      return 0.0;
+    }
+    var height = 0.0;
+    if (_ttsService.isActive) height += TtsPlayerPanel.desktopHeight;
+    if (_immersiveService.isActive) {
+      height += ImmersivePlayerPanel.desktopHeight;
+    }
+    return height;
+  }
+
+  void _syncDesktopAudioBarLayout() {
+    if (!ReaderPlatform.isDesktop) return;
+    final nextHeight = _expectedDesktopAudioBarHeight();
+    if (_desktopAudioBarHeight != nextHeight) {
+      _applyReaderSetting(
+        () => _desktopAudioBarHeight = nextHeight,
+        layoutChanged: true,
+        persist: false,
+      );
+    }
+  }
+
   void _onImmersiveStateChanged() {
     if (!mounted) return;
     final key = (
@@ -655,6 +684,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     if (key == _immersivePaintKey) return;
     _immersivePaintKey = key;
+    _syncDesktopAudioBarLayout();
     ReaderSystemService.setVolumeKeyScrollEnabled(
       _canUseVolumeKeys,
       owner: this,
@@ -688,13 +718,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     if (key == _ttsPaintKey) return;
     _ttsPaintKey = key;
-    if (ReaderPlatform.isDesktop && _ttsLayoutActive != _ttsService.isActive) {
-      _applyReaderSetting(
-        () => _ttsLayoutActive = _ttsService.isActive,
-        layoutChanged: true,
-        persist: false,
-      );
-    }
+    _syncDesktopAudioBarLayout();
     ReaderSystemService.setVolumeKeyScrollEnabled(
       _canUseVolumeKeys,
       owner: this,
@@ -4530,6 +4554,24 @@ class _ReaderScreenState extends State<ReaderScreen>
                 icon: Icon(Icons.tune, color: theme.textColor, size: 20),
                 onPressed: _showSettingsModal,
               ),
+              if (ReaderPlatform.capabilities.tts)
+                ListenableBuilder(
+                  listenable: _immersiveService,
+                  builder: (context, _) => IconButton(
+                    key: const ValueKey('immersive-listen-button'),
+                    tooltip: '沉浸式多角色听书',
+                    icon: Icon(
+                      _immersiveService.isActive
+                          ? Icons.record_voice_over
+                          : Icons.record_voice_over_outlined,
+                      color: _immersiveService.isActive
+                          ? Theme.of(context).primaryColor
+                          : theme.textColor,
+                      size: 20,
+                    ),
+                    onPressed: _startImmersiveReading,
+                  ),
+                ),
               PopupMenuButton<String>(
                 tooltip: '阅读操作',
                 icon: Icon(Icons.more_horiz, color: theme.textColor, size: 20),
@@ -4553,6 +4595,15 @@ class _ReaderScreenState extends State<ReaderScreen>
                       break;
                     case 'notes':
                       unawaited(_showNotesManagement());
+                      break;
+                    case 'immersiveListen':
+                      unawaited(_startImmersiveReading());
+                      break;
+                    case 'immersiveSettings':
+                      _openImmersiveSettings();
+                      break;
+                    case 'immersiveCharacters':
+                      _openImmersiveCharacters();
                       break;
                     case 'listen':
                       unawaited(_startTtsReading());
@@ -4589,6 +4640,60 @@ class _ReaderScreenState extends State<ReaderScreen>
                     ),
                   ),
                   const PopupMenuDivider(),
+                  if (ReaderPlatform.capabilities.tts) ...[
+                    PopupMenuItem(
+                      value: 'immersiveListen',
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.record_voice_over_outlined,
+                            size: 18,
+                            color: theme.textColor,
+                          ),
+                          const SizedBox(width: 10),
+                          Text(
+                            '沉浸式多角色听书',
+                            style: TextStyle(color: theme.textColor),
+                          ),
+                        ],
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'immersiveSettings',
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.tune_rounded,
+                            size: 18,
+                            color: theme.textColor,
+                          ),
+                          const SizedBox(width: 10),
+                          Text(
+                            '沉浸式听书设置',
+                            style: TextStyle(color: theme.textColor),
+                          ),
+                        ],
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'immersiveCharacters',
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.people_alt_outlined,
+                            size: 18,
+                            color: theme.textColor,
+                          ),
+                          const SizedBox(width: 10),
+                          Text(
+                            '本书角色与音色',
+                            style: TextStyle(color: theme.textColor),
+                          ),
+                        ],
+                      ),
+                    ),
+                    const PopupMenuDivider(),
+                  ],
                   if (_ttsService.isAvailable) ...[
                     PopupMenuItem(
                       value: 'listen',
@@ -4761,8 +4866,8 @@ class _ReaderScreenState extends State<ReaderScreen>
                         _buildJumpBar(theme),
                       // 底部常驻微型状态栏（时间、电量、总进度）
                       if (_showReaderStatus) _buildBottomStatusBar(theme),
-                      if (ReaderPlatform.isDesktop && _ttsLayoutActive)
-                        const SizedBox(height: TtsPlayerPanel.desktopHeight),
+                      if (ReaderPlatform.isDesktop && _desktopAudioBarHeight > 0)
+                        SizedBox(height: _desktopAudioBarHeight),
                     ],
                   ),
                 ),

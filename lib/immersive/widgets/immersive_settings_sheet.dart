@@ -6,6 +6,8 @@ import '../../app_theme.dart';
 import '../../models/book.dart';
 import '../../models/chapter.dart';
 import '../../models/reading_position.dart';
+import '../../services/reader_platform.dart';
+import '../../widgets/reader_modal.dart';
 import '../models/immersive_config.dart';
 import '../models/immersive_entities.dart';
 import '../services/immersive_playback_coordinator.dart';
@@ -51,6 +53,25 @@ class ImmersiveSettingsSheet extends StatefulWidget {
     bool offlineOnly = false,
     ImmersivePlaybackCoordinator? coordinator,
   }) {
+    final sheet = ImmersiveSettingsSheet(
+      bookId: bookId ?? book?.bookId,
+      book: book,
+      chapters: chapters,
+      currentChapterIndex: currentChapterIndex,
+      currentPosition: currentPosition,
+      contentLoader: contentLoader,
+      offlineOnly: offlineOnly,
+      coordinator: coordinator,
+    );
+    if (ReaderPlatform.isDesktop) {
+      return showReaderModal<void>(
+        context: context,
+        backgroundColor: Colors.white,
+        heightFactor: 0.88,
+        desktopWidth: 760,
+        builder: (_) => sheet,
+      );
+    }
     return showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -61,16 +82,7 @@ class ImmersiveSettingsSheet extends StatefulWidget {
       ),
       builder: (_) => SizedBox(
         height: MediaQuery.sizeOf(context).height * 0.88,
-        child: ImmersiveSettingsSheet(
-          bookId: bookId ?? book?.bookId,
-          book: book,
-          chapters: chapters,
-          currentChapterIndex: currentChapterIndex,
-          currentPosition: currentPosition,
-          contentLoader: contentLoader,
-          offlineOnly: offlineOnly,
-          coordinator: coordinator,
-        ),
+        child: sheet,
       ),
     );
   }

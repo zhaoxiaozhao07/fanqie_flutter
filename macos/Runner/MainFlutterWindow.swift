@@ -106,8 +106,7 @@ class MainFlutterWindow: NSWindow, NSWindowDelegate, NSDraggingDestination {
   }
 }
 
-/// The same channel name and callback contract as Android; no playback stubs
-/// pretend to implement the explicitly deferred macOS listening milestone.
+/// 与 Android 对齐的原生阅读器桥接（含音频双缓冲预装无缝播放、安全密钥存储与文件能力）
 final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
   let channel: FlutterMethodChannel
   private weak var window: MainFlutterWindow?
@@ -120,6 +119,7 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
   private var scrollInput: ReaderScrollInput?
   private let decoder = ReaderTextDecoder()
   private let exportQueue = ReaderExportQueue()
+  private let utilityQueue = DispatchQueue(label: "com.fanqie.reader.utility", qos: .utility)
   private lazy var exporter = ReaderFileExporter(window: window, queue: exportQueue)
   private lazy var downloadOutput = ReaderDownloadOutput(window: window, queue: exportQueue)
   private lazy var playback = ReaderPlayback { [weak self] method, args in
@@ -192,6 +192,33 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
         try ReaderKeychain.write(value, service: secretService, account: "openai-compatible-tts")
         result(true)
       } catch { result(FlutterError(code: "secureStorage", message: "密钥未写入系统安全存储", details: nil)) }
+    case "readNamedSecret":
+      let key = (args["key"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      guard ReaderKeychain.isValidAccount(key) else { result(nil); return }
+      do { result(try ReaderKeychain.read(service: secretService, account: key)) }
+      catch { result(FlutterError(code: "secureStorage", message: "无法读取系统安全存储；未改写原密钥", details: nil)) }
+    case "writeNamedSecret":
+      let key = (args["key"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+      guard ReaderKeychain.isValidAccount(key), let value = args["value"] as? String else {
+        result(false)
+        return
+      }
+      do {
+        try ReaderKeychain.write(value, service: secretService, account: key)
+        result(true)
+      } catch { result(FlutterError(code: "secureStorage", message: "密钥未写入系统安全存储", details: nil)) }
+    case "probeAudioDuration":
+      let filePath = args["filePath"] as? String ?? ""
+      utilityQueue.async {
+        let probed = ReaderPlayback.probeAudioDuration(file: URL(fileURLWithPath: filePath))
+        DispatchQueue.main.async { result(probed) }
+      }
+    case "getFreeDiskBytes":
+      let dirPath = args["path"] as? String ?? ""
+      utilityQueue.async {
+        let free = ReaderPlayback.freeDiskBytes(at: dirPath)
+        DispatchQueue.main.async { result(free) }
+      }
     case "initNativeTts":
       result(ReaderPlayback.nativeSpeechAvailable)
     case "getNativeTtsVoices":
@@ -200,8 +227,29 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
       result(playback.speak(id: args["id"] as? String ?? "", text: args["text"] as? String ?? "",
         rate: (args["rate"] as? NSNumber)?.doubleValue ?? 1, voiceID: args["voice"] as? String ?? ""))
     case "playAudioFile":
-      result(playback.play(id: args["id"] as? String ?? "",
-        file: URL(fileURLWithPath: args["filePath"] as? String ?? "")))
+      result(playback.play(
+        id: args["id"] as? String ?? "",
+        file: URL(fileURLWithPath: args["filePath"] as? String ?? ""),
+        rate: (args["rate"] as? NSNumber)?.doubleValue ?? 1.0,
+        preservePitch: (args["preservePitch"] as? Bool) ?? true,
+        startPositionMs: max(0, (args["startPositionMs"] as? NSNumber)?.intValue ?? 0)))
+    case "preloadNextAudio":
+      result(playback.preloadNext(
+        afterID: args["afterId"] as? String ?? "",
+        id: args["id"] as? String ?? "",
+        file: URL(fileURLWithPath: args["filePath"] as? String ?? ""),
+        rate: (args["rate"] as? NSNumber)?.doubleValue ?? 1.0,
+        preservePitch: (args["preservePitch"] as? Bool) ?? true,
+        gapMs: (args["gapMs"] as? NSNumber)?.intValue ?? 0))
+    case "clearPreloadedAudio":
+      playback.clearPreloaded()
+      result(true)
+    case "setPlaybackRate":
+      result(playback.setPlaybackRate(
+        (args["rate"] as? NSNumber)?.doubleValue ?? 1.0,
+        preservePitch: (args["preservePitch"] as? Bool) ?? true))
+    case "getAudioPosition":
+      result(playback.audioPosition())
     case "stopPlayback":
       result(playback.stop(id: args["id"] as? String))
     case "stopNativeTts":

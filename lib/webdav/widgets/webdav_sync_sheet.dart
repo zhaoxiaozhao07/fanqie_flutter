@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 
 import '../../app_theme.dart';
 import '../../immersive/models/immersive_config.dart';
+import '../../services/reader_platform.dart';
+import '../../widgets/reader_modal.dart';
 import '../models/webdav_config.dart';
 import '../services/webdav_sync_service.dart';
 
@@ -50,6 +52,15 @@ Future<void> showWebDavSyncSheet(
   BuildContext context, {
   WebDavSyncService? service,
 }) {
+  if (ReaderPlatform.isDesktop) {
+    return showReaderModal<void>(
+      context: context,
+      backgroundColor: Colors.white,
+      heightFactor: 0.88,
+      desktopWidth: 720,
+      builder: (_) => WebDavSyncSheet(service: service),
+    );
+  }
   return showModalBottomSheet<void>(
     context: context,
     isScrollControlled: true,

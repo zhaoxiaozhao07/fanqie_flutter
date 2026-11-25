@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 
 import '../../app_theme.dart';
 import '../../models/reading_position.dart';
+import '../../services/reader_platform.dart';
+import '../../widgets/reader_modal.dart';
 import '../models/immersive_config.dart';
 import '../models/immersive_entities.dart';
 import '../services/immersive_playback_coordinator.dart';
@@ -27,6 +29,20 @@ class ImmersiveCharactersSheet extends StatefulWidget {
     ImmersivePlaybackCoordinator? coordinator,
     void Function(int chapterIndex, ReadingPosition position)? onJumpToSource,
   }) {
+    final sheet = ImmersiveCharactersSheet(
+      bookId: bookId,
+      coordinator: coordinator,
+      onJumpToSource: onJumpToSource,
+    );
+    if (ReaderPlatform.isDesktop) {
+      return showReaderModal<void>(
+        context: context,
+        backgroundColor: Colors.white,
+        heightFactor: 0.84,
+        desktopWidth: 700,
+        builder: (_) => sheet,
+      );
+    }
     return showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -37,11 +53,7 @@ class ImmersiveCharactersSheet extends StatefulWidget {
       ),
       builder: (_) => SizedBox(
         height: MediaQuery.sizeOf(context).height * 0.82,
-        child: ImmersiveCharactersSheet(
-          bookId: bookId,
-          coordinator: coordinator,
-          onJumpToSource: onJumpToSource,
-        ),
+        child: sheet,
       ),
     );
   }

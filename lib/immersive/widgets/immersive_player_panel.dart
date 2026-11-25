@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../app_theme.dart';
 import '../../models/reading_position.dart';
+import '../../services/reader_platform.dart';
 import '../models/immersive_entities.dart';
 import '../services/immersive_playback_coordinator.dart';
 import 'immersive_characters_sheet.dart';
@@ -11,6 +12,8 @@ import 'immersive_settings_sheet.dart';
 
 /// 沉浸式多角色听书底部播放控制面板
 class ImmersivePlayerPanel extends StatefulWidget {
+  static const desktopHeight = 132.0;
+
   final VoidCallback onClose;
   final Color backgroundColor;
   final Color textColor;
@@ -75,6 +78,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
 
   @override
   Widget build(BuildContext context) {
+    if (!ReaderPlatform.capabilities.tts) return const SizedBox.shrink();
     final coord = _coord;
     if (!coord.isActive) return const SizedBox.shrink();
 
@@ -86,6 +90,19 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
     final isBlocked = coord.state == ImmersivePlayState.blocked;
     final issueText =
         coord.errorMessage ?? _status.blockingReason ?? coord.notice;
+
+    if (ReaderPlatform.isDesktop) {
+      return _buildDesktopPanel(
+        context: context,
+        coord: coord,
+        speakerLabel: speakerLabel,
+        spokenText: spokenText,
+        isPlaying: isPlaying,
+        isBuffering: isBuffering,
+        isBlocked: isBlocked,
+        issueText: issueText,
+      );
+    }
 
     return Container(
       key: const ValueKey('immersive-player-panel'),
@@ -364,6 +381,320 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
               ],
             ),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDesktopPanel({
+    required BuildContext context,
+    required ImmersivePlaybackCoordinator coord,
+    required String speakerLabel,
+    required String spokenText,
+    required bool isPlaying,
+    required bool isBuffering,
+    required bool isBlocked,
+    required String? issueText,
+  }) {
+    final rateLabel =
+        '${coord.playbackRate.toStringAsFixed(2).replaceAll(RegExp(r'\.?0+$'), '')}x';
+    final bookMeta = [
+      if (coord.currentBookTitle.isNotEmpty) coord.currentBookTitle,
+      if (coord.currentChapterTitle.isNotEmpty) coord.currentChapterTitle,
+    ].join(' · ');
+    final statusMetrics = _status.isPreparingPrefix
+        ? '前文档案 ${_status.prefixCompletedChunks}/${_status.prefixTotalChunks}'
+        : '已确认 ${_status.confirmedChunks}/${_status.totalPlannedChunks} 块 · '
+              '已生成 ${_status.readyAudioSegments}/${_status.totalManifestSegments} 段 · '
+              '可播 ${_status.continuousReadySeconds.toStringAsFixed(0)}s';
+
+    return Material(
+      key: const ValueKey('immersive-player-panel'),
+      color: widget.backgroundColor,
+      elevation: 8,
+      child: SizedBox(
+        height: ImmersivePlayerPanel.desktopHeight,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 6),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              // 第一行：沉浸式说话角色 + 书章信息 + 倍速 / 角色 / 设置 / 关闭
+              SizedBox(
+                height: 36,
+                child: Row(
+                  children: [
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 7,
+                        vertical: 2,
+                      ),
+                      decoration: BoxDecoration(
+                        color: AppTheme.primaryColor.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(5),
+                      ),
+                      child: Text(
+                        '沉浸 · $speakerLabel',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AppTheme.primaryColor,
+                          fontWeight: FontWeight.w700,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: Text(
+                        bookMeta.isEmpty ? spokenText : '$bookMeta · $spokenText',
+                        style: TextStyle(
+                          fontSize: 12,
+                          color: widget.textColor,
+                          fontWeight: FontWeight.w500,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    TextButton(
+                      onPressed: () => _showRateDialog(context, coord),
+                      style: TextButton.styleFrom(
+                        minimumSize: const Size(44, 32),
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                      ),
+                      child: Text(
+                        rateLabel,
+                        style: TextStyle(
+                          fontSize: 12,
+                          fontWeight: FontWeight.bold,
+                          color: widget.textColor,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      icon: Badge(
+                        isLabelVisible:
+                            _status.unresolvedDialogueCount > 0 ||
+                            _status.blockedConflictCount > 0,
+                        label: Text(
+                          '${_status.unresolvedDialogueCount + _status.blockedConflictCount}',
+                          style: const TextStyle(fontSize: 9),
+                        ),
+                        child: Icon(
+                          Icons.people_alt_outlined,
+                          size: 19,
+                          color: widget.secondaryColor,
+                        ),
+                      ),
+                      tooltip: '本书角色与音色',
+                      constraints: const BoxConstraints.tightFor(
+                        width: 36,
+                        height: 36,
+                      ),
+                      padding: const EdgeInsets.all(6),
+                      onPressed: coord.currentBookId == null
+                          ? null
+                          : () => _openCharacters(context, coord.currentBookId!),
+                    ),
+                    IconButton(
+                      icon: Icon(
+                        Icons.tune_rounded,
+                        size: 19,
+                        color: widget.secondaryColor,
+                      ),
+                      tooltip: '沉浸式听书设置',
+                      constraints: const BoxConstraints.tightFor(
+                        width: 36,
+                        height: 36,
+                      ),
+                      padding: const EdgeInsets.all(6),
+                      onPressed: () => _openSettings(context, coord.currentBookId),
+                    ),
+                    IconButton(
+                      icon: Icon(
+                        Icons.close,
+                        size: 18,
+                        color: widget.secondaryColor,
+                      ),
+                      tooltip: '停止沉浸式听书',
+                      constraints: const BoxConstraints.tightFor(
+                        width: 36,
+                        height: 36,
+                      ),
+                      padding: const EdgeInsets.all(6),
+                      onPressed: () {
+                        unawaited(coord.stop());
+                        widget.onClose();
+                      },
+                    ),
+                  ],
+                ),
+              ),
+              // 第二行：播放控制与实时管线状态
+              SizedBox(
+                height: 40,
+                child: Row(
+                  children: [
+                    IconButton(
+                      icon: Icon(
+                        Icons.skip_previous_rounded,
+                        size: 22,
+                        color: widget.textColor,
+                      ),
+                      tooltip: '上一段',
+                      constraints: const BoxConstraints.tightFor(
+                        width: 36,
+                        height: 36,
+                      ),
+                      padding: const EdgeInsets.all(6),
+                      onPressed: coord.currentSegmentIndex > 0
+                          ? () => unawaited(coord.previousSegment())
+                          : null,
+                    ),
+                    if (isBuffering)
+                      const Padding(
+                        padding: EdgeInsets.all(8),
+                        child: SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      )
+                    else
+                      IconButton(
+                        icon: Icon(
+                          isPlaying
+                              ? Icons.pause_rounded
+                              : Icons.play_arrow_rounded,
+                          size: 24,
+                          color: AppTheme.primaryColor,
+                        ),
+                        tooltip: isPlaying ? '暂停听书' : '继续听书',
+                        constraints: const BoxConstraints.tightFor(
+                          width: 36,
+                          height: 36,
+                        ),
+                        padding: const EdgeInsets.all(6),
+                        onPressed: () {
+                          if (isPlaying) {
+                            unawaited(coord.pause());
+                          } else if (coord.isPaused) {
+                            unawaited(coord.resume());
+                          } else if (isBlocked) {
+                            unawaited(coord.retryBlockedRange());
+                          }
+                        },
+                      ),
+                    IconButton(
+                      icon: Icon(
+                        Icons.skip_next_rounded,
+                        size: 22,
+                        color: widget.textColor,
+                      ),
+                      tooltip: '下一段',
+                      constraints: const BoxConstraints.tightFor(
+                        width: 36,
+                        height: 36,
+                      ),
+                      padding: const EdgeInsets.all(6),
+                      onPressed:
+                          coord.currentSegmentIndex + 1 <
+                              coord.manifestSegments.length
+                          ? () => unawaited(coord.nextSegment())
+                          : null,
+                    ),
+                    const SizedBox(width: 8),
+                    Text(
+                      _status.phaseLabel,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: isBlocked
+                            ? Colors.redAccent
+                            : AppTheme.primaryColor,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
+                    if (coord.isUsingFallbackTextModel) ...[
+                      const SizedBox(width: 8),
+                      Text(
+                        '兜底模型:${coord.activeTextModelLabel}',
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: Colors.orange.shade800,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: Text(
+                        statusMetrics,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: widget.secondaryColor,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 2),
+              // 第三行：异常提示/重试 或 当前台词摘要
+              Expanded(
+                child: issueText != null && issueText.isNotEmpty
+                    ? Row(
+                        children: [
+                          Icon(
+                            isBlocked
+                                ? Icons.error_outline
+                                : Icons.info_outline_rounded,
+                            size: 14,
+                            color: isBlocked ? Colors.redAccent : Colors.orange,
+                          ),
+                          const SizedBox(width: 6),
+                          Expanded(
+                            child: Text(
+                              issueText,
+                              style: TextStyle(
+                                fontSize: 11,
+                                color: widget.textColor,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: () =>
+                                unawaited(coord.retryBlockedRange()),
+                            style: TextButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 8,
+                              ),
+                              minimumSize: const Size(0, 26),
+                            ),
+                            child: const Text(
+                              '重试',
+                              style: TextStyle(fontSize: 11),
+                            ),
+                          ),
+                        ],
+                      )
+                    : Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          spokenText,
+                          style: TextStyle(
+                            fontSize: 11,
+                            color: widget.secondaryColor,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                      ),
+              ),
+            ],
+          ),
         ),
       ),
     );

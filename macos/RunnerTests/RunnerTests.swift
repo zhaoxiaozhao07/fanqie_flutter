@@ -1400,6 +1400,84 @@ final class RunnerTests: XCTestCase {
     XCTAssertEqual(calls, 1)
     playback.release()
   }
+
+  func testImmersiveAudioValidationProbeDiskAndNamedSecretAccount() throws {
+    let playback = ReaderPlayback(roots: [directory], mediaControls: false,
+      observeOutputChanges: false) { _, _ in }
+    let hashName = String(repeating: "a1b2c3d4", count: 8) + ".mp3"
+    let hashWavName = String(repeating: "0f1e2d3c", count: 8) + ".wav"
+    let previewName = "immersive_preview_-123456.mp3"
+    let wavBytes = silentWav(milliseconds: 300)
+    let hashFile = try file(hashName, wavBytes)
+    let hashWavFile = try file(hashWavName, wavBytes)
+    let previewFile = try file(previewName, wavBytes)
+    let badShortHash = try file("deadbeef.mp3", wavBytes)
+    let foreignFile = try file("user_voice.mp3", wavBytes)
+
+    XCTAssertTrue(playback.validateAudio(hashFile))
+    XCTAssertTrue(playback.validateAudio(hashWavFile))
+    XCTAssertTrue(playback.validateAudio(previewFile))
+    XCTAssertFalse(playback.validateAudio(badShortHash))
+    XCTAssertFalse(playback.validateAudio(foreignFile))
+
+    let tmpWav = try file("job_probe_a1_f1.tmp", wavBytes)
+    let probed = ReaderPlayback.probeAudioDuration(file: tmpWav)
+    XCTAssertEqual(probed["valid"] as? Bool, true)
+    XCTAssertEqual(probed["mime"] as? String, "audio/wav")
+    let durationMs = (probed["durationMs"] as? NSNumber)?.intValue ?? 0
+    XCTAssertGreaterThanOrEqual(durationMs, 250)
+    XCTAssertLessThanOrEqual(durationMs, 350)
+
+    let badTmp = try file("corrupt_probe.tmp", Data(repeating: 0x55, count: 64))
+    let badProbed = ReaderPlayback.probeAudioDuration(file: badTmp)
+    XCTAssertEqual(badProbed["valid"] as? Bool, false)
+    XCTAssertEqual((badProbed["durationMs"] as? NSNumber)?.intValue, 0)
+
+    let missingSubdir = directory.appendingPathComponent("not-created-yet/audio").path
+    XCTAssertGreaterThan(ReaderPlayback.freeDiskBytes(at: missingSubdir), 0)
+
+    XCTAssertTrue(ReaderKeychain.isValidAccount("immersive_text_model_api_key_tm_minimax_m31_flash_v1"))
+    XCTAssertTrue(ReaderKeychain.isValidAccount("webdav_password_v1"))
+    XCTAssertFalse(ReaderKeychain.isValidAccount(""))
+    XCTAssertFalse(ReaderKeychain.isValidAccount("bad\0key"))
+    XCTAssertFalse(ReaderKeychain.isValidAccount(String(repeating: "x", count: 257)))
+    playback.release()
+  }
+
+  func testImmersivePreloadSeamlessTransitionWithGapAndPlaybackRate() throws {
+    guard ReaderPlayback.hasOutputDevice else { throw XCTSkip("没有音频输出设备；不是播放通过") }
+    var events = [(String, [String: Any])]()
+    let transitioned = expectation(description: "seamless preload transition")
+    let finishedSecond = expectation(description: "second preloaded segment completed")
+    let playback = ReaderPlayback(roots: [directory], mediaControls: false,
+      observeOutputChanges: false) { method, args in
+        events.append((method, args))
+        if method == "onAudioTransition" { transitioned.fulfill() }
+        if method == "onAudioComplete", args["id"] as? String == "immersive:seg2" {
+          finishedSecond.fulfill()
+        }
+      }
+    let seg1 = try file(String(repeating: "11", count: 32) + ".wav", silentWav(milliseconds: 400))
+    let seg2 = try file(String(repeating: "22", count: 32) + ".wav", silentWav(milliseconds: 220))
+
+    XCTAssertTrue(playback.play(id: "immersive:seg1", file: seg1, rate: 1.5, preservePitch: true, startPositionMs: 0))
+    XCTAssertTrue(playback.setPlaybackRate(1.25, preservePitch: true))
+    let pos = playback.audioPosition()
+    XCTAssertEqual(pos["id"] as? String, "immersive:seg1")
+    XCTAssertEqual(pos["playing"] as? Bool, true)
+    XCTAssertGreaterThanOrEqual((pos["durationMs"] as? NSNumber)?.intValue ?? 0, 350)
+
+    XCTAssertTrue(playback.preloadNext(
+      afterID: "immersive:seg1", id: "immersive:seg2", file: seg2,
+      rate: 1.25, preservePitch: true, gapMs: 80))
+
+    wait(for: [transitioned, finishedSecond], timeout: 6)
+    let transitionEvent = events.first(where: { $0.0 == "onAudioTransition" })
+    XCTAssertEqual(transitionEvent?.1["completedId"] as? String, "immersive:seg1")
+    XCTAssertEqual(transitionEvent?.1["startedId"] as? String, "immersive:seg2")
+    XCTAssertFalse(events.contains(where: { $0.0 == "onAudioComplete" && ($0.1["id"] as? String) == "immersive:seg1" }))
+    playback.release()
+  }
 }
 
 /// Deterministic stale/denied/moved bookmark fixtures. Real bookmark creation

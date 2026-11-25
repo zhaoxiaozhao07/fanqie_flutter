@@ -13,6 +13,7 @@ import 'desktop_reader_preferences.dart';
 import 'external_book_import_service.dart';
 import 'reader_auto_backup_service.dart';
 import 'reader_trash_service.dart';
+import '../immersive/services/immersive_playback_coordinator.dart';
 import '../webdav/services/webdav_sync_service.dart';
 
 /// Native Cmd-Q waits for pending anchors/settings, not just widget disposal.
@@ -40,6 +41,8 @@ class AppLifecycleService {
       await ReaderBackupService.flushCreates();
       final tts = TtsService();
       if (tts.isAvailable && tts.isActive) await tts.stop();
+      final immersive = ImmersivePlaybackCoordinator();
+      if (immersive.isActive) await immersive.stop();
       await (ReaderPlatform.isDesktop
               ? DownloadService().prepareToQuit()
               : DownloadService().cancelAllAndWait())

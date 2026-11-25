@@ -2,10 +2,10 @@
 
 ## 1. 架构与集成总览
 
-本功能在原有阅读器（EPUB / TXT 解析、目录定位、单音色听书、Android 前台媒体服务 `ReaderPlaybackService`）基础上独立扩展，代码主要位于 `lib/immersive/` 与 `lib/webdav/`：
+本功能在原有阅读器（EPUB / TXT 解析、目录定位、单音色听书、Android 前台媒体服务 `ReaderPlaybackService` 与 macOS 原生播放组件 `ReaderPlayback`）基础上独立扩展，代码主要位于 `lib/immersive/` 与 `lib/webdav/`：
 
 - **配置与校验**：`lib/immersive/models/immersive_config.dart`、`lib/immersive/services/immersive_config_service.dart`、`lib/immersive/services/immersive_preset_config.dart`、`docs/config.schema.json`、`docs/config.example.json`
-- **持久化状态库**：`lib/immersive/services/immersive_database.dart`（Android 端使用 `sqflite` SQLite WAL + `COLLATE BINARY` 大小写敏感事务存储；支持全书角色档案与手动音色锁定导入/导出供跨设备同步；单元测试提供等价事务内存实现）
+- **持久化状态库**：`lib/immersive/services/immersive_database.dart`（Android 与 macOS 双端使用 `sqflite` SQLite WAL + `COLLATE BINARY` 大小写敏感事务存储；支持全书角色档案与手动音色锁定导入/导出供跨设备同步；单元测试提供等价事务内存实现）
 - **原文定位与语义分块**：`lib/immersive/services/source_normalizer.dart`、`lib/immersive/services/chunk_planner.dart`（支持锚点章首块微切分快启，默认 `first_chunk_target_tokens = 550`）
 - **协议适配器**：
   - 文本分析：`lib/immersive/services/text_model_adapter.dart`（支持标准 `response_format.json_schema` 与注册的 `vendor_native: openai_tool_call_schema` 强制 Function Calling 严格 Schema，自动剥离 `<think>`/`reasoning_content`，严禁提示词正则兜底）
@@ -16,14 +16,15 @@
   - `lib/immersive/services/audio_cache_manager.dart`、`lib/immersive/services/manifest_builder.dart`
   - `lib/immersive/services/immersive_audio_player_bridge.dart`、`lib/immersive/services/immersive_playback_coordinator.dart`
   - Android 原生：`android/app/src/main/kotlin/com/fanqie/fanqie_flutter/ReaderPlaybackService.kt`（双 `MediaPlayer` 异步预装 `preloadNextAudio` / `clearPreloadedAudio`、段间自然呼吸停顿与 `onAudioTransition` 无缝切段）
-- **模块化 UI**：`lib/immersive/widgets/immersive_settings_sheet.dart`、`lib/immersive/widgets/immersive_settings_dialogs.dart`、`lib/immersive/widgets/immersive_pipeline_tab.dart`、`lib/immersive/widgets/immersive_player_panel.dart`、`lib/immersive/widgets/immersive_cast_sheet.dart`
+  - macOS 原生：`macos/Runner/ReaderPlayback.swift` 与 `macos/Runner/MainFlutterWindow.swift`（双 `AVAudioPlayer` 后台预热无缝切段、段间呼吸停顿、实时变速、音频时长探测 `probeAudioDuration`、磁盘空间查询 `getFreeDiskBytes` 与钥匙串命名密钥存储 `readNamedSecret`/`writeNamedSecret`）
+- **模块化 UI**：`lib/immersive/widgets/immersive_settings_sheet.dart`、`lib/immersive/widgets/immersive_settings_dialogs.dart`、`lib/immersive/widgets/immersive_pipeline_tab.dart`、`lib/immersive/widgets/immersive_player_panel.dart`、`lib/immersive/widgets/immersive_characters_sheet.dart`（全面适配移动端底栏与 macOS 桌面工具栏、固定高度桌面控制条及居中对话框）
 - **WebDAV 云同步与端到端加密**：`lib/webdav/models/webdav_config.dart`、`lib/webdav/services/webdav_crypto.dart`、`lib/webdav/services/webdav_client.dart`、`lib/webdav/services/webdav_sync_service.dart`、`lib/webdav/widgets/webdav_sync_sheet.dart`
 
 ## 2. 应用内可视化配置与安全设计
 
 - **源码零硬编码密钥**：代码仓库与默认预置骨架中不硬编码任何真实 API Key 或 WebDAV 密码。首次安装未填密钥时默认关闭沉浸式开关，用户可直接在「沉浸式听书设置」中填写或通过 WebDAV 一键拉取恢复；开发联调可通过 `--dart-define` 注入密钥。
 - **本地与传输安全**：
-  - 所有文本模型 API Key、TTS 供应商 API Key、普通 AI 朗读 API Key 与 WebDAV 密码在 Android 端均存入系统 Keystore（`ReaderSecrets`），本地配置文件与偏好仅存槽位占位符；
+  - 所有文本模型 API Key、TTS 供应商 API Key、普通 AI 朗读 API Key 与 WebDAV 密码在 Android 端存入系统 Keystore（`ReaderSecrets`），在 macOS 端存入系统钥匙串（`ReaderKeychain`），本地配置文件与偏好仅存槽位占位符；
   - 对非本地回环的明文 `http://` 网关或 WebDAV 地址，设置界面会展示「明文 HTTP」标识与安全风险提示。
 - **多文本分析模型与分级思考加速**：
   - 支持新增、编辑、删除与独立启停多个 OpenAI 兼容文本模型，按模型独立配置并发数与思考程度（默认 `auto`），支持设置 1 个主模型 + 1 个兜底模型并在连续失败达到阈值时自动切换；
