@@ -20,6 +20,7 @@ import 'reader_text.dart';
 import 'reading_history_service.dart';
 import 'compatible_tts_client.dart';
 import 'reader_library_service.dart';
+import '../immersive/services/immersive_playback_coordinator.dart';
 
 enum TtsEngineType { native, openAi }
 
@@ -527,6 +528,9 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     final intent = ++_startIntent;
+    if (!_testInvoker && ImmersivePlaybackCoordinator().isActive) {
+      await ImmersivePlaybackCoordinator().stop();
+    }
     await _ensureReady();
     if (intent != _startIntent) return;
     await stop(supersedeStart: false);
@@ -597,6 +601,9 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     int startChunk = 0,
   }) async {
     final intent = ++_startIntent;
+    if (!_testInvoker && ImmersivePlaybackCoordinator().isActive) {
+      await ImmersivePlaybackCoordinator().stop();
+    }
     await _ensureReady();
     if (intent != _startIntent) return;
     await stop(supersedeStart: false);

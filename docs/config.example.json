@@ -1,0 +1,294 @@
+{
+  "schema_version": 1,
+  "feature_enabled": false,
+  "storage": {
+    "state_store": "sqlite",
+    "database_path": "./data/immersive-audio/state.sqlite3",
+    "audio_cache_dir": "./data/immersive-audio/audio",
+    "temp_dir": "./data/immersive-audio/audio/tmp"
+  },
+  "text_analysis": {
+    "provider_id": "analysis_primary",
+    "display_name": "文本分配模型",
+    "adapter": "openai_chat_completions",
+    "base_url": "https://llm.example.com/v1",
+    "endpoint": "/chat/completions",
+    "api_key": "REPLACE_WITH_ANALYSIS_API_KEY",
+    "api_key_env": null,
+    "model_id": "REPLACE_WITH_ANALYSIS_MODEL_ID",
+    "extra_headers": {},
+    "extra_body": {},
+    "request_timeout_ms": 90000,
+    "max_concurrency": 4,
+    "reserved_reconciliation_slots": 1,
+    "requests_per_minute": 30,
+    "tokens_per_minute": null,
+    "context_window_tokens": 32768,
+    "max_output_tokens": 6144,
+    "output_limit_parameter": "max_completion_tokens",
+    "temperature": null,
+    "structured_output": {
+      "mode": "json_schema",
+      "schema_name_prefix": "immersive_reader_v1",
+      "strict": true,
+      "vendor_adapter_id": null,
+      "allow_prompt_only_fallback": false
+    }
+  },
+  "tts": {
+    "global_max_concurrency": 6,
+    "max_pending_jobs": 64,
+    "providers": [
+      {
+        "provider_id": "tts_provider_a",
+        "display_name": "示例供应商 A",
+        "enabled": true,
+        "adapter": "openai_speech",
+        "base_url": "https://tts-a.example.com/v1",
+        "endpoint": "/audio/speech",
+        "api_key": "REPLACE_WITH_TTS_A_API_KEY",
+        "api_key_env": null,
+        "extra_headers": {},
+        "request_timeout_ms": 120000,
+        "max_concurrency": 4,
+        "reserved_foreground_slots": 1,
+        "requests_per_minute": 60,
+        "models": [
+          {
+            "model_key": "a_model_upper_x",
+            "model_id": "X",
+            "display_name": "模型 X（大写，按供应商实际值修改）",
+            "enabled": true,
+            "max_concurrency": 4,
+            "capabilities": {
+              "max_input_length": 2000,
+              "input_length_unit": "unicode_codepoints",
+              "supports_instructions": false,
+              "supports_speed": true,
+              "supported_audio_formats": ["mp3"],
+              "response_transport": "binary",
+              "supports_word_timestamps": false
+            },
+            "extra_body": {},
+            "voices": [
+              {
+                "voice_profile_id": "vp_a_X_Y",
+                "voice_id": "Y",
+                "display_name": "青年男声 X / Y",
+                "enabled": true,
+                "gender": "male",
+                "notes": "示例：青年男声，清朗、自然。请按实际试听结果修改。",
+                "tags": ["青年", "清朗"],
+                "render_settings": {
+                  "audio_format": "mp3",
+                  "speed": 1.0,
+                  "instructions": null
+                },
+                "extra_body": {}
+              },
+              {
+                "voice_profile_id": "vp_a_X_Z",
+                "voice_id": "Z",
+                "display_name": "成熟男声 X / Z",
+                "enabled": true,
+                "gender": "male",
+                "notes": "示例：中年男声，低沉、稳重，与青年男声区分明显。",
+                "tags": ["中年", "沉稳"],
+                "render_settings": {
+                  "audio_format": "mp3",
+                  "speed": 1.0,
+                  "instructions": null
+                },
+                "extra_body": {}
+              }
+            ]
+          },
+          {
+            "model_key": "a_model_lower_x",
+            "model_id": "x",
+            "display_name": "模型 x（小写，与 X 独立）",
+            "enabled": true,
+            "max_concurrency": 2,
+            "capabilities": {
+              "max_input_length": 2000,
+              "input_length_unit": "unicode_codepoints",
+              "supports_instructions": false,
+              "supports_speed": true,
+              "supported_audio_formats": ["mp3"],
+              "response_transport": "binary",
+              "supports_word_timestamps": false
+            },
+            "extra_body": {},
+            "voices": [
+              {
+                "voice_profile_id": "vp_a_x_y",
+                "voice_id": "y",
+                "display_name": "温柔女声 x / y",
+                "enabled": true,
+                "gender": "female",
+                "notes": "示例：青年女声，柔和、清晰。模型 x 和音色 y 均按原值发送。",
+                "tags": ["青年", "柔和"],
+                "render_settings": {
+                  "audio_format": "mp3",
+                  "speed": 1.0,
+                  "instructions": null
+                },
+                "extra_body": {}
+              },
+              {
+                "voice_profile_id": "vp_a_x_Y",
+                "voice_id": "Y",
+                "display_name": "中性声音 x / Y",
+                "enabled": true,
+                "gender": "neutral",
+                "notes": "示例：用于说明相同音色 ID Y 在不同模型下仍是独立配置。",
+                "tags": ["中性", "平稳"],
+                "render_settings": {
+                  "audio_format": "mp3",
+                  "speed": 1.0,
+                  "instructions": null
+                },
+                "extra_body": {}
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "provider_id": "tts_provider_b",
+        "display_name": "示例供应商 B",
+        "enabled": true,
+        "adapter": "openai_speech",
+        "base_url": "https://tts-b.example.com/v1",
+        "endpoint": "/audio/speech",
+        "api_key": "REPLACE_WITH_TTS_B_API_KEY",
+        "api_key_env": null,
+        "extra_headers": {},
+        "request_timeout_ms": 120000,
+        "max_concurrency": 2,
+        "reserved_foreground_slots": 1,
+        "requests_per_minute": 60,
+        "models": [
+          {
+            "model_key": "b_narration_model",
+            "model_id": "REPLACE_WITH_TTS_B_MODEL_ID",
+            "display_name": "旁白模型",
+            "enabled": true,
+            "max_concurrency": 2,
+            "capabilities": {
+              "max_input_length": 2000,
+              "input_length_unit": "unicode_codepoints",
+              "supports_instructions": false,
+              "supports_speed": true,
+              "supported_audio_formats": ["mp3"],
+              "response_transport": "binary",
+              "supports_word_timestamps": false
+            },
+            "extra_body": {},
+            "voices": [
+              {
+                "voice_profile_id": "vp_b_narrator",
+                "voice_id": "REPLACE_WITH_TTS_B_VOICE_ID",
+                "display_name": "固定旁白",
+                "enabled": true,
+                "gender": "male",
+                "notes": "示例：叙述自然，音量和语速稳定，适合长时间听书。",
+                "tags": ["旁白", "沉稳"],
+                "render_settings": {
+                  "audio_format": "mp3",
+                  "speed": 1.0,
+                  "instructions": null
+                },
+                "extra_body": {}
+              }
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "book_defaults": {
+    "selected_voice_profile_ids": ["vp_a_X_Y", "vp_a_X_Z", "vp_a_x_y", "vp_a_x_Y"],
+    "narrator_voice_profile_id": "vp_b_narrator",
+    "allow_voice_reuse": true,
+    "reserve_narrator_for_non_dialogue": true,
+    "unknown_gender_policy": "prefer_neutral_then_selected",
+    "known_gender_no_match_policy": "prefer_neutral_else_require_selection",
+    "unresolved_dialogue_policy": "narrator_fallback_after_review",
+    "identity_conflict_policy": "pause_affected_range",
+    "thought_and_quoted_text_policy": "narrator",
+    "missing_voice_policy": "pause_until_reconfigured",
+    "middle_start_policy": "build_prefix_identity_first"
+  },
+  "analysis_pipeline": {
+    "ahead_chapters": 3,
+    "max_ahead_chunks": 24,
+    "max_uncommitted_chunks": 8,
+    "target_chunk_tokens": 2500,
+    "max_chunk_tokens": 4000,
+    "context_before_tokens": 700,
+    "context_after_tokens": 350,
+    "recent_dialogue_turns": 8,
+    "chapter_summary_max_tokens": 500,
+    "character_context_max_tokens": 4000,
+    "context_safety_margin_ratio": 0.15,
+    "max_identity_rechecks": 2,
+    "keep_all_selected_voice_profiles_in_system": true
+  },
+  "audio_generation": {
+    "startup_target_characters": 40,
+    "target_characters": 120,
+    "max_characters": 350,
+    "initial_estimated_characters_per_second": 4.0,
+    "cross_chapter_merge": false,
+    "transport": "complete_file_cache"
+  },
+  "prefetch": {
+    "startup_buffer_seconds": 8,
+    "startup_wait_after_first_ready_ms": 3000,
+    "resume_buffer_seconds": 8,
+    "low_water_seconds": 90,
+    "target_buffer_seconds": 300,
+    "high_water_seconds": 600,
+    "max_jobs_beyond_first_gap": 8,
+    "pause_policy": "finish_inflight_stop_new",
+    "continue_in_supported_background": true
+  },
+  "playback": {
+    "default_rate": 1.0,
+    "preserve_pitch": true,
+    "highlight_granularity": "audio_segment",
+    "cursor_save_interval_ms": 1000,
+    "chapter_auto_advance": true,
+    "gap_policy": "wait_without_skipping"
+  },
+  "cache": {
+    "max_bytes": 2147483648,
+    "evict_to_ratio": 0.8,
+    "min_free_disk_bytes": 268435456,
+    "eviction_policy": "lru_unpinned",
+    "protect_recent_playback_seconds": 120,
+    "verify_checksum_on_reuse": true,
+    "cleanup_incomplete_files_after_seconds": 3600
+  },
+  "jobs": {
+    "lease_seconds": 60,
+    "heartbeat_seconds": 15,
+    "poll_interval_ms": 500,
+    "cancel_unneeded_requests_on_seek": true
+  },
+  "retry": {
+    "max_attempts": 3,
+    "initial_backoff_ms": 1000,
+    "max_backoff_ms": 30000,
+    "jitter_ratio": 0.2,
+    "respect_retry_after": true
+  },
+  "observability": {
+    "log_level": "info",
+    "log_book_text": false,
+    "log_raw_model_responses": false,
+    "retain_debug_payload_days": 7,
+    "collect_local_metrics": true
+  }
+}

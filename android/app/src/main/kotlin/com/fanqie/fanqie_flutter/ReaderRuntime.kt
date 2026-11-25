@@ -3,6 +3,7 @@ package com.fanqie.fanqie_flutter
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.media.MediaMetadataRetriever
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.net.Uri
@@ -11,6 +12,7 @@ import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.StatFs
 import android.provider.MediaStore
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
@@ -128,6 +130,29 @@ object ReaderRuntime {
                         ))
                     }
                     "writeTtsSecret" -> result.success(ReaderSecrets.write(app, call.argument<String>("value") ?: ""))
+                    "readNamedSecret" -> {
+                        val keyName = call.argument<String>("key") ?: ""
+                        result.success(if (keyName.isBlank()) null else ReaderSecrets.readNamed(app, keyName))
+                    }
+                    "writeNamedSecret" -> {
+                        val keyName = call.argument<String>("key") ?: ""
+                        val value = call.argument<String>("value") ?: ""
+                        result.success(if (keyName.isBlank()) false else ReaderSecrets.writeNamed(app, keyName, value))
+                    }
+                    "probeAudioDuration" -> {
+                        val filePath = call.argument<String>("filePath") ?: ""
+                        files.execute {
+                            val probed = probeAudioDuration(filePath)
+                            main.post { result.success(probed) }
+                        }
+                    }
+                    "getFreeDiskBytes" -> {
+                        val dirPath = call.argument<String>("path") ?: app.filesDir.absolutePath
+                        files.execute {
+                            val free = getFreeDiskBytes(dirPath)
+                            main.post { result.success(free) }
+                        }
+                    }
                     "saveToDownloads" -> {
                         val source = call.argument<String>("filePath") ?: ""
                         val name = File(call.argument<String>("fileName") ?: "export.txt").name
@@ -155,9 +180,10 @@ object ReaderRuntime {
                         }
                     }
                     "getAndroidSdkInt" -> result.success(Build.VERSION.SDK_INT)
-                    "initNativeTts", "speakNativeTts", "playAudioFile", "pauseAudio", "resumeAudio",
+                    "initNativeTts", "speakNativeTts", "playAudioFile", "preloadNextAudio", "clearPreloadedAudio", "pauseAudio", "resumeAudio",
                     "stopNativeTts", "stopAudio", "stopPlayback", "setAudioVolume", "setSleepDeadline",
-                    "updateMediaPlaybackState", "releasePlaybackService", "getPlaybackState" -> {
+                    "updateMediaPlaybackState", "releasePlaybackService", "getPlaybackState",
+                    "setPlaybackRate", "getAudioPosition" -> {
                         @Suppress("UNCHECKED_CAST")
                         ReaderPlaybackService.dispatch(app, call.method, call.arguments as? Map<String, Any?> ?: emptyMap(), result)
                     }
@@ -338,6 +364,45 @@ object ReaderRuntime {
             null
         }
     }
+
+    /// 通过 Android 原生 MediaMetadataRetriever 校验音频可解码并返回真实时长毫秒数
+    private fun probeAudioDuration(filePath: String): Map<String, Any?> {
+        if (filePath.isBlank()) return mapOf("valid" to false, "durationMs" to 0)
+        val file = File(filePath)
+        if (!file.isFile || file.length() <= 0L) return mapOf("valid" to false, "durationMs" to 0)
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(file.absolutePath)
+            val durStr = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION)
+            val mime = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_MIMETYPE) ?: ""
+            val hasAudio = retriever.extractMetadata(MediaMetadataRetriever.METADATA_KEY_HAS_AUDIO)
+            val durationMs = durStr?.toLongOrNull() ?: 0L
+            val valid = durationMs > 0L && (hasAudio == null || hasAudio == "yes" || mime.startsWith("audio/"))
+            mapOf(
+                "valid" to valid,
+                "durationMs" to durationMs.coerceAtLeast(0L),
+                "mime" to mime
+            )
+        } catch (_: Exception) {
+            mapOf("valid" to false, "durationMs" to 0)
+        } finally {
+            try { retriever.release() } catch (_: Exception) {}
+        }
+    }
+
+    /// 获取目标路径所在文件系统的真实剩余磁盘空间字节数
+    private fun getFreeDiskBytes(dirPath: String): Long {
+        return try {
+            var target = File(dirPath)
+            while (!target.exists() && target.parentFile != null) {
+                target = target.parentFile!!
+            }
+            val stat = StatFs(target.absolutePath)
+            stat.availableBytes
+        } catch (_: Exception) {
+            -1L
+        }
+    }
 }
 
 /** Only ciphertext is stored in preferences. The AES key never leaves Keystore. */
@@ -353,16 +418,18 @@ private object ReaderSecrets {
                 .setKeySize(256).build())
         }.generateKey()
     }
-    fun write(context: Context, text: String): Boolean {
+    fun write(context: Context, text: String): Boolean = writeNamed(context, "tts", text)
+    fun read(context: Context): String? = readNamed(context, "tts")
+    fun writeNamed(context: Context, slot: String, text: String): Boolean {
         val prefs = context.getSharedPreferences("reader_secure", Context.MODE_PRIVATE)
-        if (text.isEmpty()) return prefs.edit().remove("tts").commit()
+        if (text.isEmpty()) return prefs.edit().remove(slot).commit()
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")
         cipher.init(Cipher.ENCRYPT_MODE, key())
         val encrypted = cipher.doFinal(text.toByteArray(Charsets.UTF_8))
-        return prefs.edit().putString("tts", "${Base64.encodeToString(cipher.iv, Base64.NO_WRAP)}:${Base64.encodeToString(encrypted, Base64.NO_WRAP)}").commit()
+        return prefs.edit().putString(slot, "${Base64.encodeToString(cipher.iv, Base64.NO_WRAP)}:${Base64.encodeToString(encrypted, Base64.NO_WRAP)}").commit()
     }
-    fun read(context: Context): String? {
-        val value = context.getSharedPreferences("reader_secure", Context.MODE_PRIVATE).getString("tts", null) ?: return null
+    fun readNamed(context: Context, slot: String): String? {
+        val value = context.getSharedPreferences("reader_secure", Context.MODE_PRIVATE).getString(slot, null) ?: return null
         val parts = value.split(':')
         require(parts.size == 2)
         val cipher = Cipher.getInstance("AES/GCM/NoPadding")

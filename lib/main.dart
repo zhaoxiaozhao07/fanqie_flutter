@@ -13,6 +13,8 @@ import 'services/reader_display_text.dart';
 import 'services/external_reader_fonts.dart';
 import 'services/reader_auto_backup_service.dart';
 import 'services/reader_trash_service.dart';
+import 'immersive/services/immersive_playback_coordinator.dart';
+import 'webdav/services/webdav_sync_service.dart';
 
 Future<void> initializeReaderApplication() async {
   AppLifecycleService.initialize();
@@ -30,6 +32,14 @@ Future<void> initializeReaderApplication() async {
   }
   if (ReaderPlatform.isDesktop) await DownloadService().initialize();
   await ExternalBookImportService().initialize();
+  try {
+    // 懒加载沉浸式听书配置与历史恢复，异常不阻塞普通阅读与单音色听书
+    await ImmersivePlaybackCoordinator().loadAndValidateConfig();
+  } catch (_) {}
+  try {
+    // 初始化 WebDAV 云同步配置（不在阻塞启动阶段发网络请求）
+    await WebDavSyncService().initialize();
+  } catch (_) {}
 }
 
 Future<void> main() async {

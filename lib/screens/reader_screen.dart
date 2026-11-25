@@ -43,6 +43,7 @@ import '../services/reader_system_service.dart';
 import '../services/reader_pagination.dart';
 import '../services/reader_position_service.dart';
 import '../services/reader_font_service.dart';
+import '../webdav/services/webdav_sync_service.dart';
 import '../services/reader_display_text.dart';
 import '../services/reader_cache_service.dart';
 import '../services/reader_platform.dart';
@@ -52,6 +53,10 @@ import '../services/desktop_commands.dart';
 import '../services/reader_text.dart';
 import '../services/tts_service.dart';
 import '../widgets/tts_player_panel.dart';
+import '../immersive/services/immersive_playback_coordinator.dart';
+import '../immersive/widgets/immersive_player_panel.dart';
+import '../immersive/widgets/immersive_settings_sheet.dart';
+import '../immersive/widgets/immersive_characters_sheet.dart';
 import '../widgets/paragraph_comment_sheet.dart';
 import '../widgets/reader_page_view.dart';
 import '../widgets/reader_comment_bubble.dart';
@@ -276,6 +281,9 @@ class _ReaderScreenState extends State<ReaderScreen>
   late final ValueNotifier<int> _activeChapterNotifier;
   double _lastDetectPixels = 0.0;
   late final TtsService _ttsService = widget.ttsService ?? TtsService();
+  final ImmersivePlaybackCoordinator _immersiveService =
+      ImmersivePlaybackCoordinator();
+  Object? _immersivePaintKey;
   bool _isLoadingHead = true;
   bool _isLoadingPrev = false;
   bool _isLoadingMore = false;
@@ -305,6 +313,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       _readerRouteActive &&
       _volumeKeyScroll &&
       !_ttsService.isActive &&
+      !_immersiveService.isActive &&
       _readerPanels == 0;
   bool get _showReaderHeader =>
       !_readingFullScreen &&
@@ -549,6 +558,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _ttsService.attachReader(widget.book.bookId);
     _ttsAttached = true;
     _ttsService.addListener(_onTtsStateChanged);
+    _immersiveService.addListener(_onImmersiveStateChanged);
 
     // 启用阅读屏幕常亮与定时电量/时间更新
     ReaderSystemService.setKeepScreenOn(
@@ -593,7 +603,13 @@ class _ReaderScreenState extends State<ReaderScreen>
     }
     _savePositionNow(notify: false);
     _flushPreferences();
+    unawaited(
+      WebDavSyncService()
+          .triggerLightweightProgressSync()
+          .catchError((_) => null),
+    );
     _ttsService.removeListener(_onTtsStateChanged);
+    _immersiveService.removeListener(_onImmersiveStateChanged);
     if (_ttsAttached) _ttsService.detachReader(widget.book.bookId);
     _ttsStartGeneration++;
     // The service owns the playlist; leaving this route must not stop audio.
@@ -626,6 +642,39 @@ class _ReaderScreenState extends State<ReaderScreen>
       overlays: SystemUiOverlay.values,
     );
     super.dispose();
+  }
+
+  void _onImmersiveStateChanged() {
+    if (!mounted) return;
+    final key = (
+      _immersiveService.isActive,
+      _immersiveService.isPlaying,
+      _immersiveService.currentChapterIndex,
+      _immersiveService.currentSegmentIndex,
+      _immersiveService.currentSegment?.segmentId,
+    );
+    if (key == _immersivePaintKey) return;
+    _immersivePaintKey = key;
+    ReaderSystemService.setVolumeKeyScrollEnabled(
+      _canUseVolumeKeys,
+      owner: this,
+    );
+    _ttsHighlightNotifier.value++;
+    if (_readerRouteActive &&
+        !_navigationLoading &&
+        _immersiveService.isPlaying &&
+        !_isAutoScrolling &&
+        !_showControls &&
+        !_restoringPosition &&
+        _readerPanels == 0 &&
+        _activeSelectableParaNotifier.value == null &&
+        DateTime.now().isAfter(_manualScrollUntil) &&
+        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed) {
+      final pos = _immersiveService.currentPosition;
+      if (pos != null && _immersiveService.currentBookId == widget.book.bookId) {
+        _autoScrollFollowPosition(pos);
+      }
+    }
   }
 
   void _onTtsStateChanged() {
@@ -670,6 +719,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (position == null || _ttsService.currentBookId != widget.book.bookId) {
       return;
     }
+    _autoScrollFollowPosition(position);
+  }
+
+  /// 在朗读或沉浸式多角色听书推进时自动滚动/跨章跟随当前播放位置
+  void _autoScrollFollowPosition(ReadingPosition position) {
     final chapterIndex = _chapterIndexById[position.chapterId];
     if (chapterIndex == null) return;
     if (_isPageMode || !_displayedChapters.contains(chapterIndex)) {
@@ -4758,14 +4812,31 @@ class _ReaderScreenState extends State<ReaderScreen>
                 bottom: 0,
                 left: 0,
                 right: 0,
-                child: TtsPlayerPanel(
-                  service: _ttsService,
-                  backgroundColor: theme.backgroundColor,
-                  textColor: theme.textColor,
-                  secondaryColor: theme.secondaryColor,
-                  onModalChanged: (opened) =>
-                      opened ? _beginReaderPanel() : _endReaderPanel(),
-                  onClose: () => _ttsStartGeneration++,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TtsPlayerPanel(
+                      service: _ttsService,
+                      backgroundColor: theme.backgroundColor,
+                      textColor: theme.textColor,
+                      secondaryColor: theme.secondaryColor,
+                      onModalChanged: (opened) =>
+                          opened ? _beginReaderPanel() : _endReaderPanel(),
+                      onClose: () => _ttsStartGeneration++,
+                    ),
+                    ImmersivePlayerPanel(
+                      coordinator: _immersiveService,
+                      backgroundColor: theme.backgroundColor,
+                      textColor: theme.textColor,
+                      secondaryColor: theme.secondaryColor,
+                      onModalChanged: (opened) =>
+                          opened ? _beginReaderPanel() : _endReaderPanel(),
+                      onJumpToSource: (chapterIndex, pos) {
+                        unawaited(_navigateTo(pos));
+                      },
+                      onClose: () {},
+                    ),
+                  ],
                 ),
               ),
 
@@ -5971,6 +6042,22 @@ class _ReaderScreenState extends State<ReaderScreen>
                   overflow: TextOverflow.ellipsis,
                 ),
               ),
+              // 沉浸式多角色听书快捷入口
+              if (ReaderPlatform.capabilities.tts)
+                IconButton(
+                  key: const ValueKey('immersive-listen-button'),
+                  icon: Icon(
+                    _immersiveService.isActive
+                        ? Icons.record_voice_over
+                        : Icons.record_voice_over_outlined,
+                    size: 22,
+                    color: _immersiveService.isActive
+                        ? Theme.of(context).primaryColor
+                        : theme.textColor,
+                  ),
+                  tooltip: '沉浸式听书',
+                  onPressed: _startImmersiveReading,
+                ),
               // 听书快捷入口
               if (ReaderPlatform.capabilities.tts)
                 IconButton(
@@ -6024,9 +6111,58 @@ class _ReaderScreenState extends State<ReaderScreen>
                     case 'detail':
                       _openBookDetail();
                       break;
+                    case 'immersiveListen':
+                      unawaited(_startImmersiveReading());
+                      break;
+                    case 'immersiveSettings':
+                      _openImmersiveSettings();
+                      break;
+                    case 'immersiveCharacters':
+                      _openImmersiveCharacters();
+                      break;
                   }
                 },
                 itemBuilder: (context) => [
+                  if (ReaderPlatform.capabilities.tts) ...[
+                    PopupMenuItem(
+                      value: 'immersiveListen',
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.record_voice_over_outlined,
+                            size: 18,
+                            color: theme.textColor,
+                          ),
+                          const SizedBox(width: 12),
+                          Text('沉浸式多角色听书', style: TextStyle(color: theme.textColor)),
+                        ],
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'immersiveSettings',
+                      child: Row(
+                        children: [
+                          Icon(Icons.tune_rounded, size: 18, color: theme.textColor),
+                          const SizedBox(width: 12),
+                          Text('沉浸式听书设置', style: TextStyle(color: theme.textColor)),
+                        ],
+                      ),
+                    ),
+                    PopupMenuItem(
+                      value: 'immersiveCharacters',
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.people_alt_outlined,
+                            size: 18,
+                            color: theme.textColor,
+                          ),
+                          const SizedBox(width: 12),
+                          Text('本书角色与音色', style: TextStyle(color: theme.textColor)),
+                        ],
+                      ),
+                    ),
+                  ],
                   PopupMenuItem(
                     value: 'notes',
                     child: Text(
@@ -6135,6 +6271,59 @@ class _ReaderScreenState extends State<ReaderScreen>
       context,
       MaterialPageRoute(builder: (_) => BookDetailScreen(book: widget.book)),
     );
+  }
+
+  Future<void> _startImmersiveReading({int? chapterIndex}) async {
+    _pauseAutoScroll();
+    if (chapterIndex == null &&
+        _immersiveService.isActive &&
+        _immersiveService.currentBookId == widget.book.bookId) {
+      if (_immersiveService.isPaused) {
+        await _immersiveService.resume();
+      } else {
+        await _immersiveService.pause();
+      }
+      return;
+    }
+    final index = chapterIndex ?? _currentActiveIndex;
+    if (index < 0 || index >= widget.chapters.length) return;
+    final position = chapterIndex == null ? _captureReadingPosition() : null;
+    _showControls = false;
+    await _immersiveService.startImmersivePlayback(
+      book: widget.book,
+      chapters: widget.chapters,
+      chapterIndex: index,
+      position: position,
+      contentLoader: widget.chapterContentLoader,
+      offlineOnly: widget.offlineOnly,
+    );
+  }
+
+  void _openImmersiveSettings() {
+    _showControls = false;
+    _beginReaderPanel();
+    ImmersiveSettingsSheet.show(
+      context,
+      bookId: widget.book.bookId,
+      book: widget.book,
+      chapters: widget.chapters,
+      currentChapterIndex: _currentActiveIndex,
+      currentPosition: _captureReadingPosition(),
+      contentLoader: widget.chapterContentLoader,
+      offlineOnly: widget.offlineOnly,
+      coordinator: _immersiveService,
+    ).whenComplete(_endReaderPanel);
+  }
+
+  void _openImmersiveCharacters() {
+    _showControls = false;
+    _beginReaderPanel();
+    ImmersiveCharactersSheet.show(
+      context,
+      bookId: widget.book.bookId,
+      coordinator: _immersiveService,
+      onJumpToSource: (chapterIndex, pos) => unawaited(_navigateTo(pos)),
+    ).whenComplete(_endReaderPanel);
   }
 
   Future<void> _startTtsReading({int? chapterIndex}) async {
@@ -6872,11 +7061,17 @@ class _ReaderScreenState extends State<ReaderScreen>
     required int sourceStart,
     required int sourceEnd,
   }) {
-    final spoken = _ttsService.spokenRange(
-      widget.book.bookId,
-      chapterId,
-      paragraphIndex,
-    );
+    final spoken =
+        _ttsService.spokenRange(
+          widget.book.bookId,
+          chapterId,
+          paragraphIndex,
+        ) ??
+        _immersiveService.spokenRange(
+          widget.book.bookId,
+          chapterId,
+          paragraphIndex,
+        );
     var result = spans;
     final prefix = math.max(0, text.length - (sourceEnd - sourceStart));
     for (final match

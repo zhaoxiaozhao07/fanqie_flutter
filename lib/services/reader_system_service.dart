@@ -11,6 +11,9 @@ class ReaderSystemService {
   static Object? _volumeOwner;
   static void Function(String method, dynamic args)? _ttsCallback;
   static void Function(String method)? _mediaCallback;
+  static final Set<void Function(String method, dynamic args)>
+  _extraTtsListeners = {};
+  static final Set<void Function(String method)> _extraMediaListeners = {};
   static bool _handlerInitialized = false;
   static Object? _brightnessOwner;
   static Object? _screenOwner;
@@ -124,8 +127,14 @@ class ReaderSystemService {
       } else if (call.method.startsWith('onTts') ||
           call.method.startsWith('onAudio')) {
         _ttsCallback?.call(call.method, call.arguments);
+        for (final listener in _extraTtsListeners.toList()) {
+          listener(call.method, call.arguments);
+        }
       } else if (call.method.startsWith('onMedia')) {
         _mediaCallback?.call(call.method);
+        for (final listener in _extraMediaListeners.toList()) {
+          listener(call.method);
+        }
       }
     });
   }
@@ -154,6 +163,32 @@ class ReaderSystemService {
   static void registerMediaListener(void Function(String method)? callback) {
     _ensureGlobalHandler();
     _mediaCallback = callback;
+  }
+
+  /// 添加额外的音频状态监听者（供沉浸式听书等独立播放所有者复用原生媒体通道）
+  static void addTtsListener(
+    void Function(String method, dynamic args) callback,
+  ) {
+    _ensureGlobalHandler();
+    _extraTtsListeners.add(callback);
+  }
+
+  /// 移除额外的音频状态监听者
+  static void removeTtsListener(
+    void Function(String method, dynamic args) callback,
+  ) {
+    _extraTtsListeners.remove(callback);
+  }
+
+  /// 添加额外的锁屏媒体按钮监听者
+  static void addMediaListener(void Function(String method) callback) {
+    _ensureGlobalHandler();
+    _extraMediaListeners.add(callback);
+  }
+
+  /// 移除额外的锁屏媒体按钮监听者
+  static void removeMediaListener(void Function(String method) callback) {
+    _extraMediaListeners.remove(callback);
   }
 
   /// 开启或关闭音量键按键拦截

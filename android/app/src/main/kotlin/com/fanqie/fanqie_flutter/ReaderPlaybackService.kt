@@ -14,6 +14,7 @@ import android.media.AudioFocusRequest
 import android.media.AudioManager
 import android.media.MediaMetadata
 import android.media.MediaPlayer
+import android.media.PlaybackParams
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
 import android.os.Build
@@ -43,6 +44,10 @@ class ReaderPlaybackService : Service() {
                 result.success(mapOf("active" to false, "playing" to false))
                 return
             }
+            if (method == "getAudioPosition") {
+                result.success(mapOf("id" to null, "playing" to false, "positionMs" to 0, "durationMs" to 0))
+                return
+            }
             val starts = method == "speakNativeTts" || method == "playAudioFile" ||
                 (method == "updateMediaPlaybackState" && args["isActive"] == true)
             if (!starts && pending.isEmpty()) {
@@ -70,6 +75,12 @@ class ReaderPlaybackService : Service() {
     private var focusGeneration = 0
     private var legacyFocusListener: AudioManager.OnAudioFocusChangeListener? = null
     private var player: MediaPlayer? = null
+    private var nextPlayer: MediaPlayer? = null
+    private var nextId: String? = null
+    private var nextAfterId: String? = null
+    private var nextPrepared = false
+    private var nextGapMs = 0L
+    private var pendingGapRunnable: Runnable? = null
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var currentId: String? = null
@@ -79,6 +90,8 @@ class ReaderPlaybackService : Service() {
     private var pendingSpeech: (() -> Unit)? = null
     private var playing = false
     private var volume = 1f
+    private var playbackRate = 1f
+    private var preservePitch = true
     private var deadline = 0L
     private var title = "听书"
     private var subtitle = "准备播放"
@@ -178,8 +191,45 @@ class ReaderPlaybackService : Service() {
                     stopPlayback()
                     val id = args["id"] as? String ?: throw IllegalArgumentException()
                     currentId = id; nativeAudio = false; pendingStart = result
+                    playbackRate = ((args["rate"] as? Number)?.toFloat() ?: 1f).coerceIn(0.5f, 2.0f)
+                    preservePitch = (args["preservePitch"] as? Boolean) ?: true
+                    val startPositionMs = ((args["startPositionMs"] as? Number)?.toInt() ?: 0).coerceAtLeast(0)
                     if (!requestFocus()) { finishStart(id, false); return }
-                    prepareAudio(File(args["filePath"] as? String ?: ""), id)
+                    prepareAudio(File(args["filePath"] as? String ?: ""), id, startPositionMs)
+                }
+                "preloadNextAudio" -> {
+                    val afterId = args["afterId"] as? String
+                    val id = args["id"] as? String
+                    val path = args["filePath"] as? String
+                    val gapMs = ((args["gapMs"] as? Number)?.toLong() ?: 0L).coerceIn(0L, 3000L)
+                    if (id.isNullOrBlank() || path.isNullOrBlank() || afterId.isNullOrBlank() || afterId != currentId || player == null) {
+                        clearPreloaded()
+                        result.success(false)
+                    } else {
+                        preloadNext(File(path), id, afterId, gapMs)
+                        result.success(true)
+                    }
+                }
+                "clearPreloadedAudio" -> {
+                    clearPreloaded()
+                    result.success(true)
+                }
+                "setPlaybackRate" -> {
+                    playbackRate = ((args["rate"] as? Number)?.toFloat() ?: 1f).coerceIn(0.5f, 2.0f)
+                    preservePitch = (args["preservePitch"] as? Boolean) ?: true
+                    applyPlaybackRate(player)
+                    result.success(true)
+                }
+                "getAudioPosition" -> {
+                    val p = player
+                    val pos = try { if (p != null) p.currentPosition else 0 } catch (_: Exception) { 0 }
+                    val dur = try { if (p != null) p.duration else 0 } catch (_: Exception) { 0 }
+                    result.success(mapOf(
+                        "id" to currentId,
+                        "playing" to (p?.isPlaying == true),
+                        "positionMs" to pos.coerceAtLeast(0),
+                        "durationMs" to dur.coerceAtLeast(0)
+                    ))
                 }
                 "stopPlayback" -> result.success(stopPlayback(args["id"] as? String))
                 "stopNativeTts" -> { if (nativeAudio) stopPlayback(); result.success(true) }
@@ -274,7 +324,21 @@ class ReaderPlaybackService : Service() {
         }
     }
 
-    private fun prepareAudio(file: File, id: String) {
+    private fun applyPlaybackRate(media: MediaPlayer?) {
+        if (media == null || Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return
+        if (playbackRate == 1f && preservePitch) return
+        try {
+            val params = PlaybackParams().setSpeed(playbackRate)
+            if (preservePitch) {
+                params.setPitch(1.0f)
+            }
+            media.playbackParams = params
+        } catch (_: Exception) {
+            // 部分设备不支持自定义倍速参数时回退默认语速
+        }
+    }
+
+    private fun prepareAudio(file: File, id: String, startPositionMs: Int = 0) {
         try {
         if (id != currentId) return
         if (!file.isFile || file.length() == 0L) { finishStart(id, false); return }
@@ -288,7 +352,11 @@ class ReaderPlaybackService : Service() {
             if (currentId != id || player !== media) return@setOnPreparedListener
             try {
                 media.setVolume(volume, volume)
+                if (startPositionMs > 0 && media.duration > 0 && startPositionMs < media.duration - 100) {
+                    media.seekTo(startPositionMs)
+                }
                 media.start(); playing = true
+                applyPlaybackRate(media)
                 finishStart(id, true)
                 updateNotification()
             } catch (_: Exception) {
@@ -299,11 +367,15 @@ class ReaderPlaybackService : Service() {
         media.setOnCompletionListener {
             if (id == currentId) {
                 playing = false
+                if (!nativeAudio && tryAdvanceToPreloaded(id)) {
+                    return@setOnCompletionListener
+                }
                 ReaderRuntime.emit(if (nativeAudio) "onTtsComplete" else "onAudioComplete", mapOf("id" to id))
             }
         }
         media.setOnErrorListener { _, _, _ ->
             if (id == currentId) {
+                clearPreloaded()
                 finishStart(id, false)
                 ReaderRuntime.emit(if (nativeAudio) "onTtsError" else "onAudioError", mapOf("id" to id))
             }
@@ -313,6 +385,121 @@ class ReaderPlaybackService : Service() {
         } catch (_: Exception) {
             finishStart(id, false)
             ReaderRuntime.emit("onAudioError", mapOf("id" to id))
+        }
+    }
+
+    private fun clearPreloaded() {
+        pendingGapRunnable?.let { main.removeCallbacks(it) }
+        pendingGapRunnable = null
+        nextId = null
+        nextAfterId = null
+        nextPrepared = false
+        nextGapMs = 0L
+        try { nextPlayer?.release() } catch (_: Exception) {}
+        nextPlayer = null
+    }
+
+    private fun preloadNext(file: File, id: String, afterId: String, gapMs: Long) {
+        clearPreloaded()
+        if (!file.isFile || file.length() == 0L) return
+        try {
+            val media = MediaPlayer()
+            nextPlayer = media
+            nextId = id
+            nextAfterId = afterId
+            nextPrepared = false
+            nextGapMs = gapMs
+            media.setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
+                .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+            media.setWakeMode(applicationContext, PowerManager.PARTIAL_WAKE_LOCK)
+            media.setDataSource(file.absolutePath)
+            media.setOnPreparedListener {
+                if (nextPlayer !== media || nextId != id || nextAfterId != currentId) {
+                    try { media.release() } catch (_: Exception) {}
+                    return@setOnPreparedListener
+                }
+                media.setVolume(volume, volume)
+                nextPrepared = true
+            }
+            media.setOnErrorListener { _, _, _ ->
+                if (nextPlayer === media) clearPreloaded()
+                true
+            }
+            media.prepareAsync()
+        } catch (_: Exception) {
+            clearPreloaded()
+        }
+    }
+
+    private fun tryAdvanceToPreloaded(completedId: String): Boolean {
+        val next = nextPlayer ?: return false
+        val targetId = nextId ?: return false
+        if (!nextPrepared || nextAfterId != completedId) {
+            clearPreloaded()
+            return false
+        }
+        val gap = nextGapMs
+        // 先接管所有权，防止被后续 clearPreloaded 误释放
+        nextPlayer = null
+        nextId = null
+        nextAfterId = null
+        nextPrepared = false
+        nextGapMs = 0L
+
+        val startPreloaded = Runnable {
+            pendingGapRunnable = null
+            if (currentId != completedId && currentId != targetId) {
+                try { next.release() } catch (_: Exception) {}
+                return@Runnable
+            }
+            val prev = player
+            player = next
+            currentId = targetId
+            try { prev?.release() } catch (_: Exception) {}
+            attachActiveListeners(next, targetId)
+            try {
+                next.setVolume(volume, volume)
+                next.start()
+                playing = true
+                applyPlaybackRate(next)
+                updateNotification()
+                ReaderRuntime.emit(
+                    "onAudioTransition",
+                    mapOf("completedId" to completedId, "startedId" to targetId)
+                )
+            } catch (_: Exception) {
+                playing = false
+                try { next.release() } catch (_: Exception) {}
+                if (player === next) player = null
+                ReaderRuntime.emit("onAudioComplete", mapOf("id" to completedId))
+            }
+        }
+
+        if (gap <= 0L) {
+            startPreloaded.run()
+        } else {
+            pendingGapRunnable = startPreloaded
+            main.postDelayed(startPreloaded, gap)
+        }
+        return true
+    }
+
+    private fun attachActiveListeners(media: MediaPlayer, id: String) {
+        media.setOnCompletionListener {
+            if (id == currentId) {
+                playing = false
+                if (!nativeAudio && tryAdvanceToPreloaded(id)) {
+                    return@setOnCompletionListener
+                }
+                ReaderRuntime.emit("onAudioComplete", mapOf("id" to id))
+            }
+        }
+        media.setOnErrorListener { _, _, _ ->
+            if (id == currentId) {
+                clearPreloaded()
+                ReaderRuntime.emit("onAudioError", mapOf("id" to id))
+            }
+            true
         }
     }
 
@@ -348,6 +535,7 @@ class ReaderPlaybackService : Service() {
         if (wakeLock.isHeld) wakeLock.release()
     }
     private fun pauseOutput() {
+        clearPreloaded()
         try { if (player?.isPlaying == true) player?.pause() } catch (_: Exception) {}
         if (pendingStart != null) stopPlayback()
         playing = false
@@ -356,6 +544,7 @@ class ReaderPlaybackService : Service() {
     }
     private fun stopPlayback(expectedId: String? = null): Boolean {
         if (expectedId != null && expectedId != currentId) return false
+        clearPreloaded()
         currentId = null
         pendingSpeech = null
         val result = pendingStart; pendingStart = null; result?.success(false)

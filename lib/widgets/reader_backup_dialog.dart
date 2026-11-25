@@ -8,6 +8,7 @@ import '../services/reader_backup_service.dart';
 import '../services/reader_export_service.dart';
 import 'reader_auto_backup_panel.dart';
 import 'reader_trash_dialog.dart';
+import '../webdav/widgets/webdav_sync_sheet.dart';
 
 class ReaderBackupDialog extends StatefulWidget {
   const ReaderBackupDialog({super.key});
@@ -163,6 +164,17 @@ class _ReaderBackupDialogState extends State<ReaderBackupDialog> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const Text('备份包含书架、进度、偏好、书签和笔记，不包含语音密钥。文件可能含私人阅读信息，请妥善保管。'),
+              const SizedBox(height: 8),
+              OutlinedButton.icon(
+                onPressed: _busy
+                    ? null
+                    : () async {
+                        await showWebDavSyncSheet(context);
+                      },
+                icon: const Icon(Icons.cloud_sync_outlined),
+                label: const Text('WebDAV 云同步（AI配置 / 阅读数据 / 离线书籍）'),
+              ),
+              const SizedBox(height: 4),
               SwitchListTile(
                 contentPadding: EdgeInsets.zero,
                 title: const Text('同时备份书籍文件'),

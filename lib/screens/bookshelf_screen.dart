@@ -30,6 +30,7 @@ import '../widgets/reader_library_dialog.dart';
 import '../widgets/offline_library_search_dialog.dart';
 import '../widgets/reader_trash_dialog.dart';
 import '../widgets/reader_undo.dart';
+import '../webdav/widgets/webdav_sync_sheet.dart';
 
 enum BookshelfSortType {
   recentRead, // 最近阅读
@@ -654,6 +655,11 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
             : null,
         actions: [
           if (!_isSelectionMode) ...[
+            WebDavSyncActionButton(
+              onSyncFinished: () {
+                if (mounted) _loadData(silent: true);
+              },
+            ),
             const DownloadActionButton(),
             // 导入本地 TXT / EPUB 小说
             PopupMenuButton<String>(
@@ -662,6 +668,9 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
               onSelected: (value) async {
                 if (value == 'import') {
                   await _showImportLocalBookDialog();
+                } else if (value == 'webdav') {
+                  await showWebDavSyncSheet(context);
+                  if (mounted) _loadData(silent: true);
                 } else if (value == 'activity') {
                   await showDialog<void>(
                     context: context,
@@ -690,6 +699,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
               },
               itemBuilder: (_) => const [
                 PopupMenuItem(value: 'import', child: Text('导入本地小说')),
+                PopupMenuItem(value: 'webdav', child: Text('WebDAV 云同步')),
                 PopupMenuItem(value: 'backup', child: Text('备份与恢复')),
                 PopupMenuItem(value: 'activity', child: Text('阅读统计')),
                 PopupMenuItem(value: 'groups', child: Text('管理分组与阅读状态')),

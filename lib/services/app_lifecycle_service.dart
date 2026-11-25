@@ -13,6 +13,7 @@ import 'desktop_reader_preferences.dart';
 import 'external_book_import_service.dart';
 import 'reader_auto_backup_service.dart';
 import 'reader_trash_service.dart';
+import '../webdav/services/webdav_sync_service.dart';
 
 /// Native Cmd-Q waits for pending anchors/settings, not just widget disposal.
 class AppLifecycleService {
@@ -20,6 +21,9 @@ class AppLifecycleService {
     ReaderSystemService.registerQuitHandler(prepareToQuit);
     ReaderSystemService.registerWindowHiddenHandler(() async {
       await ReaderAutoBackupService().runDue().catchError((_) => null);
+      await WebDavSyncService()
+          .triggerLightweightProgressSync()
+          .catchError((_) => null);
     });
     ReaderSystemService.registerDesktopCommandHandler(DesktopCommands.dispatch);
   }

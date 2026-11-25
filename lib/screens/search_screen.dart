@@ -7,6 +7,7 @@ import '../models/discovery.dart';
 import '../services/api_service.dart';
 import '../widgets/book_card.dart';
 import '../widgets/download_action_button.dart';
+import '../webdav/widgets/webdav_sync_sheet.dart';
 import 'search_results_screen.dart';
 import 'book_detail_screen.dart';
 
@@ -695,7 +696,16 @@ class _SearchScreenState extends State<SearchScreen> {
                       ),
                     ),
                   ),
-                  const Positioned(right: 8, child: DownloadActionButton()),
+                  const Positioned(
+                    right: 8,
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        WebDavSyncActionButton(),
+                        DownloadActionButton(),
+                      ],
+                    ),
+                  ),
                 ],
               ),
             ),

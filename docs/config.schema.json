@@ -1,0 +1,444 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fanqie-flutter.local/schemas/immersive-audio-config.v1.schema.json",
+  "title": "沉浸式多角色听书配置 Schema v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "feature_enabled",
+    "storage",
+    "text_analysis",
+    "tts",
+    "book_defaults",
+    "analysis_pipeline",
+    "audio_generation",
+    "prefetch",
+    "playback",
+    "cache",
+    "jobs",
+    "retry",
+    "observability"
+  ],
+  "properties": {
+    "schema_version": {
+      "type": "integer",
+      "const": 1
+    },
+    "feature_enabled": {
+      "type": "boolean"
+    },
+    "storage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["state_store", "database_path", "audio_cache_dir", "temp_dir"],
+      "properties": {
+        "state_store": { "type": "string", "enum": ["sqlite"] },
+        "database_path": { "type": "string", "minLength": 1 },
+        "audio_cache_dir": { "type": "string", "minLength": 1 },
+        "temp_dir": { "type": "string", "minLength": 1 }
+      }
+    },
+    "text_analysis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_id",
+        "display_name",
+        "adapter",
+        "base_url",
+        "endpoint",
+        "api_key",
+        "api_key_env",
+        "model_id",
+        "extra_headers",
+        "extra_body",
+        "request_timeout_ms",
+        "max_concurrency",
+        "reserved_reconciliation_slots",
+        "requests_per_minute",
+        "tokens_per_minute",
+        "context_window_tokens",
+        "max_output_tokens",
+        "output_limit_parameter",
+        "temperature",
+        "structured_output"
+      ],
+      "properties": {
+        "provider_id": { "type": "string", "minLength": 1 },
+        "display_name": { "type": "string", "minLength": 1 },
+        "adapter": { "type": "string", "enum": ["openai_chat_completions"] },
+        "base_url": { "type": "string", "minLength": 1 },
+        "endpoint": { "type": "string", "minLength": 1 },
+        "api_key": { "type": ["string", "null"] },
+        "api_key_env": { "type": ["string", "null"] },
+        "model_id": { "type": "string", "minLength": 1 },
+        "extra_headers": { "type": "object", "additionalProperties": { "type": "string" } },
+        "extra_body": { "type": "object" },
+        "request_timeout_ms": { "type": "integer", "minimum": 1000 },
+        "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 32 },
+        "reserved_reconciliation_slots": { "type": "integer", "minimum": 0, "maximum": 31 },
+        "requests_per_minute": { "type": ["integer", "null"], "minimum": 1 },
+        "tokens_per_minute": { "type": ["integer", "null"], "minimum": 1 },
+        "context_window_tokens": { "type": "integer", "minimum": 1024 },
+        "max_output_tokens": { "type": "integer", "minimum": 128 },
+        "output_limit_parameter": { "type": "string", "enum": ["max_completion_tokens", "max_tokens"] },
+        "temperature": { "type": ["number", "null"], "minimum": 0, "maximum": 2 },
+        "structured_output": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mode",
+            "schema_name_prefix",
+            "strict",
+            "vendor_adapter_id",
+            "allow_prompt_only_fallback"
+          ],
+          "properties": {
+            "mode": { "type": "string", "enum": ["json_schema", "vendor_native"] },
+            "schema_name_prefix": { "type": "string", "minLength": 1, "pattern": "^[A-Za-z0-9_-]+$" },
+            "strict": { "type": "boolean" },
+            "vendor_adapter_id": {
+              "type": ["string", "null"],
+              "enum": ["openai_tool_call_schema", null]
+            },
+            "allow_prompt_only_fallback": { "type": "boolean", "const": false }
+          }
+        }
+      }
+    },
+    "tts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["global_max_concurrency", "max_pending_jobs", "providers"],
+      "properties": {
+        "global_max_concurrency": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "max_pending_jobs": { "type": "integer", "minimum": 1, "maximum": 1024 },
+        "providers": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": [
+              "provider_id",
+              "display_name",
+              "enabled",
+              "adapter",
+              "base_url",
+              "endpoint",
+              "api_key",
+              "api_key_env",
+              "extra_headers",
+              "request_timeout_ms",
+              "max_concurrency",
+              "reserved_foreground_slots",
+              "requests_per_minute",
+              "models"
+            ],
+            "properties": {
+              "provider_id": { "type": "string", "minLength": 1 },
+              "display_name": { "type": "string", "minLength": 1 },
+              "enabled": { "type": "boolean" },
+              "adapter": { "type": "string", "enum": ["openai_speech"] },
+              "base_url": { "type": "string", "minLength": 1 },
+              "endpoint": { "type": "string", "minLength": 1 },
+              "api_key": { "type": ["string", "null"] },
+              "api_key_env": { "type": ["string", "null"] },
+              "extra_headers": { "type": "object", "additionalProperties": { "type": "string" } },
+              "request_timeout_ms": { "type": "integer", "minimum": 1000 },
+              "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 64 },
+              "reserved_foreground_slots": { "type": "integer", "minimum": 0, "maximum": 63 },
+              "requests_per_minute": { "type": ["integer", "null"], "minimum": 1 },
+              "models": {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "model_key",
+                    "model_id",
+                    "display_name",
+                    "enabled",
+                    "max_concurrency",
+                    "capabilities",
+                    "extra_body",
+                    "voices"
+                  ],
+                  "properties": {
+                    "model_key": { "type": "string", "minLength": 1 },
+                    "model_id": { "type": "string", "minLength": 1 },
+                    "display_name": { "type": "string", "minLength": 1 },
+                    "enabled": { "type": "boolean" },
+                    "max_concurrency": { "type": "integer", "minimum": 1, "maximum": 64 },
+                    "capabilities": {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": [
+                        "max_input_length",
+                        "input_length_unit",
+                        "supports_instructions",
+                        "supports_speed",
+                        "supported_audio_formats",
+                        "response_transport",
+                        "supports_word_timestamps"
+                      ],
+                      "properties": {
+                        "max_input_length": { "type": "integer", "minimum": 1 },
+                        "input_length_unit": {
+                          "type": "string",
+                          "enum": ["unicode_codepoints", "utf8_bytes", "tokens"]
+                        },
+                        "supports_instructions": { "type": "boolean" },
+                        "supports_speed": { "type": "boolean" },
+                        "supported_audio_formats": {
+                          "type": "array",
+                          "minItems": 1,
+                          "items": { "type": "string", "enum": ["mp3", "wav"] }
+                        },
+                        "response_transport": { "type": "string", "enum": ["binary"] },
+                        "supports_word_timestamps": { "type": "boolean" }
+                      }
+                    },
+                    "extra_body": { "type": "object" },
+                    "voices": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "required": [
+                          "voice_profile_id",
+                          "voice_id",
+                          "display_name",
+                          "enabled",
+                          "gender",
+                          "notes",
+                          "tags",
+                          "render_settings",
+                          "extra_body"
+                        ],
+                        "properties": {
+                          "voice_profile_id": { "type": "string", "minLength": 1 },
+                          "voice_id": { "type": "string", "minLength": 1 },
+                          "display_name": { "type": "string", "minLength": 1 },
+                          "enabled": { "type": "boolean" },
+                          "gender": { "type": "string", "enum": ["male", "female", "neutral", "unknown"] },
+                          "notes": { "type": "string" },
+                          "tags": { "type": "array", "items": { "type": "string" } },
+                          "sample_asset": { "type": ["string", "null"] },
+                          "render_settings": {
+                            "type": "object",
+                            "additionalProperties": false,
+                            "required": ["audio_format", "speed", "instructions"],
+                            "properties": {
+                              "audio_format": { "type": "string", "enum": ["mp3", "wav"] },
+                              "speed": { "type": "number", "minimum": 0.25, "maximum": 4.0 },
+                              "instructions": { "type": ["string", "null"] }
+                            }
+                          },
+                          "extra_body": { "type": "object" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "book_defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "selected_voice_profile_ids",
+        "narrator_voice_profile_id",
+        "allow_voice_reuse",
+        "reserve_narrator_for_non_dialogue",
+        "unknown_gender_policy",
+        "known_gender_no_match_policy",
+        "unresolved_dialogue_policy",
+        "identity_conflict_policy",
+        "thought_and_quoted_text_policy",
+        "missing_voice_policy",
+        "middle_start_policy"
+      ],
+      "properties": {
+        "selected_voice_profile_ids": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+        "narrator_voice_profile_id": { "type": "string", "minLength": 1 },
+        "allow_voice_reuse": { "type": "boolean" },
+        "reserve_narrator_for_non_dialogue": { "type": "boolean" },
+        "unknown_gender_policy": { "type": "string", "enum": ["prefer_neutral_then_selected"] },
+        "known_gender_no_match_policy": { "type": "string", "enum": ["prefer_neutral_else_require_selection"] },
+        "unresolved_dialogue_policy": { "type": "string", "enum": ["narrator_fallback_after_review"] },
+        "identity_conflict_policy": { "type": "string", "enum": ["pause_affected_range"] },
+        "thought_and_quoted_text_policy": { "type": "string", "enum": ["narrator"] },
+        "missing_voice_policy": { "type": "string", "enum": ["pause_until_reconfigured"] },
+        "middle_start_policy": { "type": "string", "enum": ["build_prefix_identity_first"] }
+      }
+    },
+    "analysis_pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ahead_chapters",
+        "max_ahead_chunks",
+        "max_uncommitted_chunks",
+        "target_chunk_tokens",
+        "max_chunk_tokens",
+        "context_before_tokens",
+        "context_after_tokens",
+        "recent_dialogue_turns",
+        "chapter_summary_max_tokens",
+        "character_context_max_tokens",
+        "context_safety_margin_ratio",
+        "max_identity_rechecks",
+        "keep_all_selected_voice_profiles_in_system"
+      ],
+      "properties": {
+        "ahead_chapters": { "type": "integer", "minimum": 0, "maximum": 20 },
+        "max_ahead_chunks": { "type": "integer", "minimum": 1, "maximum": 128 },
+        "max_uncommitted_chunks": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "target_chunk_tokens": { "type": "integer", "minimum": 100 },
+        "max_chunk_tokens": { "type": "integer", "minimum": 100 },
+        "context_before_tokens": { "type": "integer", "minimum": 0 },
+        "context_after_tokens": { "type": "integer", "minimum": 0 },
+        "recent_dialogue_turns": { "type": "integer", "minimum": 0 },
+        "chapter_summary_max_tokens": { "type": "integer", "minimum": 0 },
+        "character_context_max_tokens": { "type": "integer", "minimum": 128 },
+        "context_safety_margin_ratio": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 0.8 },
+        "max_identity_rechecks": { "type": "integer", "minimum": 0, "maximum": 10 },
+        "keep_all_selected_voice_profiles_in_system": { "type": "boolean", "const": true }
+      }
+    },
+    "audio_generation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "startup_target_characters",
+        "target_characters",
+        "max_characters",
+        "initial_estimated_characters_per_second",
+        "cross_chapter_merge",
+        "transport"
+      ],
+      "properties": {
+        "startup_target_characters": { "type": "integer", "minimum": 1 },
+        "target_characters": { "type": "integer", "minimum": 1 },
+        "max_characters": { "type": "integer", "minimum": 1 },
+        "initial_estimated_characters_per_second": { "type": "number", "exclusiveMinimum": 0 },
+        "cross_chapter_merge": { "type": "boolean", "const": false },
+        "transport": { "type": "string", "enum": ["complete_file_cache"] }
+      }
+    },
+    "prefetch": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "startup_buffer_seconds",
+        "startup_wait_after_first_ready_ms",
+        "resume_buffer_seconds",
+        "low_water_seconds",
+        "target_buffer_seconds",
+        "high_water_seconds",
+        "max_jobs_beyond_first_gap",
+        "pause_policy",
+        "continue_in_supported_background"
+      ],
+      "properties": {
+        "startup_buffer_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "startup_wait_after_first_ready_ms": { "type": "integer", "minimum": 0 },
+        "resume_buffer_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "low_water_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "target_buffer_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "high_water_seconds": { "type": "number", "exclusiveMinimum": 0 },
+        "max_jobs_beyond_first_gap": { "type": "integer", "minimum": 1, "maximum": 64 },
+        "pause_policy": { "type": "string", "enum": ["finish_inflight_stop_new"] },
+        "continue_in_supported_background": { "type": "boolean" }
+      }
+    },
+    "playback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "default_rate",
+        "preserve_pitch",
+        "highlight_granularity",
+        "cursor_save_interval_ms",
+        "chapter_auto_advance",
+        "gap_policy"
+      ],
+      "properties": {
+        "default_rate": { "type": "number", "minimum": 0.5, "maximum": 2.0 },
+        "preserve_pitch": { "type": "boolean" },
+        "highlight_granularity": { "type": "string", "enum": ["audio_segment"] },
+        "cursor_save_interval_ms": { "type": "integer", "minimum": 100 },
+        "chapter_auto_advance": { "type": "boolean" },
+        "gap_policy": { "type": "string", "enum": ["wait_without_skipping"] }
+      }
+    },
+    "cache": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "max_bytes",
+        "evict_to_ratio",
+        "min_free_disk_bytes",
+        "eviction_policy",
+        "protect_recent_playback_seconds",
+        "verify_checksum_on_reuse",
+        "cleanup_incomplete_files_after_seconds"
+      ],
+      "properties": {
+        "max_bytes": { "type": "integer", "minimum": 1048576 },
+        "evict_to_ratio": { "type": "number", "exclusiveMinimum": 0, "exclusiveMaximum": 1 },
+        "min_free_disk_bytes": { "type": "integer", "minimum": 0 },
+        "eviction_policy": { "type": "string", "enum": ["lru_unpinned"] },
+        "protect_recent_playback_seconds": { "type": "integer", "minimum": 0 },
+        "verify_checksum_on_reuse": { "type": "boolean" },
+        "cleanup_incomplete_files_after_seconds": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "jobs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["lease_seconds", "heartbeat_seconds", "poll_interval_ms", "cancel_unneeded_requests_on_seek"],
+      "properties": {
+        "lease_seconds": { "type": "integer", "minimum": 5 },
+        "heartbeat_seconds": { "type": "integer", "minimum": 1 },
+        "poll_interval_ms": { "type": "integer", "minimum": 50 },
+        "cancel_unneeded_requests_on_seek": { "type": "boolean" }
+      }
+    },
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["max_attempts", "initial_backoff_ms", "max_backoff_ms", "jitter_ratio", "respect_retry_after"],
+      "properties": {
+        "max_attempts": { "type": "integer", "minimum": 1, "maximum": 10 },
+        "initial_backoff_ms": { "type": "integer", "minimum": 50 },
+        "max_backoff_ms": { "type": "integer", "minimum": 50 },
+        "jitter_ratio": { "type": "number", "minimum": 0, "maximum": 1 },
+        "respect_retry_after": { "type": "boolean" }
+      }
+    },
+    "observability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "log_level",
+        "log_book_text",
+        "log_raw_model_responses",
+        "retain_debug_payload_days",
+        "collect_local_metrics"
+      ],
+      "properties": {
+        "log_level": { "type": "string", "enum": ["debug", "info", "warn", "error"] },
+        "log_book_text": { "type": "boolean" },
+        "log_raw_model_responses": { "type": "boolean" },
+        "retain_debug_payload_days": { "type": "integer", "minimum": 1 },
+        "collect_local_metrics": { "type": "boolean" }
+      }
+    }
+  }
+}

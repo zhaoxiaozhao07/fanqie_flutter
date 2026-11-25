@@ -6,12 +6,14 @@ import 'search_screen.dart';
 import 'bookshelf_screen.dart';
 import 'history_screen.dart';
 import '../widgets/tts_player_panel.dart';
+import '../immersive/widgets/immersive_player_panel.dart';
 import '../widgets/local_book_import_dialog.dart';
 import '../widgets/reader_settings_sheet.dart';
 import '../services/desktop_commands.dart';
 import '../services/reader_platform.dart';
 import '../services/reader_settings_repository.dart';
 import '../services/external_book_import_service.dart';
+import '../webdav/services/webdav_sync_service.dart';
 import 'notes_workspace_screen.dart';
 
 /// 主页面 - 底部三导航：主页、书架、历史
@@ -23,7 +25,7 @@ class MainScreen extends StatefulWidget {
   State<MainScreen> createState() => _MainScreenState();
 }
 
-class _MainScreenState extends State<MainScreen> {
+class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   int _currentIndex = 0;
   final _searchFocus = FocusNode(debugLabel: 'desktop-library-search');
   bool _dialogOpen = false;
@@ -40,15 +42,39 @@ class _MainScreenState extends State<MainScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     if (ReaderPlatform.isDesktop) {
       DesktopCommands.register(this, _desktopCommand);
       _externalImports.addListener(_onExternalImports);
       _onExternalImports();
     }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      unawaited(
+        WebDavSyncService().triggerAutoSyncOnStart().then((report) {
+          if (!mounted || report == null || !report.success) return;
+          _bookshelfKey.currentState?.refresh();
+          _historyKey.currentState?.refreshHistory();
+        }),
+      );
+    });
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused ||
+        state == AppLifecycleState.inactive) {
+      unawaited(
+        WebDavSyncService()
+            .triggerLightweightProgressSync()
+            .catchError((_) => null),
+      );
+    }
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     DesktopCommands.register(this, null);
     _externalImports.removeListener(_onExternalImports);
     _searchFocus.dispose();
@@ -286,6 +312,7 @@ class _MainScreenState extends State<MainScreen> {
         mainAxisSize: MainAxisSize.min,
         children: [
           TtsPlayerPanel(onClose: () {}),
+          ImmersivePlayerPanel(onClose: () {}),
           NavigationBar(
             selectedIndex: _currentIndex,
             onDestinationSelected: (index) {
