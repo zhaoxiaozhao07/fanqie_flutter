@@ -698,19 +698,151 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
     }
   }
 
+  /// 调用 OpenAI 兼容 `/v1/models`（智能兼容 `/models` 与 `/v1/models`）拉取可用模型 ID 列表
+  static Future<List<String>> fetchAvailableModels({
+    required String baseUrl,
+    String apiKey = '',
+    Map<String, String> extraHeaders = const {},
+    http.Client? client,
+    Duration timeout = const Duration(seconds: 15),
+  }) async {
+    final trimmedUrl = baseUrl.trim();
+    if (trimmedUrl.isEmpty) {
+      throw const FormatException('请先填写 Base URL 后再获取模型列表');
+    }
+    if (isExampleReservedEndpoint(trimmedUrl) ||
+        isTemplatePlaceholderValue(apiKey)) {
+      throw const FormatException('当前接口地址或密钥仍为示例占位值，无法拉取模型列表');
+    }
+
+    final parsedBase = Uri.tryParse(trimmedUrl);
+    if (parsedBase == null ||
+        !parsedBase.hasScheme ||
+        (parsedBase.scheme != 'http' && parsedBase.scheme != 'https')) {
+      throw const FormatException('Base URL 格式无效，必须以 http:// 或 https:// 开头');
+    }
+
+    final headers = <String, String>{'Accept': 'application/json'};
+    extraHeaders.forEach((k, v) {
+      if (ProtectedProtocolFields.headersLower.contains(k.toLowerCase())) {
+        throw FormatException('extra_headers 不允许覆盖受保护请求头 $k');
+      }
+      headers[k] = v;
+    });
+    final trimmedKey = apiKey.trim();
+    if (trimmedKey.isNotEmpty) {
+      headers['Authorization'] = 'Bearer $trimmedKey';
+    }
+
+    final normalizedPath = parsedBase.path.replaceAll(RegExp(r'/+$'), '');
+    final candidateUris = <Uri>[joinProviderUrl(trimmedUrl, '/models')];
+    if (!normalizedPath.endsWith('/v1')) {
+      candidateUris.add(joinProviderUrl(trimmedUrl, '/v1/models'));
+    }
+
+    final ownClient = client == null;
+    final activeClient = client ?? http.Client();
+    try {
+      String? lastError;
+      for (var i = 0; i < candidateUris.length; i++) {
+        final uri = candidateUris[i];
+        final req = http.Request('GET', uri)
+          ..followRedirects = false
+          ..maxRedirects = 0
+          ..headers.addAll(headers);
+
+        final streamed = await activeClient.send(req).timeout(timeout);
+        final bytes = await streamed.stream.toBytes().timeout(timeout);
+        final status = streamed.statusCode;
+        final bodyStr = utf8.decode(bytes, allowMalformed: true);
+
+        if (status == 401 || status == 403) {
+          throw FormatException('模型列表鉴权失败（HTTP $status），请检查 API Key');
+        }
+        if (status >= 300 && status < 400) {
+          throw FormatException('拒绝模型列表接口重定向（HTTP $status），避免转发凭证');
+        }
+        if ((status == 404 || status == 405) && i + 1 < candidateUris.length) {
+          lastError = 'HTTP $status（$uri）';
+          continue;
+        }
+        if (status != 200) {
+          final summary = _extractProviderErrorMessage(bodyStr);
+          throw FormatException('获取模型列表失败（HTTP $status）：$summary');
+        }
+
+        final Object? decoded;
+        try {
+          decoded = jsonDecode(bodyStr);
+        } catch (_) {
+          throw const FormatException('模型列表接口返回的内容不是合法 JSON');
+        }
+
+        final rawList = decoded is List
+            ? decoded
+            : (decoded is Map && decoded['data'] is List)
+            ? decoded['data'] as List
+            : (decoded is Map && decoded['models'] is List)
+            ? decoded['models'] as List
+            : null;
+        if (rawList == null) {
+          throw const FormatException('模型列表响应缺少 data 或 models 数组');
+        }
+
+        final ids = <String>{};
+        for (final item in rawList) {
+          String? modelId;
+          if (item is String) {
+            modelId = item.trim();
+          } else if (item is Map) {
+            final rawId =
+                item['id'] ?? item['model'] ?? item['name'];
+            if (rawId != null) {
+              modelId = rawId.toString().trim();
+              if (item['id'] == null && modelId.startsWith('models/')) {
+                modelId = modelId.substring('models/'.length);
+              }
+            }
+          }
+          if (modelId != null && modelId.isNotEmpty) {
+            ids.add(modelId);
+          }
+        }
+
+        final sorted = ids.toList()
+          ..sort((a, b) => a.toLowerCase().compareTo(b.toLowerCase()));
+        if (sorted.isEmpty) {
+          throw const FormatException('接口返回成功，但未发现可用模型');
+        }
+        return sorted;
+      }
+      throw FormatException('获取模型列表失败：${lastError ?? '未知错误'}');
+    } on TimeoutException {
+      throw const FormatException('获取模型列表超时，请检查网络或 Base URL');
+    } finally {
+      if (ownClient) {
+        activeClient.close();
+      }
+    }
+  }
+
   /// 剥离模型返回中的思考标签（`<think>...</think>` 等）与 Markdown 代码块围栏，
   /// 仅当剥离后的净正文是完整 JSON 对象时返回该 JSON 文本（绝不对闲聊正文做正则兜底抓取）
   static ({String cleaned, bool hadThinkingTag}) stripThinkingAndCodeFence(
     String raw,
   ) {
-    var text = raw.trim();
+    var text = raw.replaceFirst('\uFEFF', '').trim();
+    text = text
+        .replaceAll(RegExp(r'<\|(?:im_end|endoftext|eot_id)\|>'), '')
+        .replaceAll('<｜end▁of▁sentence｜>', '')
+        .trim();
     var hadThinking = false;
     // 移除成对的 <think>/<thinking>/<reasoning>/<thought> 标签及其内容
     final pairedRegex = RegExp(
       r'<(think|thinking|reasoning|thought)\b[^>]*>[\s\S]*?<\/\1>',
       caseSensitive: false,
     );
-    if (pairedRegex.hasMatch(text)) {
+    while (pairedRegex.hasMatch(text)) {
       hadThinking = true;
       text = text.replaceAll(pairedRegex, '').trim();
     }
@@ -744,6 +876,7 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
     required String userMessage,
     String? overrideReasoningEffort,
     bool omitReasoningEffort = false,
+    String? overrideStructuredMode,
   }) {
     if (config.structuredOutput.allowPromptOnlyFallback) {
       throw const TextModelException(
@@ -783,13 +916,15 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       body['reasoning_effort'] = overrideReasoningEffort;
     } else if (!body.containsKey('reasoning_effort')) {
       switch (config.thinkingLevel) {
+        case TextThinkingLevel.none:
         case TextThinkingLevel.off:
-          body['reasoning_effort'] = 'minimal';
+          body['reasoning_effort'] = 'none';
           break;
         case TextThinkingLevel.minimal:
         case TextThinkingLevel.low:
         case TextThinkingLevel.medium:
         case TextThinkingLevel.high:
+        case TextThinkingLevel.max:
           body['reasoning_effort'] = config.thinkingLevel;
           break;
         case TextThinkingLevel.auto:
@@ -798,15 +933,22 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       }
     }
 
-    // 按配置只发送一个输出上限字段
-    body[config.outputLimitParameter] = config.maxOutputTokens;
+    // 最大输出非空时按配置发送输出上限字段；留空（null）时严格不传入该字段
+    if (config.maxOutputTokens != null) {
+      body[config.outputLimitParameter] = config.maxOutputTokens;
+    }
 
     // temperature 为 null 时严格省略，不发送 null 字符串
     if (config.temperature != null) {
       body['temperature'] = config.temperature;
     }
 
-    final mode = config.structuredOutput.mode;
+    final mode = overrideStructuredMode ?? config.structuredOutput.mode;
+    final useVendorToolCall =
+        mode == 'vendor_native' &&
+        (overrideStructuredMode == 'vendor_native' ||
+            config.structuredOutput.vendorAdapterId ==
+                'openai_tool_call_schema');
     if (mode == 'json_schema') {
       body['response_format'] = {
         'type': 'json_schema',
@@ -816,8 +958,7 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
           'schema': schema,
         },
       };
-    } else if (mode == 'vendor_native' &&
-        config.structuredOutput.vendorAdapterId == 'openai_tool_call_schema') {
+    } else if (useVendorToolCall) {
       // 标准 OpenAI Function Calling 强制严格 Schema 协议（已在 MiniMax / GLM / Qwen 实测通过）
       body['tools'] = [
         {
@@ -1005,19 +1146,29 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
     String? overrideReasoningEffort,
     bool omitReasoningEffort = false,
     bool allowAdaptiveRetry = true,
+    String? overrideStructuredMode,
+    bool allowProtocolNegotiation = true,
   }) async {
+    final modelTag = config.displayName.trim().isNotEmpty
+        ? config.displayName.trim()
+        : config.modelId;
+    final activeMode = overrideStructuredMode ?? config.structuredOutput.mode;
+    final alternateMode = activeMode == 'vendor_native'
+        ? 'json_schema'
+        : 'vendor_native';
+
     if (isCancelled?.call() == true) {
-      throw const TextModelException(
+      throw TextModelException(
         kind: TextModelErrorKind.cancelled,
-        message: '文本分析请求已取消',
+        message: '[$modelTag] 文本分析请求已取消',
       );
     }
     if (isExampleReservedEndpoint(config.baseUrl) ||
         isTemplatePlaceholderValue(config.modelId) ||
         isTemplatePlaceholderValue(apiKey)) {
-      throw const TextModelException(
+      throw TextModelException(
         kind: TextModelErrorKind.badRequest,
-        message: '文本分析配置仍包含示例占位值，已阻止发出真实请求',
+        message: '[$modelTag] 文本分析配置仍包含示例占位值，已阻止发出真实请求',
       );
     }
 
@@ -1031,6 +1182,7 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       userMessage: userMessage,
       overrideReasoningEffort: overrideReasoningEffort,
       omitReasoningEffort: omitReasoningEffort,
+      overrideStructuredMode: overrideStructuredMode,
     );
 
     final headers = <String, String>{
@@ -1040,7 +1192,7 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       if (ProtectedProtocolFields.headersLower.contains(k.toLowerCase())) {
         throw TextModelException(
           kind: TextModelErrorKind.badRequest,
-          message: 'extra_headers 不允许覆盖受保护请求头 $k',
+          message: '[$modelTag] extra_headers 不允许覆盖受保护请求头 $k',
         );
       }
       headers[k] = v;
@@ -1078,14 +1230,14 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
         sending,
         abort.future.then<http.StreamedResponse>((_) {
           if (!timedOut || isCancelled?.call() == true) {
-            throw const TextModelException(
+            throw TextModelException(
               kind: TextModelErrorKind.cancelled,
-              message: '文本分析请求已取消',
+              message: '[$modelTag] 文本分析请求已取消',
             );
           }
-          throw const TextModelException(
+          throw TextModelException(
             kind: TextModelErrorKind.transientNetwork,
-            message: '文本分析请求超时',
+            message: '[$modelTag] 文本分析请求超时',
           );
         }),
       ]);
@@ -1094,14 +1246,14 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
         streamed.stream.toBytes(),
         abort.future.then<List<int>>((_) {
           if (!timedOut || isCancelled?.call() == true) {
-            throw const TextModelException(
+            throw TextModelException(
               kind: TextModelErrorKind.cancelled,
-              message: '文本分析请求已取消',
+              message: '[$modelTag] 文本分析请求已取消',
             );
           }
-          throw const TextModelException(
+          throw TextModelException(
             kind: TextModelErrorKind.transientNetwork,
-            message: '文本分析响应读取超时',
+            message: '[$modelTag] 文本分析响应读取超时',
           );
         }),
       ]);
@@ -1113,7 +1265,7 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       if (status == 401 || status == 403) {
         throw TextModelException(
           kind: TextModelErrorKind.authFailed,
-          message: '文本模型鉴权失败（HTTP $status），请检查 API Key 或权限',
+          message: '[$modelTag] 文本模型鉴权失败（HTTP $status），请检查 API Key 或权限',
           statusCode: status,
         );
       }
@@ -1121,7 +1273,7 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
         final raSec = int.tryParse(streamed.headers['retry-after'] ?? '');
         throw TextModelException(
           kind: TextModelErrorKind.rateLimited,
-          message: '文本模型触发限流（HTTP 429）',
+          message: '[$modelTag] 文本模型触发限流（HTTP 429）',
           statusCode: status,
           retryAfter: raSec == null ? null : Duration(seconds: raSec.clamp(1, 60)),
         );
@@ -1129,14 +1281,14 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       if (status >= 500) {
         throw TextModelException(
           kind: TextModelErrorKind.transientNetwork,
-          message: '文本模型服务端临时错误（HTTP $status）',
+          message: '[$modelTag] 文本模型服务端临时错误（HTTP $status）',
           statusCode: status,
         );
       }
       if (status >= 300 && status < 400) {
         throw TextModelException(
           kind: TextModelErrorKind.badRequest,
-          message: '拒绝文本模型重定向（HTTP $status），避免转发凭证',
+          message: '[$modelTag] 拒绝文本模型重定向（HTTP $status），避免转发凭证',
           statusCode: status,
         );
       }
@@ -1152,7 +1304,8 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
                 lower.contains('思考') ||
                 lower.contains('unknown parameter') ||
                 lower.contains('unsupported') ||
-                lower.contains('invalid'))) {
+                lower.contains('invalid') ||
+                lower.contains('enum'))) {
           timer.cancel();
           return await _invokeStructured(
             config: config,
@@ -1165,21 +1318,42 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
             isCancelled: isCancelled,
             omitReasoningEffort: true,
             allowAdaptiveRetry: false,
+            overrideStructuredMode: overrideStructuredMode,
+            allowProtocolNegotiation: allowProtocolNegotiation,
           );
         }
         if (lower.contains('response_format') ||
             lower.contains('json_schema') ||
             lower.contains('tool_choice') ||
+            lower.contains('tools') ||
             lower.contains('structured')) {
+          if (allowProtocolNegotiation) {
+            timer.cancel();
+            return await _invokeStructured(
+              config: config,
+              apiKey: apiKey,
+              taskSchemaSuffix: taskSchemaSuffix,
+              toolDescription: toolDescription,
+              schema: schema,
+              systemMessage: systemMessage,
+              userMessage: userMessage,
+              isCancelled: isCancelled,
+              overrideReasoningEffort: overrideReasoningEffort,
+              omitReasoningEffort: omitReasoningEffort,
+              allowAdaptiveRetry: allowAdaptiveRetry,
+              overrideStructuredMode: alternateMode,
+              allowProtocolNegotiation: false,
+            );
+          }
           throw TextModelException(
             kind: TextModelErrorKind.unsupportedStructuredOutput,
-            message: '模型不支持当前原生结构化输出协议（HTTP $status）：$errSummary',
+            message: '[$modelTag] 模型不支持当前原生结构化输出协议（HTTP $status）：$errSummary',
             statusCode: status,
           );
         }
         throw TextModelException(
           kind: TextModelErrorKind.badRequest,
-          message: '文本模型请求被拒绝（HTTP $status）：$errSummary',
+          message: '[$modelTag] 文本模型请求被拒绝（HTTP $status）：$errSummary',
           statusCode: status,
         );
       }
@@ -1188,32 +1362,35 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       try {
         decoded = jsonDecode(bodyStr);
       } catch (_) {
-        throw const TextModelException(
+        throw TextModelException(
           kind: TextModelErrorKind.schemaViolation,
-          message: '文本模型 HTTP 200 响应体不是有效 JSON',
+          message: '[$modelTag] 文本模型 HTTP 200 响应体不是有效 JSON',
         );
       }
       if (decoded is! Map<String, dynamic>) {
-        throw const TextModelException(
+        throw TextModelException(
           kind: TextModelErrorKind.schemaViolation,
-          message: '文本模型响应根节点不是 JSON 对象',
+          message: '[$modelTag] 文本模型响应根节点不是 JSON 对象',
         );
       }
 
       final choices = decoded['choices'];
       if (choices is! List || choices.isEmpty || choices.first is! Map) {
-        throw const TextModelException(
+        throw TextModelException(
           kind: TextModelErrorKind.schemaViolation,
-          message: '文本模型响应缺少 choices',
+          message: '[$modelTag] 文本模型响应缺少 choices',
         );
       }
       final choice = Map<String, dynamic>.from(choices.first as Map);
       final finishReason = choice['finish_reason']?.toString() ?? '';
       if (finishReason == 'length') {
-        // 若处于 auto 思考模式被冗长思考耗尽输出预算，自动尝试 minimal 思考重试一次
+        final effectiveEffort =
+            overrideReasoningEffort ?? payload['reasoning_effort']?.toString();
+        // 若未被显式设为 none 且尚有自适应机会，先尝试关闭思考（none）重试一次以释放输出预算
         if (allowAdaptiveRetry &&
-            config.thinkingLevel == TextThinkingLevel.auto &&
-            !payload.containsKey('reasoning_effort')) {
+            effectiveEffort != 'none' &&
+            config.thinkingLevel != TextThinkingLevel.none &&
+            config.thinkingLevel != TextThinkingLevel.off) {
           timer.cancel();
           return await _invokeStructured(
             config: config,
@@ -1224,51 +1401,59 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
             systemMessage: systemMessage,
             userMessage: userMessage,
             isCancelled: isCancelled,
-            overrideReasoningEffort: 'minimal',
+            overrideReasoningEffort: 'none',
             allowAdaptiveRetry: false,
+            overrideStructuredMode: overrideStructuredMode,
+            allowProtocolNegotiation: allowProtocolNegotiation,
           );
         }
-        throw const TextModelException(
+        final limitDesc = config.maxOutputTokens == null
+            ? '不限'
+            : '${config.maxOutputTokens}';
+        throw TextModelException(
           kind: TextModelErrorKind.truncated,
-          message: '文本模型输出被长度上限截断（finish_reason=length），需要缩小分析块后重试',
+          message:
+              '[$modelTag] 模型内容被长度上限截断（finish_reason=length，当前最大输出=$limitDesc，思考=${config.thinkingLevel}），请在模型编辑中调大/留空最大输出或将思考程度设为 none',
         );
       }
       if (finishReason == 'content_filter') {
-        throw const TextModelException(
+        throw TextModelException(
           kind: TextModelErrorKind.refusal,
-          message: '文本模型因内容策略拒绝输出（content_filter）',
+          message: '[$modelTag] 文本模型因内容策略拒绝输出（content_filter）',
         );
       }
 
       final message = choice['message'];
       if (message is! Map) {
-        throw const TextModelException(
+        throw TextModelException(
           kind: TextModelErrorKind.schemaViolation,
-          message: '文本模型响应缺少 message 对象',
+          message: '[$modelTag] 文本模型响应缺少 message 对象',
         );
       }
       final msgMap = Map<String, dynamic>.from(message);
       if (msgMap['refusal'] != null && msgMap['refusal'].toString().isNotEmpty) {
         throw TextModelException(
           kind: TextModelErrorKind.refusal,
-          message: '文本模型拒绝响应：${msgMap['refusal']}',
+          message: '[$modelTag] 文本模型拒绝响应：${msgMap['refusal']}',
         );
       }
 
       // 优先读取标准 tool_calls；若模型将严格 JSON（或带 <think> 思考标签的严格 JSON）放在 content 中也自动剥离思考并解析
       String? rawStructuredJson;
       var hadThinkingTag = false;
+      var fromToolCalls = false;
       final toolCalls = msgMap['tool_calls'];
       if (toolCalls is List && toolCalls.isNotEmpty) {
         final firstCall = toolCalls.first;
         if (firstCall is! Map || firstCall['function'] is! Map) {
-          throw const TextModelException(
+          throw TextModelException(
             kind: TextModelErrorKind.schemaViolation,
-            message: 'tool_calls[0] 缺少 function 字段',
+            message: '[$modelTag] tool_calls[0] 缺少 function 字段',
           );
         }
         final fn = firstCall['function'] as Map;
         final args = fn['arguments'];
+        fromToolCalls = true;
         if (args is String) {
           final stripped = stripThinkingAndCodeFence(args);
           hadThinkingTag = stripped.hadThinkingTag;
@@ -1276,9 +1461,9 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
         } else if (args is Map) {
           rawStructuredJson = jsonEncode(args);
         } else {
-          throw const TextModelException(
+          throw TextModelException(
             kind: TextModelErrorKind.schemaViolation,
-            message: 'tool_calls[0].function.arguments 类型无效',
+            message: '[$modelTag] tool_calls[0].function.arguments 类型无效',
           );
         }
       } else {
@@ -1295,25 +1480,107 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       }
 
       if (rawStructuredJson == null || rawStructuredJson.isEmpty) {
-        throw const TextModelException(
+        if (allowProtocolNegotiation) {
+          timer.cancel();
+          return await _invokeStructured(
+            config: config,
+            apiKey: apiKey,
+            taskSchemaSuffix: taskSchemaSuffix,
+            toolDescription: toolDescription,
+            schema: schema,
+            systemMessage: systemMessage,
+            userMessage: userMessage,
+            isCancelled: isCancelled,
+            overrideReasoningEffort: overrideReasoningEffort,
+            omitReasoningEffort: omitReasoningEffort,
+            allowAdaptiveRetry: allowAdaptiveRetry,
+            overrideStructuredMode: alternateMode,
+            allowProtocolNegotiation: false,
+          );
+        }
+        throw TextModelException(
           kind: TextModelErrorKind.unsupportedStructuredOutput,
-          message: '模型未返回符合协议的严格 JSON 结构化输出（已拒绝闲聊正文正则兜底）',
+          message: '[$modelTag] 模型未返回符合协议的严格 JSON 结构化输出（已拒绝闲聊正文正则兜底）',
         );
       }
 
-      final Object? structuredObj;
+      // 部分代理会在 arguments 截断时误报 finish_reason=tool_calls/stop，识别未闭合 JSON 按截断处理
+      final looksTruncatedJson =
+          fromToolCalls &&
+          rawStructuredJson.startsWith('{') &&
+          !rawStructuredJson.endsWith('}');
+      if (looksTruncatedJson) {
+        final effectiveEffort =
+            overrideReasoningEffort ?? payload['reasoning_effort']?.toString();
+        if (allowAdaptiveRetry &&
+            effectiveEffort != 'none' &&
+            config.thinkingLevel != TextThinkingLevel.none &&
+            config.thinkingLevel != TextThinkingLevel.off) {
+          timer.cancel();
+          return await _invokeStructured(
+            config: config,
+            apiKey: apiKey,
+            taskSchemaSuffix: taskSchemaSuffix,
+            toolDescription: toolDescription,
+            schema: schema,
+            systemMessage: systemMessage,
+            userMessage: userMessage,
+            isCancelled: isCancelled,
+            overrideReasoningEffort: 'none',
+            allowAdaptiveRetry: false,
+            overrideStructuredMode: overrideStructuredMode,
+            allowProtocolNegotiation: allowProtocolNegotiation,
+          );
+        }
+        final limitDesc = config.maxOutputTokens == null
+            ? '不限'
+            : '${config.maxOutputTokens}';
+        throw TextModelException(
+          kind: TextModelErrorKind.truncated,
+          message:
+              '[$modelTag] 模型返回的 JSON 未闭合，疑似输出被截断（当前最大输出=$limitDesc，思考=${config.thinkingLevel}），请在模型编辑中调大/留空最大输出或将思考程度设为 none',
+        );
+      }
+
+      Object? structuredObj;
       try {
         structuredObj = jsonDecode(rawStructuredJson);
+        // 兼容部分中转网关对 tool_calls.function.arguments 做了二次 JSON 字符串编码的情况
+        if (structuredObj is String) {
+          final inner = stripThinkingAndCodeFence(structuredObj).cleaned;
+          if (inner.startsWith('{') && inner.endsWith('}')) {
+            structuredObj = jsonDecode(inner);
+          }
+        }
       } catch (_) {
-        throw const TextModelException(
+        if (allowProtocolNegotiation) {
+          timer.cancel();
+          return await _invokeStructured(
+            config: config,
+            apiKey: apiKey,
+            taskSchemaSuffix: taskSchemaSuffix,
+            toolDescription: toolDescription,
+            schema: schema,
+            systemMessage: systemMessage,
+            userMessage: userMessage,
+            isCancelled: isCancelled,
+            overrideReasoningEffort: overrideReasoningEffort,
+            omitReasoningEffort: omitReasoningEffort,
+            allowAdaptiveRetry: allowAdaptiveRetry,
+            overrideStructuredMode: alternateMode,
+            allowProtocolNegotiation: false,
+          );
+        }
+        throw TextModelException(
           kind: TextModelErrorKind.unsupportedStructuredOutput,
-          message: '模型输出不是合法 JSON，疑似不支持严格原生结构化输出（已拒绝提示词正则兜底）',
+          message:
+              '[$modelTag] 模型输出不是合法 JSON，疑似不支持严格原生结构化输出（已拒绝提示词正则兜底；可尝试切换结构化输出模式或调整最大输出/思考程度）',
         );
       }
       if (structuredObj is! Map) {
-        throw const TextModelException(
+        throw TextModelException(
           kind: TextModelErrorKind.schemaViolation,
-          message: '结构化输出顶层不是 JSON 对象',
+          message: '[$modelTag] 结构化输出顶层不是 JSON 对象',
         );
       }
 
@@ -1347,14 +1614,14 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       rethrow;
     } catch (e) {
       if (isCancelled?.call() == true) {
-        throw const TextModelException(
+        throw TextModelException(
           kind: TextModelErrorKind.cancelled,
-          message: '文本分析请求已取消',
+          message: '[$modelTag] 文本分析请求已取消',
         );
       }
       throw TextModelException(
         kind: TextModelErrorKind.transientNetwork,
-        message: '文本模型网络通信失败：$e',
+        message: '[$modelTag] 文本模型网络通信失败：$e',
       );
     } finally {
       timer.cancel();

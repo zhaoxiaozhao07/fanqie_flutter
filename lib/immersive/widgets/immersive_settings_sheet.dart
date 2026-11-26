@@ -210,8 +210,10 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
     switch (level) {
       case TextThinkingLevel.auto:
         return '自动 (auto)';
+      case TextThinkingLevel.none:
+        return '关闭思考 (none)';
       case TextThinkingLevel.off:
-        return '尽量关闭';
+        return '关闭思考 (off)';
       case TextThinkingLevel.minimal:
         return '最低 (minimal)';
       case TextThinkingLevel.low:
@@ -220,6 +222,8 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
         return '中 (medium)';
       case TextThinkingLevel.high:
         return '高 (high)';
+      case TextThinkingLevel.max:
+        return '最高 (max)';
       default:
         return level;
     }
@@ -531,6 +535,13 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
               ),
             ),
             Text(
+              '上下文: ${formatTokenCountShort(tm.contextWindowTokens, emptyLabel: '默认 1M')} · 最大输出: ${formatTokenCountShort(tm.maxOutputTokens, emptyLabel: '不传该字段')} · 协议: ${tm.structuredOutput.mode == 'json_schema' ? 'JSON Schema' : 'ToolCall'}',
+              style: TextStyle(
+                fontSize: 10,
+                color: AppTheme.textSecondaryOf(context),
+              ),
+            ),
+            Text(
               '接口: ${tm.baseUrl}${tm.endpoint}',
               style: TextStyle(
                 fontSize: 10,
@@ -590,7 +601,7 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                           primaryTextModelId: tm.effectiveId,
                           fallbackTextModelId: nextFallback,
                         ),
-                        successMessage: '已将 ${tm.modelId} 设为主文本提取模型',
+                        successMessage: '已将 ${tm.modelId} 设为主文本提取模型（已重置旧报错并重新调度）',
                       );
                     },
                     child: const Text('设为主模型', style: TextStyle(fontSize: 11)),

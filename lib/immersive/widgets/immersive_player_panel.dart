@@ -64,6 +64,10 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
 
   void _onChanged() {
     if (!mounted) return;
+    if (!_coord.isActive) {
+      setState(() => _status = const PipelineStatus());
+      return;
+    }
     _refreshStatus();
     setState(() {});
   }
@@ -74,6 +78,39 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
     if (mounted) {
       setState(() => _status = st);
     }
+  }
+
+  Widget _buildActiveModelBadge(ImmersivePlaybackCoordinator coord) {
+    final label = coord.activeTextModelLabel;
+    if (label.isEmpty) return const SizedBox.shrink();
+    final isFallback = coord.isUsingFallbackTextModel;
+    final modelId = coord.activeTextModelId;
+    final displayText =
+        modelId.isNotEmpty && modelId != label
+        ? '$label ($modelId)'
+        : label;
+    final prefix = isFallback ? '兜底模型' : '当前模型';
+    final badgeColor = isFallback ? Colors.orange : AppTheme.primaryColor;
+
+    return Container(
+      key: const ValueKey('immersive-active-model-badge'),
+      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 1.5),
+      decoration: BoxDecoration(
+        color: badgeColor.withValues(alpha: 0.12),
+        borderRadius: BorderRadius.circular(4),
+        border: Border.all(color: badgeColor.withValues(alpha: 0.35)),
+      ),
+      child: Text(
+        '$prefix: $displayText',
+        style: TextStyle(
+          fontSize: 10.5,
+          color: badgeColor,
+          fontWeight: FontWeight.w600,
+        ),
+        maxLines: 1,
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
   }
 
   @override
@@ -93,8 +130,12 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
     final isPlaying = coord.isPlaying;
     final isBuffering = coord.isBuffering;
     final isBlocked = coord.state == ImmersivePlayState.blocked;
+    // 有实时调度器时直接以调度器实时阻塞原因为准，避免异步刷新前闪现旧报错残影
+    final liveBlockingReason = coord.scheduler != null
+        ? coord.scheduler!.blockingReason
+        : _status.blockingReason;
     final issueText =
-        coord.errorMessage ?? _status.blockingReason ?? coord.notice;
+        coord.errorMessage ?? liveBlockingReason ?? coord.notice;
 
     if (ReaderPlatform.isDesktop) {
       return _buildDesktopPanel(
@@ -167,6 +208,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                   ),
                 ),
                 IconButton(
+                  key: const ValueKey('immersive-stop-close-btn'),
                   icon: Icon(
                     Icons.close,
                     size: 18,
@@ -186,7 +228,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
               padding: const EdgeInsets.only(bottom: 4),
               child: Wrap(
                 spacing: 8,
-                runSpacing: 2,
+                runSpacing: 4,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   Text(
@@ -199,15 +241,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                       fontWeight: FontWeight.w600,
                     ),
                   ),
-                  if (_coord.isUsingFallbackTextModel)
-                    Text(
-                      '兜底模型:${_coord.activeTextModelLabel}',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: Colors.orange.shade800,
-                        fontWeight: FontWeight.w600,
-                      ),
-                    ),
+                  _buildActiveModelBadge(coord),
                   if (_status.isPreparingPrefix)
                     Text(
                       '前文档案 ${_status.prefixCompletedChunks}/${_status.prefixTotalChunks}',
@@ -282,12 +316,35 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                       ),
                     ),
                     TextButton(
-                      onPressed: () => unawaited(coord.retryBlockedRange()),
+                      key: const ValueKey('immersive-retry-issue-btn'),
+                      onPressed: () async {
+                        await coord.retryBlockedRange();
+                        await _refreshStatus();
+                      },
                       style: TextButton.styleFrom(
                         padding: const EdgeInsets.symmetric(horizontal: 8),
                         minimumSize: const Size(0, 28),
                       ),
                       child: const Text('重试', style: TextStyle(fontSize: 11)),
+                    ),
+                    IconButton(
+                      key: const ValueKey('immersive-dismiss-issue-btn'),
+                      tooltip: '关闭提示',
+                      icon: Icon(
+                        Icons.close,
+                        size: 15,
+                        color: effectiveSecondary,
+                      ),
+                      visualDensity: VisualDensity.compact,
+                      constraints: const BoxConstraints.tightFor(
+                        width: 26,
+                        height: 26,
+                      ),
+                      padding: EdgeInsets.zero,
+                      onPressed: () {
+                        coord.dismissIssue();
+                        unawaited(_refreshStatus());
+                      },
                     ),
                   ],
                 ),
@@ -580,6 +637,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                       onPressed: () => _openSettings(context, coord.currentBookId),
                     ),
                     IconButton(
+                      key: const ValueKey('immersive-stop-close-btn'),
                       icon: Icon(
                         Icons.close,
                         size: 18,
@@ -683,17 +741,8 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    if (coord.isUsingFallbackTextModel) ...[
-                      const SizedBox(width: 8),
-                      Text(
-                        '兜底模型:${coord.activeTextModelLabel}',
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.orange.shade800,
-                          fontWeight: FontWeight.w600,
-                        ),
-                      ),
-                    ],
+                    const SizedBox(width: 8),
+                    _buildActiveModelBadge(coord),
                     if (coord.hasSleepSchedule) ...[
                       const SizedBox(width: 8),
                       Text(
@@ -748,8 +797,11 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                             ),
                           ),
                           TextButton(
-                            onPressed: () =>
-                                unawaited(coord.retryBlockedRange()),
+                            key: const ValueKey('immersive-retry-issue-btn'),
+                            onPressed: () async {
+                              await coord.retryBlockedRange();
+                              await _refreshStatus();
+                            },
                             style: TextButton.styleFrom(
                               padding: const EdgeInsets.symmetric(
                                 horizontal: 8,
@@ -760,6 +812,25 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                               '重试',
                               style: TextStyle(fontSize: 11),
                             ),
+                          ),
+                          IconButton(
+                            key: const ValueKey('immersive-dismiss-issue-btn'),
+                            tooltip: '关闭提示',
+                            icon: Icon(
+                              Icons.close,
+                              size: 14,
+                              color: secondaryColor,
+                            ),
+                            visualDensity: VisualDensity.compact,
+                            constraints: const BoxConstraints.tightFor(
+                              width: 24,
+                              height: 24,
+                            ),
+                            padding: EdgeInsets.zero,
+                            onPressed: () {
+                              coord.dismissIssue();
+                              unawaited(_refreshStatus());
+                            },
                           ),
                         ],
                       )

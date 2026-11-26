@@ -302,8 +302,8 @@ class ImmersivePresetConfig {
       reservedReconciliationSlots: 1,
       requestsPerMinute: 60,
       tokensPerMinute: null,
-      contextWindowTokens: 32768,
-      maxOutputTokens: 6144,
+      contextWindowTokens: TextAnalysisConfig.defaultContextWindowTokens,
+      maxOutputTokens: TextAnalysisConfig.defaultMaxOutputTokens,
       outputLimitParameter: 'max_completion_tokens',
       temperature: null,
       structuredOutput: const StructuredOutputConfig(
@@ -334,8 +334,8 @@ class ImmersivePresetConfig {
       reservedReconciliationSlots: 1,
       requestsPerMinute: 60,
       tokensPerMinute: null,
-      contextWindowTokens: 32768,
-      maxOutputTokens: 6144,
+      contextWindowTokens: TextAnalysisConfig.defaultContextWindowTokens,
+      maxOutputTokens: TextAnalysisConfig.defaultMaxOutputTokens,
       outputLimitParameter: 'max_completion_tokens',
       temperature: null,
       structuredOutput: const StructuredOutputConfig(
@@ -366,8 +366,8 @@ class ImmersivePresetConfig {
       reservedReconciliationSlots: 0,
       requestsPerMinute: 30,
       tokensPerMinute: null,
-      contextWindowTokens: 32768,
-      maxOutputTokens: 6144,
+      contextWindowTokens: TextAnalysisConfig.defaultContextWindowTokens,
+      maxOutputTokens: TextAnalysisConfig.defaultMaxOutputTokens,
       outputLimitParameter: 'max_completion_tokens',
       temperature: null,
       structuredOutput: const StructuredOutputConfig(

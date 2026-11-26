@@ -336,17 +336,34 @@ class StructuredOutputConfig {
 /// 文本分析模型思考程度枚举
 class TextThinkingLevel {
   static const auto = 'auto';
+  static const none = 'none';
   static const off = 'off';
   static const minimal = 'minimal';
   static const low = 'low';
   static const medium = 'medium';
   static const high = 'high';
+  static const max = 'max';
 
-  static const values = <String>{auto, off, minimal, low, medium, high};
+  static const values = <String>{
+    auto,
+    none,
+    off,
+    minimal,
+    low,
+    medium,
+    high,
+    max,
+  };
 }
 
 /// 文本分析模型配置
 class TextAnalysisConfig {
+  /// 默认模型上下文窗口（1M Token）
+  static const int defaultContextWindowTokens = 1000000;
+
+  /// 默认模型最大输出 Token（留空为 null 时请求不传该字段）
+  static const int defaultMaxOutputTokens = 12800;
+
   final String id;
   final String providerId;
   final String displayName;
@@ -365,8 +382,8 @@ class TextAnalysisConfig {
   final int reservedReconciliationSlots;
   final int? requestsPerMinute;
   final int? tokensPerMinute;
-  final int contextWindowTokens;
-  final int maxOutputTokens;
+  final int? contextWindowTokens;
+  final int? maxOutputTokens;
   final String outputLimitParameter;
   final double? temperature;
   final StructuredOutputConfig structuredOutput;
@@ -390,12 +407,20 @@ class TextAnalysisConfig {
     this.reservedReconciliationSlots = 1,
     this.requestsPerMinute = 30,
     this.tokensPerMinute,
-    this.contextWindowTokens = 32768,
-    this.maxOutputTokens = 6144,
+    this.contextWindowTokens = defaultContextWindowTokens,
+    this.maxOutputTokens = defaultMaxOutputTokens,
     this.outputLimitParameter = 'max_completion_tokens',
     this.temperature,
     this.structuredOutput = const StructuredOutputConfig(),
   }) : id = id ?? '';
+
+  /// 分块预算计算用的生效上下文窗口（未显式设置时默认按 1M 预算）
+  int get effectiveContextWindowTokens =>
+      contextWindowTokens ?? defaultContextWindowTokens;
+
+  /// 分块预算计算用的生效输出预留上限（未显式设置时默认按 12800 估算，但请求体不传该字段）
+  int get effectiveMaxOutputTokens =>
+      maxOutputTokens ?? defaultMaxOutputTokens;
 
   /// 返回稳定非空的模型条目唯一标识（旧配置未显式指定 id 时自动派生）
   String get effectiveId {
@@ -423,8 +448,8 @@ class TextAnalysisConfig {
     int? reservedReconciliationSlots,
     Object? requestsPerMinute = _sentinel,
     Object? tokensPerMinute = _sentinel,
-    int? contextWindowTokens,
-    int? maxOutputTokens,
+    Object? contextWindowTokens = _sentinel,
+    Object? maxOutputTokens = _sentinel,
     String? outputLimitParameter,
     Object? temperature = _sentinel,
     StructuredOutputConfig? structuredOutput,
@@ -454,8 +479,12 @@ class TextAnalysisConfig {
     tokensPerMinute: identical(tokensPerMinute, _sentinel)
         ? this.tokensPerMinute
         : tokensPerMinute as int?,
-    contextWindowTokens: contextWindowTokens ?? this.contextWindowTokens,
-    maxOutputTokens: maxOutputTokens ?? this.maxOutputTokens,
+    contextWindowTokens: identical(contextWindowTokens, _sentinel)
+        ? this.contextWindowTokens
+        : contextWindowTokens as int?,
+    maxOutputTokens: identical(maxOutputTokens, _sentinel)
+        ? this.maxOutputTokens
+        : maxOutputTokens as int?,
     outputLimitParameter: outputLimitParameter ?? this.outputLimitParameter,
     temperature: identical(temperature, _sentinel)
         ? this.temperature
@@ -1911,7 +1940,9 @@ class ImmersiveConfigValidator {
           ),
         );
       }
-      if (tm.maxOutputTokens >= tm.contextWindowTokens) {
+      if (tm.maxOutputTokens != null &&
+          tm.contextWindowTokens != null &&
+          tm.maxOutputTokens! >= tm.contextWindowTokens!) {
         issues.add(
           ConfigValidationIssue(
             '$prefix.max_output_tokens',
@@ -2297,15 +2328,19 @@ class ImmersiveConfigValidator {
         'reserved_reconciliation_slots',
         'requests_per_minute',
         'tokens_per_minute',
-        'context_window_tokens',
-        'max_output_tokens',
         'output_limit_parameter',
         'temperature',
         'structured_output',
       },
       pathPrefix,
       issues,
-      optionalKeys: const {'id', 'enabled', 'thinking_level'},
+      optionalKeys: const {
+        'id',
+        'enabled',
+        'thinking_level',
+        'context_window_tokens',
+        'max_output_tokens',
+      },
     );
     final entryId = _optString(map, 'id', '$pathPrefix.id', issues);
     final enabledVal = map.containsKey('enabled')
@@ -2422,20 +2457,24 @@ class ImmersiveConfigValidator {
       issues,
       min: 1,
     );
-    final ctx = _reqInt(
-      map,
-      'context_window_tokens',
-      '$pathPrefix.context_window_tokens',
-      issues,
-      min: 1024,
-    );
-    final maxOut = _reqInt(
-      map,
-      'max_output_tokens',
-      '$pathPrefix.max_output_tokens',
-      issues,
-      min: 128,
-    );
+    final ctx = map.containsKey('context_window_tokens')
+        ? _optInt(
+            map,
+            'context_window_tokens',
+            '$pathPrefix.context_window_tokens',
+            issues,
+            min: 1024,
+          )
+        : TextAnalysisConfig.defaultContextWindowTokens;
+    final maxOut = map.containsKey('max_output_tokens')
+        ? _optInt(
+            map,
+            'max_output_tokens',
+            '$pathPrefix.max_output_tokens',
+            issues,
+            min: 128,
+          )
+        : TextAnalysisConfig.defaultMaxOutputTokens;
     final outParam = _reqEnum(
       map,
       'output_limit_parameter',
@@ -2543,8 +2582,6 @@ class ImmersiveConfigValidator {
         timeout == null ||
         conc == null ||
         reserved == null ||
-        ctx == null ||
-        maxOut == null ||
         outParam == null ||
         so == null) {
       return null;

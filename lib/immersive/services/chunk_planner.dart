@@ -32,12 +32,16 @@ class ChunkPlanner {
     required int systemVoiceCatalogTokens,
     int? overrideMaxTargetTokens,
   }) {
+    final effectiveCtx = textConfig.effectiveContextWindowTokens;
     final safety =
-        (textConfig.contextWindowTokens *
-                pipelineConfig.contextSafetyMarginRatio)
-            .ceil();
+        (effectiveCtx * pipelineConfig.contextSafetyMarginRatio).ceil();
+    final outputReserve = textConfig.maxOutputTokens ??
+        math.min(
+          TextAnalysisConfig.defaultMaxOutputTokens,
+          (effectiveCtx * 0.25).floor(),
+        );
     final reserved =
-        textConfig.maxOutputTokens +
+        outputReserve +
         safety +
         systemVoiceCatalogTokens +
         pipelineConfig.characterContextMaxTokens +
@@ -46,10 +50,10 @@ class ChunkPlanner {
         pipelineConfig.contextAfterTokens +
         600; // 系统规则与 JSON 结构提示开销
 
-    final available = textConfig.contextWindowTokens - reserved;
+    final available = effectiveCtx - reserved;
     if (available < 120) {
       throw StateError(
-        '文本模型上下文窗口（${textConfig.contextWindowTokens}）不足以容纳全部勾选音色目录与安全余量，请减少勾选音色或调大上下文窗口配置',
+        '文本模型上下文窗口（$effectiveCtx）不足以容纳全部勾选音色目录与安全余量，请减少勾选音色或调大上下文窗口配置',
       );
     }
     final configuredMax = overrideMaxTargetTokens ?? pipelineConfig.maxChunkTokens;

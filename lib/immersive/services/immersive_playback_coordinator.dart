@@ -217,12 +217,27 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
   ImmersiveStateStore? get stateStore => _store;
   AudioCacheManager? get cacheManager => _cacheManager;
   ImmersiveJobScheduler? get scheduler => _scheduler;
-  String get activeTextModelLabel =>
-      _scheduler?.activeTextModel.displayName ??
-      config?.primaryTextModel.displayName ??
-      '';
+  TextAnalysisConfig? get activeTextModelConfig =>
+      _scheduler?.activeTextModel ?? config?.primaryTextModel;
+  String get activeTextModelLabel {
+    final model = activeTextModelConfig;
+    if (model == null) return '';
+    return model.displayName.trim().isNotEmpty
+        ? model.displayName.trim()
+        : model.modelId;
+  }
+
+  String get activeTextModelId => activeTextModelConfig?.modelId ?? '';
   bool get isUsingFallbackTextModel =>
       _scheduler?.isUsingFallbackTextModel ?? false;
+
+  /// 手动关闭播放器上的错误/提示横幅（清空内存报错与阻塞横幅显示）
+  void dismissIssue() {
+    _errorMessage = null;
+    _notice = null;
+    _scheduler?.clearErrorState();
+    _notify();
+  }
   bool get stopAfterCurrentChapter => _stopAfterCurrentChapter;
   DateTime? get sleepDeadline => _sleepDeadline;
   bool get hasSleepSchedule =>
@@ -298,23 +313,102 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
     return status;
   }
 
+  static bool _hasTextModelConfigChanged(
+    ImmersiveConfig? prev,
+    ImmersiveConfig next,
+  ) {
+    if (prev == null) return true;
+    if (prev.primaryTextModel.effectiveId != next.primaryTextModel.effectiveId ||
+        prev.fallbackTextModel?.effectiveId !=
+            next.fallbackTextModel?.effectiveId ||
+        prev.textAnalysisModels.length != next.textAnalysisModels.length) {
+      return true;
+    }
+    for (var i = 0; i < prev.textAnalysisModels.length; i++) {
+      final a = prev.textAnalysisModels[i];
+      final b = next.textAnalysisModels[i];
+      if (a.effectiveId != b.effectiveId ||
+          a.enabled != b.enabled ||
+          a.modelId != b.modelId ||
+          a.baseUrl != b.baseUrl ||
+          a.endpoint != b.endpoint ||
+          a.apiKey != b.apiKey ||
+          a.thinkingLevel != b.thinkingLevel ||
+          a.contextWindowTokens != b.contextWindowTokens ||
+          a.maxOutputTokens != b.maxOutputTokens ||
+          a.outputLimitParameter != b.outputLimitParameter ||
+          a.structuredOutput.mode != b.structuredOutput.mode ||
+          a.structuredOutput.strict != b.structuredOutput.strict) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// 复活指定书籍中全部阻塞、失败或处于退避等待的任务（立即清零退避时间并重新入队）
+  Future<int> _reviveStuckJobsForBook(
+    String bookId, {
+    String? jobType,
+  }) async {
+    final store = _store;
+    if (store == null) return 0;
+    final jobs = await store.listJobs(
+      bookId: bookId,
+      statuses: const {
+        ImmersiveJobStatus.blocked,
+        ImmersiveJobStatus.failed,
+        ImmersiveJobStatus.retryWait,
+      },
+    );
+    final nowMs = _now().millisecondsSinceEpoch;
+    var revivedCount = 0;
+    for (final j in jobs) {
+      if (jobType != null && j.jobType != jobType) continue;
+      await store.enqueueOrReviveJob(
+        j.copyWith(updatedAtMs: nowMs),
+        reviveTerminal: true,
+      );
+      revivedCount++;
+    }
+    return revivedCount;
+  }
+
   /// 保存并热应用配置修改（校验失败不破坏运行快照）
   Future<ConfigServiceStatus> saveConfig(
     ImmersiveConfig newConfig, {
     File? configFile,
   }) async {
+    final prevConfig = _configService.currentConfig;
     final status = await _configService.saveConfig(
       newConfig,
       configFile: configFile,
     );
     if (status.config != null) {
+      final textChanged = _hasTextModelConfigChanged(prevConfig, status.config!);
       await _setupRuntimeServices(status.config!, status.paths);
       _runtimeFailedVoiceProfileIds.clear();
+      if (textChanged) {
+        _textAdapter.cancelAll();
+        _errorMessage = null;
+        _notice = null;
+      }
       _scheduler?.updateConfig(status.config!);
+      if (textChanged && _book != null) {
+        await _reviveStuckJobsForBook(
+          _book!.bookId,
+          jobType: ImmersiveJobType.chunkAnalysis,
+        );
+        if (_state == ImmersivePlayState.blocked) {
+          _state = ImmersivePlayState.buffering;
+        }
+      }
       // 若当前有打开的书籍，检查配置变更对当前清单的影响（停用/删除音色将自动按同性别兜底）
       if (_book != null && _currentRevision != null) {
         await _rebuildManifestFromAllocations(preservePlayingBoundary: isPlaying);
         await _pushDemandToScheduler();
+        if (textChanged && isActive && !isPaused) {
+          unawaited(_scheduler?.tick());
+        }
       }
     }
     _notify();
@@ -781,18 +875,20 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
     }
     _errorMessage = null;
     _notice = null;
+    _scheduler?.clearErrorState(resetFailover: true);
     _sessionStartedAtMs = _now().millisecondsSinceEpoch;
     _firstAudioLatencyMs = null;
     _stallCount = 0;
 
     final safeIdx = chapterIndex.clamp(0, chapters.length - 1);
     _currentChapterIndex = safeIdx;
-    _playbackEpoch++;
+    final startEpoch = ++_playbackEpoch;
     _startupSatisfied = false;
     _firstReadyObservedAtMs = null;
     _startupGraceTimer?.cancel();
     _releaseCurrentPin();
     await _stopNativeAudioOnly();
+    if (_playbackEpoch != startEpoch) return;
 
     _state = ImmersivePlayState.buffering;
     _notify();
@@ -806,9 +902,19 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
         offlineOnly: offlineOnly,
       );
     } catch (e) {
+      if (_playbackEpoch != startEpoch) return;
       _state = ImmersivePlayState.blocked;
       _errorMessage = '$e';
       _notify();
+      return;
+    }
+    if (_playbackEpoch != startEpoch || _state == ImmersivePlayState.stopped) {
+      return;
+    }
+
+    // 启动会话时复活本书历史遗留的阻塞/失败/退避任务，保证切换模型重开立刻用新模型重跑
+    await _reviveStuckJobsForBook(book.bookId);
+    if (_playbackEpoch != startEpoch || _state == ImmersivePlayState.stopped) {
       return;
     }
 
@@ -914,13 +1020,19 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
     _firstReadyObservedAtMs = null;
     _pendingResumePositionMs = 0;
     _releaseCurrentPin();
-    _scheduler?.stop();
-    if (_book != null && _currentRevision != null) {
-      await _persistCursor(userPaused: false);
-    }
     _state = ImmersivePlayState.stopped;
     _errorMessage = null;
     _notice = null;
+    _textAdapter.cancelAll();
+    _scheduler?.stop();
+    // 第一时间通知界面关闭播放面板，避免被后续持久化或原生音频释放阻塞
+    _notify();
+
+    if (_book != null && _currentRevision != null) {
+      try {
+        await _persistCursor(userPaused: false);
+      } catch (_) {}
+    }
     await _safeInvoke('stopPlayback');
     await _safeInvoke('releasePlaybackService');
     _notify();
@@ -1258,22 +1370,21 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
     _notify();
   }
 
-  /// 重试所有阻塞或失败的区间任务
+  /// 重试所有阻塞、失败或处于退避冷却的区间任务
   Future<void> retryBlockedRange() async {
-    if (_book == null || _store == null) return;
-    final jobs = await _store!.listJobs(
-      bookId: _book!.bookId,
-      statuses: const {ImmersiveJobStatus.blocked, ImmersiveJobStatus.failed},
-    );
-    for (final j in jobs) {
-      await _store!.enqueueOrReviveJob(j, reviveTerminal: true);
-    }
     _errorMessage = null;
-    if (_currentRevision != null) {
-      await _rebuildManifestFromAllocations(preservePlayingBoundary: isPlaying);
-    }
+    _notice = null;
+    _scheduler?.clearErrorState(resetFailover: true);
     if (_state == ImmersivePlayState.blocked) {
       _state = ImmersivePlayState.buffering;
+    }
+    // 立即通知 UI 清空旧报错，避免用户点击重试后看似无反应
+    _notify();
+
+    if (_book == null || _store == null) return;
+    await _reviveStuckJobsForBook(_book!.bookId);
+    if (_currentRevision != null) {
+      await _rebuildManifestFromAllocations(preservePlayingBoundary: isPlaying);
     }
     await _pushDemandToScheduler();
     await _scheduler?.tick();

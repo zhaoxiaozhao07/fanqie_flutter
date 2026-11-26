@@ -99,6 +99,11 @@ class SchedulerQuotaPool {
     if (target > cur) _textCooldownUntilByModel[key] = target;
   }
 
+  /// 清除所有文本模型的限流冷却（用户切换模型或手动重试时立即生效）
+  void clearTextCooldowns() {
+    _textCooldownUntilByModel.clear();
+  }
+
   /// 尝试一次性原子申请 TTS 全局、供应商（含前台保留席位）、模型子限额及 RPM 额度
   bool tryAcquireTts({
     required TtsConfig ttsConfig,
@@ -310,14 +315,56 @@ class ImmersiveJobScheduler {
     _failoverNotice = null;
   }
 
+  /// 清除阻塞原因、最近错误与故障转移提示（可选同时重置主备状态与限流冷却）
+  void clearErrorState({bool resetFailover = false}) {
+    _blockingReason = null;
+    _lastError = null;
+    _failoverNotice = null;
+    quotaPool.clearTextCooldowns();
+    if (resetFailover) {
+      resetTextModelFailover();
+    }
+    onProgressChanged?.call();
+  }
+
+  static bool _textModelConfigChanged(
+    ImmersiveConfig prev,
+    ImmersiveConfig next,
+  ) {
+    if (prev.primaryTextModel.effectiveId != next.primaryTextModel.effectiveId ||
+        prev.fallbackTextModel?.effectiveId !=
+            next.fallbackTextModel?.effectiveId ||
+        prev.textAnalysisModels.length != next.textAnalysisModels.length) {
+      return true;
+    }
+    for (var i = 0; i < prev.textAnalysisModels.length; i++) {
+      final a = prev.textAnalysisModels[i];
+      final b = next.textAnalysisModels[i];
+      if (a.effectiveId != b.effectiveId ||
+          a.enabled != b.enabled ||
+          a.modelId != b.modelId ||
+          a.baseUrl != b.baseUrl ||
+          a.endpoint != b.endpoint ||
+          a.apiKey != b.apiKey ||
+          a.thinkingLevel != b.thinkingLevel ||
+          a.contextWindowTokens != b.contextWindowTokens ||
+          a.maxOutputTokens != b.maxOutputTokens ||
+          a.outputLimitParameter != b.outputLimitParameter ||
+          a.structuredOutput.mode != b.structuredOutput.mode ||
+          a.structuredOutput.strict != b.structuredOutput.strict) {
+        return true;
+      }
+    }
+    return false;
+  }
+
   void updateConfig(ImmersiveConfig config) {
-    final prevPrimaryId = _config.primaryTextModel.effectiveId;
+    final prev = _config;
+    final textChanged = _textModelConfigChanged(prev, config);
     _config = config;
     final curActive = _config.findTextModel(_activeTextModelId);
-    if (curActive == null ||
-        !curActive.enabled ||
-        prevPrimaryId != _config.primaryTextModel.effectiveId) {
-      resetTextModelFailover();
+    if (textChanged || curActive == null || !curActive.enabled) {
+      clearErrorState(resetFailover: true);
     }
   }
 
@@ -365,10 +412,14 @@ class ImmersiveJobScheduler {
     return recovered;
   }
 
-  /// 停止调度器轮询（在途任务保留自身 fence 校验）
+  /// 停止调度器轮询并清理会话错误状态（在途任务保留自身 fence 校验）
   void stop() {
     _activeDemand = null;
     _stopTimer();
+    _blockingReason = null;
+    _lastError = null;
+    _failoverNotice = null;
+    onProgressChanged?.call();
   }
 
   void dispose() {
@@ -732,32 +783,61 @@ class ImmersiveJobScheduler {
     } on TextModelException catch (e) {
       await _handleTextJobError(job, textModel, e);
     } on DraftSemanticValidationException catch (e) {
-      final switched = await _maybeFailoverTextModel(
-        job,
+      final taggedMsg = _tagModelMessage(
         textModel,
         '模型返回未覆盖全部目标原文（${e.message}）',
-        immediate: false,
       );
-      if (!switched) {
-        await _handleRetryableJobFailure(
-          job,
-          '模型返回未覆盖全部目标原文（${e.message}）',
-          isBlocking: false,
+      if (textModel.effectiveId != activeTextModel.effectiveId) {
+        final nowMs = _now().millisecondsSinceEpoch;
+        await _store.completeJob(
+          jobKey: job.jobKey,
+          workerId: workerId,
+          fence: job.fence,
+          newStatus: ImmersiveJobStatus.retryWait,
+          nextNotBeforeMs: nowMs,
+          nowMs: nowMs,
         );
+      } else {
+        final switched = await _maybeFailoverTextModel(
+          job,
+          textModel,
+          taggedMsg,
+          immediate: false,
+        );
+        if (!switched) {
+          await _handleRetryableJobFailure(
+            job,
+            taggedMsg,
+            isBlocking: false,
+          );
+        }
       }
     } catch (e) {
-      final switched = await _maybeFailoverTextModel(
-        job,
-        textModel,
-        '文本分析执行异常：$e',
-        immediate: false,
-      );
-      if (!switched) {
-        await _handleRetryableJobFailure(
-          job,
-          '文本分析执行异常：$e',
-          isBlocking: false,
+      final taggedMsg = _tagModelMessage(textModel, '文本分析执行异常：$e');
+      if (textModel.effectiveId != activeTextModel.effectiveId) {
+        final nowMs = _now().millisecondsSinceEpoch;
+        await _store.completeJob(
+          jobKey: job.jobKey,
+          workerId: workerId,
+          fence: job.fence,
+          newStatus: ImmersiveJobStatus.retryWait,
+          nextNotBeforeMs: nowMs,
+          nowMs: nowMs,
         );
+      } else {
+        final switched = await _maybeFailoverTextModel(
+          job,
+          textModel,
+          taggedMsg,
+          immediate: false,
+        );
+        if (!switched) {
+          await _handleRetryableJobFailure(
+            job,
+            taggedMsg,
+            isBlocking: false,
+          );
+        }
       }
     } finally {
       _stopHeartbeat(job.jobKey);
@@ -811,11 +891,49 @@ class ImmersiveJobScheduler {
     return true;
   }
 
+  static String _tagModelMessage(TextAnalysisConfig model, String message) {
+    final tag = model.displayName.trim().isNotEmpty
+        ? model.displayName.trim()
+        : model.modelId;
+    if (message.startsWith('[$tag]')) return message;
+    return '[$tag] $message';
+  }
+
   Future<void> _handleTextJobError(
     ImmersiveJob job,
     TextAnalysisConfig failedModel,
     TextModelException e,
   ) async {
+    final nowMs = _now().millisecondsSinceEpoch;
+    // 主动取消的旧请求或已停止的会话：不写入错误/阻塞状态，避免污染新会话或新切换的模型
+    if (e.kind == TextModelErrorKind.cancelled) {
+      await _store.completeJob(
+        jobKey: job.jobKey,
+        workerId: workerId,
+        fence: job.fence,
+        newStatus: _activeDemand == null
+            ? ImmersiveJobStatus.cancelled
+            : ImmersiveJobStatus.retryWait,
+        nextNotBeforeMs: _activeDemand == null ? null : nowMs,
+        nowMs: nowMs,
+      );
+      return;
+    }
+
+    // 若用户已切换至其他文本模型，忽略旧模型迟到的失败结果并立即交给当前模型重试
+    if (failedModel.effectiveId != activeTextModel.effectiveId) {
+      await _store.completeJob(
+        jobKey: job.jobKey,
+        workerId: workerId,
+        fence: job.fence,
+        newStatus: ImmersiveJobStatus.retryWait,
+        nextNotBeforeMs: nowMs,
+        nowMs: nowMs,
+      );
+      return;
+    }
+
+    final taggedMsg = _tagModelMessage(failedModel, e.message);
     if (e.kind == TextModelErrorKind.rateLimited) {
       quotaPool.applyTextCooldown(
         e.retryAfter ?? const Duration(seconds: 3),
@@ -825,31 +943,33 @@ class ImmersiveJobScheduler {
     final switched = await _maybeFailoverTextModel(
       job,
       failedModel,
-      e.message,
+      taggedMsg,
       immediate:
           e.isBlockingConfigOrProtocol || e.kind == TextModelErrorKind.refusal,
     );
     if (switched) return;
 
     if (e.isBlockingConfigOrProtocol || e.kind == TextModelErrorKind.refusal) {
-      _blockingReason = e.message;
-      _lastError = e.message;
+      _blockingReason = taggedMsg;
+      _lastError = taggedMsg;
       await _store.completeJob(
         jobKey: job.jobKey,
         workerId: workerId,
         fence: job.fence,
         newStatus: ImmersiveJobStatus.blocked,
-        errorMessage: e.message,
-        nowMs: _now().millisecondsSinceEpoch,
+        errorMessage: taggedMsg,
+        nowMs: nowMs,
       );
+      onProgressChanged?.call();
       return;
     }
     await _handleRetryableJobFailure(
       job,
-      e.message,
+      taggedMsg,
       retryAfter: e.retryAfter,
       isBlocking: false,
     );
+    onProgressChanged?.call();
   }
 
   /// 在独立复核保留席位上运行局部身份复核并排空有序提交

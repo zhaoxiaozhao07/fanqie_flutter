@@ -1169,12 +1169,13 @@ class SqliteImmersiveStateStore implements ImmersiveStateStore {
         return job;
       }
       final existing = ImmersiveJob.fromRow(rows.first);
-      final isTerminal =
+      final isRevivable =
           existing.status == ImmersiveJobStatus.succeeded ||
           existing.status == ImmersiveJobStatus.cancelled ||
           existing.status == ImmersiveJobStatus.failed ||
-          existing.status == ImmersiveJobStatus.blocked;
-      if (reviveTerminal && isTerminal) {
+          existing.status == ImmersiveJobStatus.blocked ||
+          existing.status == ImmersiveJobStatus.retryWait;
+      if (reviveTerminal && isRevivable) {
         // 复用逻辑任务、原子递增执行代次并重置本轮尝试预算（满足 A21）
         final revived = existing.copyWith(
           status: ImmersiveJobStatus.queued,
@@ -2111,12 +2112,13 @@ class InMemoryImmersiveStateStore implements ImmersiveStateStore {
       _jobs[job.jobKey] = job;
       return job;
     }
-    final isTerminal =
+    final isRevivable =
         existing.status == ImmersiveJobStatus.succeeded ||
         existing.status == ImmersiveJobStatus.cancelled ||
         existing.status == ImmersiveJobStatus.failed ||
-        existing.status == ImmersiveJobStatus.blocked;
-    if (reviveTerminal && isTerminal) {
+        existing.status == ImmersiveJobStatus.blocked ||
+        existing.status == ImmersiveJobStatus.retryWait;
+    if (reviveTerminal && isRevivable) {
       final revived = existing.copyWith(
         status: ImmersiveJobStatus.queued,
         priority: job.priority < existing.priority ? job.priority : existing.priority,

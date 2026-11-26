@@ -81,7 +81,7 @@ class ImmersivePipelineTab extends StatelessWidget {
                   fontWeight: FontWeight.w600,
                   color: coordinator.isUsingFallbackTextModel
                       ? Colors.orange.shade800
-                      : Colors.black87,
+                      : AppTheme.textPrimaryOf(context),
                 ),
               ),
               if (coordinator.isUsingFallbackTextModel)
@@ -355,12 +355,27 @@ class ImmersivePipelineTab extends StatelessWidget {
           Padding(
             padding: const EdgeInsets.only(top: 10),
             child: Card(
-              color: Colors.red.shade50,
+              color: Colors.red.withValues(alpha: 0.08),
               child: Padding(
-                padding: const EdgeInsets.all(12),
-                child: Text(
-                  '当前诊断信息：${st.blockingReason ?? st.lastError}',
-                  style: const TextStyle(fontSize: 12, color: Colors.red),
+                padding: const EdgeInsets.fromLTRB(12, 8, 6, 8),
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '当前诊断信息：${st.blockingReason ?? st.lastError}',
+                        style: const TextStyle(fontSize: 12, color: Colors.redAccent),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: '清除提示',
+                      icon: const Icon(Icons.close, size: 16, color: Colors.redAccent),
+                      visualDensity: VisualDensity.compact,
+                      onPressed: () {
+                        coordinator.dismissIssue();
+                        unawaited(onReload());
+                      },
+                    ),
+                  ],
                 ),
               ),
             ),

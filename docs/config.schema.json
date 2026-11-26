@@ -80,8 +80,12 @@
         "reserved_reconciliation_slots": { "type": "integer", "minimum": 0, "maximum": 31 },
         "requests_per_minute": { "type": ["integer", "null"], "minimum": 1 },
         "tokens_per_minute": { "type": ["integer", "null"], "minimum": 1 },
-        "context_window_tokens": { "type": "integer", "minimum": 1024 },
-        "max_output_tokens": { "type": "integer", "minimum": 128 },
+        "thinking_level": {
+          "type": ["string", "null"],
+          "enum": ["auto", "none", "off", "minimal", "low", "medium", "high", "max", null]
+        },
+        "context_window_tokens": { "type": ["integer", "null"], "minimum": 1024 },
+        "max_output_tokens": { "type": ["integer", "null"], "minimum": 128 },
         "output_limit_parameter": { "type": "string", "enum": ["max_completion_tokens", "max_tokens"] },
         "temperature": { "type": ["number", "null"], "minimum": 0, "maximum": 2 },
         "structured_output": {

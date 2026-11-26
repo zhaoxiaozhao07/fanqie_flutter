@@ -410,8 +410,11 @@ class AiReadingAssistantService {
         {'role': 'user', 'content': userPrompt},
       ],
       'stream': false,
-      modelCfg.outputLimitParameter: 1200,
     };
+    if (modelCfg.maxOutputTokens != null) {
+      body[modelCfg.outputLimitParameter] =
+          modelCfg.maxOutputTokens! < 1200 ? modelCfg.maxOutputTokens! : 1200;
+    }
     if (modelCfg.temperature != null) {
       body['temperature'] = modelCfg.temperature;
     }
