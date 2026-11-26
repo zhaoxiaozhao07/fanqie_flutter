@@ -565,6 +565,7 @@ class DownloadService extends ChangeNotifier {
     required Book book,
     required List<Chapter> chapters,
     required String format,
+    bool exportFile = true,
   }) {
     final existing = getActiveTask(book.bookId);
     if (existing != null) {
@@ -579,6 +580,7 @@ class DownloadService extends ChangeNotifier {
       if (previous.canResume &&
           previous.book.bookId == book.bookId &&
           previous.format == format &&
+          previous.exportFile == exportFile &&
           listEquals(
             previous.chapters.map((chapter) => chapter.itemId).toList(),
             chapters.map((chapter) => chapter.itemId).toList(),
@@ -600,9 +602,10 @@ class DownloadService extends ChangeNotifier {
       book: book,
       chapters: chapters,
       format: format,
+      exportFile: exportFile,
       total: chapters.length,
       status: DownloadTaskStatus.pending,
-      message: '排队等待下载...',
+      message: exportFile ? '排队等待下载...' : '排队等待离线缓存...',
     );
 
     _tasks.insert(0, task);
@@ -813,6 +816,17 @@ class DownloadService extends ChangeNotifier {
       );
 
       if (task.isCancelled) {
+        return;
+      }
+
+      // 仅离线章节缓存任务：章节已全部写入 offline_books，直接完成，不导出文件也不覆盖已有 EPUB 下载历史
+      if (!task.exportFile) {
+        task.status = DownloadTaskStatus.completed;
+        task.message = '离线缓存完成';
+        task.error = null;
+        task.errorKind = null;
+        task.failedChapterIds = [];
+        task.nextRetryAt = null;
         return;
       }
 

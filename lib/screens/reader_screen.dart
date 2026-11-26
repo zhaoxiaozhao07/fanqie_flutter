@@ -2577,6 +2577,9 @@ class _ReaderScreenState extends State<ReaderScreen>
           ScaffoldMessenger.of(context).showSnackBar(
             SnackBar(
               content: Text('${_chapterErrors[index] ?? '章节暂未就绪'}；当前阅读位置已保留'),
+              duration: const Duration(seconds: 5),
+              persist: false,
+              showCloseIcon: true,
               action: SnackBarAction(
                 label: '重试',
                 onPressed: () => _startFromChapter(
@@ -6491,6 +6494,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       book: widget.book,
       chapters: targetChapters,
       format: 'TXT',
+      exportFile: false,
     );
 
     ScaffoldMessenger.of(context).showSnackBar(

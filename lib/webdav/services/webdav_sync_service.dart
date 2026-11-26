@@ -526,6 +526,7 @@ class WebDavSyncService extends ChangeNotifier {
     var profilesAction = '未启用';
     final uploadedBooks = <String>[];
     final downloadedBooks = <String>[];
+    final deletedRemoteBooks = <String>[];
 
     try {
       await client.ensureAppDirectories();
@@ -598,12 +599,50 @@ class WebDavSyncService extends ChangeNotifier {
           index.offlineBooks,
         );
 
-        final allIds = <String>{...localBooks.keys, ...remoteBooks.keys}.toList()
-          ..sort();
+        // 强制上传覆盖云端时，额外扫描远端 books/ 目录以清理孤儿归档文件
+        final remoteDirectoryBookIds = <String>{};
+        if (mode == WebDavSyncMode.pushToRemote) {
+          try {
+            final entries = await client.listDirectory(
+              WebDavConfig.booksSubFolder,
+            );
+            for (final entry in entries) {
+              if (entry.isDirectory) continue;
+              final lower = entry.name.toLowerCase();
+              if (!lower.endsWith('.zip')) continue;
+              final id = entry.name.substring(0, entry.name.length - 4);
+              if (_bookIdPattern.hasMatch(id)) {
+                remoteDirectoryBookIds.add(id);
+              }
+            }
+          } catch (_) {
+            // 部分 WebDAV 服务端不支持列目录时，仍按索引执行清理
+          }
+        }
+
+        final allIds = <String>{
+          ...localBooks.keys,
+          ...remoteBooks.keys,
+          ...remoteDirectoryBookIds,
+        }.toList()..sort();
 
         for (final bookId in allIds) {
           final local = localBooks[bookId];
           final remote = remoteBooks[bookId];
+
+          // 上传覆盖云端模式：本地已不存在的云端离线书籍必须同步删除，彻底覆盖云端状态
+          if (mode == WebDavSyncMode.pushToRemote && local == null) {
+            final label = remote?.bookName ?? bookId;
+            _setProgress('正在清理云端已删除离线书籍《$label》...');
+            try {
+              await client.delete('${WebDavConfig.booksSubFolder}/$bookId.zip');
+              remoteBooks.remove(bookId);
+              deletedRemoteBooks.add(bookId);
+            } catch (e) {
+              warnings.add('清理云端离线书《$label》失败：$e');
+            }
+            continue;
+          }
 
           final shouldUpload = switch (mode) {
             WebDavSyncMode.pushToRemote =>
@@ -663,7 +702,7 @@ class WebDavSyncService extends ChangeNotifier {
         index = index.copyWith(offlineBooks: remoteBooks);
       }
 
-      // 5. 原子写回最新 sync_index.json（遇并发冲突重合并最新索引后重试）
+      // 5. 原子写回最新 sync_index.json（遇并发冲突重合并最新索引后重试；强制覆盖模式保留本地删除结果）
       index = index.copyWith(
         updatedAt: now,
         updatedByDeviceId: nextConfig.deviceId,
@@ -676,7 +715,7 @@ class WebDavSyncService extends ChangeNotifier {
         );
       } on WebDavPreconditionFailedException {
         final latest = await client.getJsonWithEtag(_syncIndexPath);
-        if (latest.data != null) {
+        if (latest.data != null && mode != WebDavSyncMode.pushToRemote) {
           final remoteLatest = WebDavSyncIndex.fromJson(latest.data!);
           final mergedBooks = <String, WebDavOfflineBookMeta>{
             ...remoteLatest.offlineBooks,
@@ -700,6 +739,7 @@ class WebDavSyncService extends ChangeNotifier {
         profilesAction: profilesAction,
         uploadedBookIds: uploadedBooks,
         downloadedBookIds: downloadedBooks,
+        deletedRemoteBookIds: deletedRemoteBooks,
         warnings: warnings,
         durationMs: sw.elapsedMilliseconds,
       );
@@ -723,6 +763,7 @@ class WebDavSyncService extends ChangeNotifier {
         profilesAction: profilesAction,
         uploadedBookIds: uploadedBooks,
         downloadedBookIds: downloadedBooks,
+        deletedRemoteBookIds: deletedRemoteBooks,
         warnings: warnings,
         durationMs: sw.elapsedMilliseconds,
       );
@@ -1316,7 +1357,7 @@ class WebDavSyncService extends ChangeNotifier {
       final localHash = _canonicalHash({'books': localBooks});
 
       if (mode == WebDavSyncMode.pushToRemote) {
-        if (localBooks.isEmpty) {
+        if (localBooks.isEmpty && index.immersiveProfilesHash.isEmpty) {
           return _ModuleSyncResult(
             action: '暂无档案',
             finalHash: localHash,
@@ -1331,7 +1372,9 @@ class WebDavSyncService extends ChangeNotifier {
           'books': localBooks,
         });
         return _ModuleSyncResult(
-          action: '已上传 ${localBooks.length} 本',
+          action: localBooks.isEmpty
+              ? '已清空云端档案'
+              : '已上传 ${localBooks.length} 本',
           finalHash: localHash,
           index: index.copyWith(
             immersiveProfilesHash: localHash,
@@ -1427,12 +1470,41 @@ class WebDavSyncService extends ChangeNotifier {
 
   // ==================== 3. 离线书籍扫描、比对、上传与下载 ====================
 
+  /// 收集当前仍保留在书架或已下载列表中的活跃书籍 ID；若本地尚未初始化这两项清单则返回 null
+  Future<Set<String>?> _collectActiveBookIds() async {
+    if (_notifyAppServices) {
+      await BookshelfService().flush();
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final hasShelf = prefs.containsKey('bookshelf_books_v1');
+    final hasDownloads = prefs.containsKey('download_history');
+    if (!hasShelf && !hasDownloads) return null;
+
+    final active = <String>{};
+    for (final key in ['bookshelf_books_v1', 'download_history']) {
+      final raw = prefs.getString(key);
+      if (raw == null || raw.isEmpty) continue;
+      try {
+        final list = jsonDecode(raw) as List;
+        for (final item in list.whereType<Map>()) {
+          final id = item['book_id']?.toString() ?? '';
+          if (id.isNotEmpty) active.add(id);
+        }
+      } catch (_) {}
+    }
+    return active;
+  }
+
   /// 扫描本地已离线书籍（仅限 `<documents>/offline_books/<bookId>/`，不包含在线临时缓存）
-  Future<Map<String, WebDavOfflineBookMeta>> scanLocalOfflineBooks() async {
+  /// 当 [activeOnly] 为 true 且本地存在书架/下载清单时，自动排除已从本地删除的残留缓存目录
+  Future<Map<String, WebDavOfflineBookMeta>> scanLocalOfflineBooks({
+    bool activeOnly = true,
+  }) async {
     final base = await _documents();
     final root = Directory(p.join(base.path, 'offline_books'));
     if (!await root.exists()) return {};
 
+    final activeIds = activeOnly ? await _collectActiveBookIds() : null;
     final metaById = await _collectBookMetadataLookup();
     final result = <String, WebDavOfflineBookMeta>{};
 
@@ -1440,6 +1512,7 @@ class WebDavSyncService extends ChangeNotifier {
       if (entity is! Directory) continue;
       final bookId = p.basename(entity.path);
       if (!_bookIdPattern.hasMatch(bookId)) continue;
+      if (activeIds != null && !activeIds.contains(bookId)) continue;
 
       final files = <File>[];
       await for (final item in entity.list(recursive: true, followLinks: false)) {
@@ -1663,6 +1736,61 @@ class WebDavSyncService extends ChangeNotifier {
     } finally {
       client.close();
     }
+  }
+
+  /// 单本从 WebDAV 云端彻底删除指定离线书籍归档与索引记录
+  Future<void> deleteRemoteOfflineBook(String bookId) async {
+    await initialize();
+    if (!_bookIdPattern.hasMatch(bookId)) {
+      throw const FormatException('书籍 ID 不合法');
+    }
+    if (!_config.hasCredentials) {
+      throw const WebDavException('请先填写并保存 WebDAV 账号配置');
+    }
+    final client = _clientFactory(_config);
+    try {
+      await client.delete('${WebDavConfig.booksSubFolder}/$bookId.zip');
+      for (var attempt = 0; attempt < 2; attempt++) {
+        final indexResp = await client.getJsonWithEtag(_syncIndexPath);
+        final rawIndex = indexResp.data;
+        if (rawIndex == null) return;
+        final index = WebDavSyncIndex.fromJson(rawIndex);
+        if (!index.offlineBooks.containsKey(bookId)) return;
+        final updatedBooks = Map<String, WebDavOfflineBookMeta>.from(
+          index.offlineBooks,
+        )..remove(bookId);
+        try {
+          await client.putJsonAtomic(
+            _syncIndexPath,
+            index
+                .copyWith(
+                  updatedAt: _clock().toUtc(),
+                  updatedByDeviceId: _config.deviceId,
+                  offlineBooks: updatedBooks,
+                )
+                .toJson(),
+            expectedEtag: indexResp.etag,
+          );
+          return;
+        } on WebDavPreconditionFailedException {
+          if (attempt == 1) rethrow;
+        }
+      }
+    } finally {
+      client.close();
+    }
+  }
+
+  /// 删除指定书籍的本地离线目录（仅清理 `<documents>/offline_books/<bookId>/`）
+  Future<bool> deleteLocalOfflineBook(String bookId) async {
+    if (!_bookIdPattern.hasMatch(bookId)) {
+      throw const FormatException('书籍 ID 不合法');
+    }
+    final base = await _documents();
+    final target = Directory(p.join(base.path, 'offline_books', bookId));
+    if (!await target.exists()) return false;
+    await target.delete(recursive: true);
+    return true;
   }
 
   /// 单本从 WebDAV 下载并恢复指定离线书籍

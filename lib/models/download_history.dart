@@ -30,10 +30,33 @@ class DownloadHistory {
     required this.fileSize,
   });
 
+  /// 结合文件路径、书籍标识与记录字段推断真实格式，修复历史遗留的格式误标
+  static String resolveFormat(
+    String? rawFormat, {
+    String filePath = '',
+    String bookId = '',
+  }) {
+    final lowerPath = filePath.trim().toLowerCase();
+    if (lowerPath.endsWith('.epub')) return 'EPUB';
+    if (lowerPath.endsWith('.txt')) return 'TXT';
+    final lowerId = bookId.trim().toLowerCase();
+    if (lowerId.startsWith('local_epub_')) return 'EPUB';
+    if (lowerId.startsWith('local_txt_')) return 'TXT';
+    final normalized = (rawFormat ?? '').trim().toUpperCase();
+    if (normalized.isNotEmpty) return normalized;
+    return 'TXT';
+  }
+
+  /// 供界面标签展示的规范化格式名称（EPUB / TXT）
+  String get displayFormat =>
+      resolveFormat(format, filePath: filePath, bookId: bookId);
+
   /// 从 JSON 创建对象
   factory DownloadHistory.fromJson(Map<String, dynamic> json) {
+    final bookId = json['book_id']?.toString() ?? '';
+    final filePath = json['file_path']?.toString() ?? '';
     return DownloadHistory(
-      bookId: json['book_id']?.toString() ?? '',
+      bookId: bookId,
       bookName: json['book_name']?.toString() ?? '未知书名',
       author: json['author']?.toString() ?? '未知作者',
       thumbUrl: json['thumb_url']?.toString(),
@@ -45,8 +68,12 @@ class DownloadHistory {
       downloadTime:
           DateTime.tryParse(json['download_time']?.toString() ?? '') ??
           DateTime.now(),
-      format: json['format']?.toString() ?? 'TXT',
-      filePath: json['file_path']?.toString() ?? '',
+      format: resolveFormat(
+        json['format']?.toString(),
+        filePath: filePath,
+        bookId: bookId,
+      ),
+      filePath: filePath,
       contentUri: json['content_uri']?.toString(),
       fileSize: json['file_size'] is int
           ? json['file_size']

@@ -13,18 +13,29 @@ void showReaderUndo(
   messenger.showSnackBar(
     SnackBar(
       content: Text(message),
-      duration: const Duration(seconds: 8),
+      duration: const Duration(seconds: 5),
+      persist: false,
+      showCloseIcon: true,
       action: SnackBarAction(
         label: '撤销',
         onPressed: () async {
+          messenger.hideCurrentSnackBar();
           try {
             for (final entry in entries.reversed) {
               await ReaderTrashCoordinator.restore(entry);
             }
-            messenger.showSnackBar(const SnackBar(content: Text('已撤销，原文位置保留')));
+            messenger.showSnackBar(
+              const SnackBar(
+                content: Text('已撤销，原文位置保留'),
+                duration: Duration(seconds: 3),
+              ),
+            );
           } catch (_) {
             messenger.showSnackBar(
-              const SnackBar(content: Text('存在后续修改或保存失败，未覆盖新记录；旧版本仍可在回收站查看')),
+              const SnackBar(
+                content: Text('存在后续修改或保存失败，未覆盖新记录；旧版本仍可在回收站查看'),
+                duration: Duration(seconds: 4),
+              ),
             );
           }
         },

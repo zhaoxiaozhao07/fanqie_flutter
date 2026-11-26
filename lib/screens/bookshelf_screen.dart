@@ -30,6 +30,7 @@ import '../widgets/reader_library_dialog.dart';
 import '../widgets/offline_library_search_dialog.dart';
 import '../widgets/reader_trash_dialog.dart';
 import '../widgets/reader_undo.dart';
+import '../webdav/services/webdav_sync_service.dart';
 import '../webdav/widgets/webdav_sync_sheet.dart';
 
 enum BookshelfSortType {
@@ -457,27 +458,56 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
   Future<void> _deleteSelected() async {
     if (_selectedBookIds.isEmpty) return;
 
+    final selectedIds = _selectedBookIds.toList();
     final isDownloadedTab = _currentSubTab == 1;
+    final downloadedIdSet = _downloadedBooks.map((d) => d.bookId).toSet();
+    final hasRelatedDownloads =
+        !isDownloadedTab && selectedIds.any(downloadedIdSet.contains);
+    var removeDownloadsToo = hasRelatedDownloads;
+
     final dialogTitle = isDownloadedTab ? '删除已下载书籍' : '移出书架';
     final dialogContent = isDownloadedTab
-        ? '确定要删除选中的 ${_selectedBookIds.length} 条已下载小说吗？'
-        : '确定将选中的 ${_selectedBookIds.length} 本书籍移出书架吗？';
+        ? '确定要删除选中的 ${selectedIds.length} 条已下载小说吗？未在书架中的离线缓存将一并清理。'
+        : '确定将选中的 ${selectedIds.length} 本书籍移出书架吗？';
 
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text(dialogTitle),
-        content: Text(dialogContent),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, false),
-            child: const Text('取消'),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text(dialogTitle),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(dialogContent),
+              if (hasRelatedDownloads) ...[
+                const SizedBox(height: 12),
+                CheckboxListTile(
+                  contentPadding: EdgeInsets.zero,
+                  dense: true,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  value: removeDownloadsToo,
+                  onChanged: (v) =>
+                      setDialogState(() => removeDownloadsToo = v ?? false),
+                  title: const Text(
+                    '同时移除下载记录与本地离线缓存',
+                    style: TextStyle(fontSize: 13),
+                  ),
+                ),
+              ],
+            ],
           ),
-          TextButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            child: const Text('删除', style: TextStyle(color: Colors.red)),
-          ),
-        ],
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('删除', style: TextStyle(color: Colors.red)),
+            ),
+          ],
+        ),
       ),
     );
 
@@ -485,13 +515,23 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
       ReaderTrashEntry? undo;
       try {
         if (isDownloadedTab) {
-          await _downloadHistoryService.deleteHistories(
-            _selectedBookIds.toList(),
-          );
+          await _downloadHistoryService.deleteHistories(selectedIds);
+          for (final id in selectedIds) {
+            if (!_bookshelfService.isInBookshelf(id)) {
+              await WebDavSyncService().deleteLocalOfflineBook(id);
+            }
+          }
         } else {
-          undo = await _bookshelfService.removeMultipleWithUndo(
-            _selectedBookIds.toList(),
-          );
+          undo = await _bookshelfService.removeMultipleWithUndo(selectedIds);
+          if (removeDownloadsToo) {
+            final toClean = selectedIds.where(downloadedIdSet.contains).toList();
+            if (toClean.isNotEmpty) {
+              await _downloadHistoryService.deleteHistories(toClean);
+              for (final id in toClean) {
+                await WebDavSyncService().deleteLocalOfflineBook(id);
+              }
+            }
+          }
         }
       } catch (_) {
         if (mounted) {
@@ -510,7 +550,11 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
 
       if (mounted) {
         if (undo != null) {
-          showReaderUndo(context, '已移出书架，原书、进度和笔记保留', [undo]);
+          showReaderUndo(
+            context,
+            removeDownloadsToo ? '已移出书架并清理下载记录' : '已移出书架，原书、进度和笔记保留',
+            [undo],
+          );
           return;
         }
         ScaffoldMessenger.of(context).showSnackBar(
@@ -1732,7 +1776,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
-                            download.format,
+                            download.displayFormat,
                             style: const TextStyle(
                               fontSize: 10,
                               color: AppTheme.primaryColor,
@@ -1912,7 +1956,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                               borderRadius: BorderRadius.circular(4),
                             ),
                             child: Text(
-                              download.format,
+                              download.displayFormat,
                               style: const TextStyle(
                                 fontSize: 9,
                                 color: Colors.white,

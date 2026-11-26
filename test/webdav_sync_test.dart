@@ -321,6 +321,24 @@ void main() {
       expect(find.text('WebDAV 云同步与备份'), findsOneWidget);
       expect(find.text('打开应用时自动同步'), findsOneWidget);
       expect(find.textContaining('FanQieReader'), findsNothing);
+
+      // 滚动设置列表到底部，验证按钮文案已改为“云端拉取恢复”且无“从云端拉取恢复”
+      final settingsScrollable = find
+          .byWidgetPredicate(
+            (w) => w is Scrollable && w.axisDirection == AxisDirection.down,
+          )
+          .first;
+      await tester.scrollUntilVisible(
+        find.byKey(const ValueKey('webdav-pull-btn')),
+        200,
+        scrollable: settingsScrollable,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('云端拉取恢复'), findsOneWidget);
+      expect(find.text('从云端拉取恢复'), findsNothing);
+      final pushBox = tester.getSize(find.byKey(const ValueKey('webdav-push-btn')));
+      final pullBox = tester.getSize(find.byKey(const ValueKey('webdav-pull-btn')));
+      expect((pushBox.height - pullBox.height).abs(), lessThan(2.0));
     });
   });
 
@@ -1053,6 +1071,119 @@ void main() {
               .map((e) => (e as Map)['book_id'])
               .toSet();
       expect(shelfIds, containsAll(['local_book_A', 'concurrent_book_B']));
+    });
+
+    test('W09: 本地书架删除书籍后，上传覆盖云端同步清理云端离线书与孤儿归档，并支持单本删除云端', () async {
+      SharedPreferences.setMockInitialValues({});
+      final dir = Directory(p.join(tempRoot.path, 'push_delete_dev'))
+        ..createSync();
+      final secret = MemoryImmersiveSecretStore();
+
+      // 本地原本有 2 本离线书（均在书架中）
+      for (final entry in [
+        ('book_keep', '保留书籍'),
+        ('book_remove', '待删书籍'),
+      ]) {
+        final bDir = Directory(p.join(dir.path, 'offline_books', entry.$1))
+          ..createSync(recursive: true);
+        File(p.join(bDir.path, 'ch_01.txt')).writeAsStringSync('${entry.$2}正文');
+      }
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        'bookshelf_books_v1',
+        jsonEncode([
+          BookshelfBook(
+            bookId: 'book_keep',
+            bookName: '保留书籍',
+            author: '作者甲',
+          ).toJson(),
+          BookshelfBook(
+            bookId: 'book_remove',
+            bookName: '待删书籍',
+            author: '作者乙',
+          ).toJson(),
+        ]),
+      );
+
+      final svc = WebDavSyncService.forTesting(
+        documents: () async => dir,
+        secretStore: secret,
+        immersiveConfigService: ImmersiveConfigService(
+          documents: () async => dir,
+          secretStore: secret,
+        ),
+        normalTtsBridge: _FakeNormalTtsBridge(),
+      );
+      await svc.saveConfig(
+        WebDavConfig(
+          enabled: true,
+          serverUrl: server.baseUrl,
+          username: 'tester@example.com',
+          password: 'SecretPassword@123',
+          syncOfflineBooks: true,
+        ),
+      );
+
+      // 首次同步：2 本均上传至云端
+      final r1 = await svc.syncNow();
+      expect(r1.success, isTrue, reason: r1.message);
+      expect(r1.uploadedBookIds, containsAll(['book_keep', 'book_remove']));
+      expect(server.files.containsKey('/FanQieReader/books/book_keep.zip'), isTrue);
+      expect(server.files.containsKey('/FanQieReader/books/book_remove.zip'), isTrue);
+
+      // 额外在远端注入一个孤儿 zip（不在 sync_index.json 中）
+      server.putFileDirect('/FanQieReader/books/orphan_book_01.zip', [1, 2, 3]);
+
+      // 模拟用户在本地书架移出了 book_remove（磁盘 offline_books/book_remove 目录尚未删除，保留以支持回收站）
+      await prefs.setString(
+        'bookshelf_books_v1',
+        jsonEncode([
+          BookshelfBook(
+            bookId: 'book_keep',
+            bookName: '保留书籍',
+            author: '作者甲',
+          ).toJson(),
+        ]),
+      );
+
+      // scanLocalOfflineBooks 自动过滤已从本地书架与下载列表删除的残留目录
+      final localAfterDelete = await svc.scanLocalOfflineBooks();
+      expect(localAfterDelete.keys, ['book_keep']);
+
+      // 执行“上传覆盖云端”
+      final rPush = await svc.syncNow(mode: WebDavSyncMode.pushToRemote);
+      expect(rPush.success, isTrue, reason: rPush.message);
+      expect(
+        rPush.deletedRemoteBookIds,
+        containsAll(['book_remove', 'orphan_book_01']),
+      );
+      expect(rPush.conciseSummary, contains('清理云端离线书'));
+
+      // 校验云端 zip 与 sync_index.json 均已彻底删除 book_remove 和孤儿 zip
+      expect(server.files.containsKey('/FanQieReader/books/book_remove.zip'), isFalse);
+      expect(server.files.containsKey('/FanQieReader/books/orphan_book_01.zip'), isFalse);
+      expect(server.files.containsKey('/FanQieReader/books/book_keep.zip'), isTrue);
+
+      final indexAfter = WebDavSyncIndex.fromJson(
+        jsonDecode(utf8.decode(server.files['/FanQieReader/sync_index.json']!))
+            as Map<String, dynamic>,
+      );
+      expect(indexAfter.offlineBooks.keys, ['book_keep']);
+
+      // 离线书籍管理列表中不再出现已删除的 book_remove
+      final itemsAfterPush = await svc.listOfflineBooksStatus();
+      expect(itemsAfterPush.map((e) => e.bookId).toList(), ['book_keep']);
+
+      // 单本删除云端 + 删除本地离线缓存
+      await svc.deleteRemoteOfflineBook('book_keep');
+      expect(server.files.containsKey('/FanQieReader/books/book_keep.zip'), isFalse);
+      final itemsLocalOnly = await svc.listOfflineBooksStatus();
+      expect(itemsLocalOnly.single.status, WebDavOfflineBookStatus.localOnly);
+
+      expect(await svc.deleteLocalOfflineBook('book_keep'), isTrue);
+      final itemsEmpty = await svc.listOfflineBooksStatus();
+      expect(itemsEmpty, isEmpty);
     });
   });
 }

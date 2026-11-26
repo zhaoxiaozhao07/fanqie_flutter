@@ -232,11 +232,35 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
     final saved = await _saveDraft(silent: true);
     if (!saved || !mounted) return;
 
+    if (mode == WebDavSyncMode.pushToRemote) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('确认上传覆盖云端？'),
+          content: const Text(
+            '将使用当前设备的 AI 配置、阅读历史、书架信息与本地离线书籍覆盖 WebDAV 云端，'
+            '云端已不在本地的离线书籍将被同步删除。确定继续吗？',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, true),
+              child: const Text('确认覆盖'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+    }
+
     if (mode == WebDavSyncMode.pullFromRemote) {
       final confirmed = await showDialog<bool>(
         context: context,
         builder: (ctx) => AlertDialog(
-          title: const Text('确认从云端拉取覆盖？'),
+          title: const Text('确认云端拉取恢复？'),
           content: const Text(
             '将使用 WebDAV 云端备份恢复已勾选的 AI 配置、阅读历史与书籍信息，'
             '并下载云端离线书籍到本地。确定继续吗？',
@@ -248,7 +272,7 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
             ),
             FilledButton(
               onPressed: () => Navigator.pop(ctx, true),
-              child: const Text('确认拉取'),
+              child: const Text('确认恢复'),
             ),
           ],
         ),
@@ -314,6 +338,82 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
       await _refreshOfflineBooks();
     } catch (e) {
       _setNotice('下载《${item.bookName}》失败：$e', isError: true);
+    } finally {
+      if (mounted) setState(() => _activeBookId = null);
+    }
+  }
+
+  Future<void> _deleteSingleBook(WebDavOfflineBookItem item) async {
+    final hasLocal = item.localMeta != null;
+    final hasRemote = item.remoteMeta != null;
+    if (!hasLocal && !hasRemote) return;
+
+    final action = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('删除离线书籍《${item.bookName}》'),
+        content: Text(
+          hasLocal && hasRemote
+              ? '请选择要删除的离线副本。删除本地离线缓存不会影响书架与阅读进度。'
+              : hasRemote
+              ? '确定从 WebDAV 云端彻底删除《${item.bookName}》的离线备份吗？'
+              : '确定删除本地离线缓存《${item.bookName}》吗？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('取消'),
+          ),
+          if (hasRemote)
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'remote'),
+              child: Text(
+                hasLocal ? '仅删云端' : '删除云端',
+                style: const TextStyle(color: Colors.red),
+              ),
+            ),
+          if (hasLocal && !hasRemote)
+            TextButton(
+              onPressed: () => Navigator.pop(ctx, 'local'),
+              child: const Text('删除本地', style: TextStyle(color: Colors.red)),
+            ),
+          if (hasLocal && hasRemote)
+            FilledButton(
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              onPressed: () => Navigator.pop(ctx, 'both'),
+              child: const Text('删除本地与云端'),
+            ),
+        ],
+      ),
+    );
+    if (action == null || !mounted) return;
+
+    if (action == 'remote' || action == 'both') {
+      final saved = await _saveDraft(silent: true);
+      if (!saved || !mounted) return;
+    }
+
+    setState(() {
+      _activeBookId = item.bookId;
+      _notice = '正在删除离线书籍《${item.bookName}》...';
+      _noticeIsError = false;
+    });
+    try {
+      if (action == 'remote' || action == 'both') {
+        await _service.deleteRemoteOfflineBook(item.bookId);
+      }
+      if (action == 'local' || action == 'both') {
+        await _service.deleteLocalOfflineBook(item.bookId);
+      }
+      final doneMsg = switch (action) {
+        'remote' => '已从云端删除离线书籍《${item.bookName}》',
+        'local' => '已删除本地离线缓存《${item.bookName}》',
+        _ => '已删除本地与云端离线书籍《${item.bookName}》',
+      };
+      _setNotice(doneMsg);
+      await _refreshOfflineBooks();
+    } catch (e) {
+      _setNotice('删除《${item.bookName}》失败：$e', isError: true);
     } finally {
       if (mounted) setState(() => _activeBookId = null);
     }
@@ -638,8 +738,19 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
             Expanded(
               child: OutlinedButton.icon(
                 key: const ValueKey('webdav-push-btn'),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 10,
+                  ),
+                ),
                 icon: const Icon(Icons.cloud_upload_outlined, size: 18),
-                label: const Text('上传覆盖云端'),
+                label: const Text(
+                  '上传覆盖云端',
+                  maxLines: 1,
+                  softWrap: false,
+                  overflow: TextOverflow.ellipsis,
+                ),
                 onPressed: syncing || _testing
                     ? null
                     : () => _triggerSync(WebDavSyncMode.pushToRemote),
@@ -649,8 +760,19 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
             Expanded(
               child: OutlinedButton.icon(
                 key: const ValueKey('webdav-pull-btn'),
+                style: OutlinedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 10,
+                  ),
+                ),
                 icon: const Icon(Icons.cloud_download_outlined, size: 18),
-                label: const Text('从云端拉取恢复'),
+                label: const Text(
+                  '云端拉取恢复',
+                  maxLines: 1,
+                  softWrap: false,
+                  overflow: TextOverflow.ellipsis,
+                ),
                 onPressed: syncing || _testing
                     ? null
                     : () => _triggerSync(WebDavSyncMode.pullFromRemote),
@@ -794,10 +916,20 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
                               )
                             else
                               Wrap(
-                                spacing: 6,
+                                spacing: 4,
+                                crossAxisAlignment: WrapCrossAlignment.center,
                                 children: [
                                   if (item.localMeta != null)
                                     OutlinedButton(
+                                      style: OutlinedButton.styleFrom(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 6,
+                                        ),
+                                        minimumSize: const Size(0, 32),
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                      ),
                                       onPressed: syncing
                                           ? null
                                           : () => _uploadSingleBook(item),
@@ -805,11 +937,38 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
                                     ),
                                   if (item.remoteMeta != null)
                                     FilledButton.tonal(
+                                      style: FilledButton.styleFrom(
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 10,
+                                          vertical: 6,
+                                        ),
+                                        minimumSize: const Size(0, 32),
+                                        tapTargetSize:
+                                            MaterialTapTargetSize.shrinkWrap,
+                                      ),
                                       onPressed: syncing
                                           ? null
                                           : () => _downloadSingleBook(item),
                                       child: const Text('下载'),
                                     ),
+                                  IconButton(
+                                    key: ValueKey('webdav-delete-${item.bookId}'),
+                                    tooltip: '删除离线书籍',
+                                    visualDensity: VisualDensity.compact,
+                                    constraints: const BoxConstraints(
+                                      minWidth: 32,
+                                      minHeight: 32,
+                                    ),
+                                    padding: EdgeInsets.zero,
+                                    icon: const Icon(
+                                      Icons.delete_outline,
+                                      size: 20,
+                                      color: Colors.redAccent,
+                                    ),
+                                    onPressed: syncing
+                                        ? null
+                                        : () => _deleteSingleBook(item),
+                                  ),
                                 ],
                               ),
                           ],

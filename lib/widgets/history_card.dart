@@ -145,7 +145,7 @@ class HistoryCard extends StatelessWidget {
           runSpacing: 4,
           children: [
             // 格式标签
-            _buildTag(history.format, AppTheme.accentColor),
+            _buildTag(history.displayFormat, AppTheme.accentColor),
             // 分类标签
             if (history.category != null && history.category!.isNotEmpty)
               _buildTag(history.category!, AppTheme.tagCategory),

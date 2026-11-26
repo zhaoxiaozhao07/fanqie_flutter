@@ -64,7 +64,7 @@ class ActiveDownloadBar extends StatelessWidget {
                       const SizedBox(width: 10),
                       Expanded(
                         child: Text(
-                          '后台下载中：《${currentTask.book.bookName}》 (${currentTask.format})',
+                          '后台下载中：《${currentTask.book.bookName}》 (${currentTask.displayFormat})',
                           style: const TextStyle(
                             fontSize: 13,
                             fontWeight: FontWeight.bold,

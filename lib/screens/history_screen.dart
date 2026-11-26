@@ -723,7 +723,7 @@ class HistoryScreenState extends State<HistoryScreen>
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
-                            task.format,
+                            task.displayFormat,
                             style: const TextStyle(
                               fontSize: 10,
                               fontWeight: FontWeight.bold,

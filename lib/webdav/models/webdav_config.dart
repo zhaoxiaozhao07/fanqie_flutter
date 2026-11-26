@@ -444,6 +444,7 @@ class WebDavSyncReport {
   final String profilesAction;
   final List<String> uploadedBookIds;
   final List<String> downloadedBookIds;
+  final List<String> deletedRemoteBookIds;
   final List<String> warnings;
   final int durationMs;
 
@@ -455,6 +456,7 @@ class WebDavSyncReport {
     this.profilesAction = '未启用',
     this.uploadedBookIds = const [],
     this.downloadedBookIds = const [],
+    this.deletedRemoteBookIds = const [],
     this.warnings = const [],
     this.durationMs = 0,
   });
@@ -472,6 +474,9 @@ class WebDavSyncReport {
     }
     if (downloadedBookIds.isNotEmpty) {
       parts.add('下载离线书 ${downloadedBookIds.length} 本');
+    }
+    if (deletedRemoteBookIds.isNotEmpty) {
+      parts.add('清理云端离线书 ${deletedRemoteBookIds.length} 本');
     }
     if (parts.isEmpty) return message;
     return parts.join(' · ');

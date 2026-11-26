@@ -16,6 +16,8 @@ class DownloadTask {
   final Book book;
   final List<Chapter> chapters;
   final String format;
+  /// 是否在章节下载完成后导出成外部 TXT/EPUB 文件并写入下载历史（阅读器内离线缓存为 false）
+  final bool exportFile;
   DownloadTaskStatus status;
   int current, total;
   String message;
@@ -32,6 +34,7 @@ class DownloadTask {
     required this.book,
     required List<Chapter> chapters,
     required this.format,
+    this.exportFile = true,
     this.status = DownloadTaskStatus.pending,
     this.current = 0,
     required this.total,
@@ -45,6 +48,9 @@ class DownloadTask {
     this.failedChapterIds = const [],
   }) : chapters = List.unmodifiable(chapters),
        startTime = startTime ?? DateTime.now();
+
+  /// 用于界面标签展示的任务类型（导出任务显示 EPUB/TXT，纯离线缓存任务显示 离线）
+  String get displayFormat => exportFile ? format : '离线';
 
   double get progress => total > 0 ? (current / total).clamp(0.0, 1.0) : 0.0;
   bool get isActive =>
@@ -75,6 +81,7 @@ class DownloadTask {
         },
     ],
     'format': format,
+    if (!exportFile) 'export_file': false,
     'status': status.name,
     'current': current,
     'total': total,
@@ -126,6 +133,7 @@ class DownloadTask {
       book: book,
       chapters: chapters,
       format: format as String,
+      exportFile: json['export_file'] != false,
       status: status,
       total: chapters.length,
       current: (json['current'] is int ? json['current'] as int : 0).clamp(

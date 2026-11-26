@@ -275,7 +275,7 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
                             borderRadius: BorderRadius.circular(4),
                           ),
                           child: Text(
-                            task.format,
+                            task.displayFormat,
                             style: const TextStyle(
                               fontSize: 10,
                               fontWeight: FontWeight.bold,
@@ -408,7 +408,9 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  isSuccess ? '下载成功 (${task.format})' : task.message,
+                  isSuccess
+                      ? (task.exportFile ? '下载成功 (${task.format})' : '离线缓存完成')
+                      : task.message,
                   maxLines: 3,
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
