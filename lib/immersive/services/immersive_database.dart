@@ -185,14 +185,31 @@ class SqliteImmersiveStateStore implements ImmersiveStateStore {
     if (_db != null) return;
     final dir = Directory(p.dirname(databasePath));
     await dir.create(recursive: true);
+    Future<void> configure(Database db) async {
+      await db.execute('PRAGMA foreign_keys = ON');
+      await db.rawQuery('PRAGMA journal_mode = WAL');
+      await db.rawQuery('PRAGMA synchronous = NORMAL');
+    }
+
+    if (Platform.isWindows) {
+      // Windows 端通过原生 ReaderSqliteBridge（winsqlite3.dll）承载 com.tekartik.sqflite 通道
+      _db = await databaseFactorySqflitePlugin.openDatabase(
+        databasePath,
+        options: OpenDatabaseOptions(
+          version: 1,
+          onConfigure: configure,
+          onCreate: (db, version) async {
+            await _createSchema(db);
+          },
+        ),
+      );
+      return;
+    }
+
     _db = await openDatabase(
       databasePath,
       version: 1,
-      onConfigure: (db) async {
-        await db.execute('PRAGMA foreign_keys = ON');
-        await db.rawQuery('PRAGMA journal_mode = WAL');
-        await db.rawQuery('PRAGMA synchronous = NORMAL');
-      },
+      onConfigure: configure,
       onCreate: (db, version) async {
         await _createSchema(db);
       },

@@ -1,0 +1,419 @@
+import 'dart:io';
+
+import 'package:fanqie_flutter/immersive/models/immersive_config.dart';
+import 'package:fanqie_flutter/immersive/services/immersive_config_service.dart';
+import 'package:fanqie_flutter/immersive/services/immersive_database.dart';
+import 'package:fanqie_flutter/immersive/services/immersive_playback_coordinator.dart';
+import 'package:fanqie_flutter/immersive/services/immersive_preset_config.dart';
+import 'package:fanqie_flutter/immersive/services/text_model_adapter.dart';
+import 'package:fanqie_flutter/immersive/services/tts_provider_adapter.dart';
+import 'package:fanqie_flutter/immersive/widgets/immersive_player_panel.dart';
+import 'package:fanqie_flutter/models/book.dart';
+import 'package:fanqie_flutter/models/chapter.dart';
+import 'package:fanqie_flutter/models/reader_settings.dart';
+import 'package:fanqie_flutter/screens/reader_screen.dart';
+import 'package:fanqie_flutter/services/app_storage.dart';
+import 'package:fanqie_flutter/services/reader_display_text.dart';
+import 'package:fanqie_flutter/services/reader_platform.dart';
+import 'package:fanqie_flutter/services/reader_route_observer.dart';
+import 'package:fanqie_flutter/services/reader_settings_repository.dart';
+import 'package:fanqie_flutter/services/tts_service.dart';
+import 'package:fanqie_flutter/webdav/widgets/webdav_sync_sheet.dart';
+import 'package:fanqie_flutter/widgets/desktop_shortcuts.dart';
+import 'package:fanqie_flutter/widgets/reader_page_view.dart';
+import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:http/http.dart' as http;
+import 'package:http/testing.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+import 'helpers/tts_audio.dart';
+
+void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  late Directory root;
+  late TtsService tts;
+  setUpAll(ReaderDisplayText.ensureLoaded);
+
+  setUp(() async {
+    SharedPreferences.setMockInitialValues({});
+    await SharedPreferences.getInstance();
+    root = await Directory.systemTemp.createTemp('windows-tts-widget-');
+    AppStorage.documentsOverride = () async => root;
+    debugDefaultTargetPlatformOverride = TargetPlatform.windows;
+    ReaderPlatform.resetForTesting();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(
+          ReaderPlatform.channel,
+          (call) async => call.method == 'getReaderCapabilities'
+              ? {
+                  'tts': true,
+                  'nativeSpeech': true,
+                  'secureStorage': true,
+                  'mediaPlayback': true,
+                  'audioOutput': true,
+                  'networkType': true,
+                  'textDecoder': true,
+                  'fileExport': true,
+                  'fileImport': true,
+                }
+              : null,
+        );
+    await ReaderPlatform.initialize();
+    tts = TtsService.forTesting(
+      invoke: (method, args) async {
+        if (method == 'readTtsSecret') return '';
+        if (method == 'getNativeTtsVoices') return [];
+        return true;
+      },
+      client: MockClient((_) async => http.Response.bytes(silentTtsWav(), 200)),
+      temporary: () async => root,
+    );
+  });
+
+  tearDown(() async {
+    await tts.stop();
+    tts.dispose();
+    await ReaderSettingsRepository.flush();
+    AppStorage.documentsOverride = null;
+    ReaderPlatform.resetForTesting();
+    debugDefaultTargetPlatformOverride = null;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(ReaderPlatform.channel, null);
+    await root.delete(recursive: true);
+  });
+
+  void windowsTest(String name, WidgetTesterCallback body) {
+    testWidgets(name, (tester) async {
+      try {
+        await body(tester);
+      } finally {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+        tester.view.reset();
+        debugDefaultTargetPlatformOverride = null;
+      }
+    });
+  }
+
+  windowsTest(
+    'Windows 阅读页暴露沉浸式入口、预留固定底栏高度并以居中弹窗展示设置与角色档案',
+    (tester) async {
+      tester.view.physicalSize = const Size(1200, 820);
+      tester.view.devicePixelRatio = 1;
+      const bookId = 'local_win_immersive_widget';
+      final book = Book(bookId: bookId, bookName: 'Windows 沉浸式测试', author: '测试');
+      final chapters = [
+        Chapter(
+          itemId: 'ch_win_1',
+          title: '第一章 雨夜客栈',
+          content: '窗外下着大雨。\n\n“有人吗？”林晚轻声问道。\n\n掌柜抬头望去，微微笑了笑。',
+        ),
+      ];
+      final cfgFile = File('${root.path}/immersive_config.json');
+      final cfgSvc = ImmersiveConfigService(
+        documents: () async => root,
+        secretStore: MemoryImmersiveSecretStore(),
+      );
+      final store = InMemoryImmersiveStateStore();
+      final wavBytes = silentTtsWav();
+      final immersiveCalls = <(String, Map<String, Object?>?)>[];
+      final coord = ImmersivePlaybackCoordinator.forTesting(
+        configService: cfgSvc,
+        stateStore: store,
+        textAdapter: _WinFakeTextAdapter(),
+        ttsAdapter: _WinFakeTtsAdapter(wavBytes),
+        audioCacheDir: '${root.path}/imm_audio',
+        tempDir: '${root.path}/imm_tmp',
+        platformAudioProbe: (_, fallback) async =>
+            (valid: true, durationMs: fallback),
+        invoke: (method, args) async {
+          immersiveCalls.add((method, args));
+          return true;
+        },
+      );
+      await tester.runAsync(() async {
+        final saveRes = await cfgSvc.saveConfig(
+          ImmersivePresetConfig.createConfiguredDefault(
+            textApiKey: 'sk-synthetic-win-text',
+            ttsApiKey: 'sk-synthetic-win-tts',
+            featureEnabled: true,
+          ).copyWith(
+            prefetch: const PrefetchConfig(
+              startupBufferSeconds: 0.2,
+              startupWaitAfterFirstReadyMs: 100,
+              resumeBufferSeconds: 0.2,
+              lowWaterSeconds: 5,
+              targetBufferSeconds: 10,
+              highWaterSeconds: 20,
+              maxJobsBeyondFirstGap: 2,
+            ),
+            jobs: const JobsConfig(
+              leaseSeconds: 30,
+              heartbeatSeconds: 10,
+              pollIntervalMs: 50,
+              cancelUnneededRequestsOnSeek: true,
+            ),
+          ),
+          configFile: cfgFile,
+        );
+        expect(saveRes.issues, isEmpty);
+        await coord.loadAndValidateConfig(configFile: cfgFile);
+      });
+
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorObservers: [readerRouteObserver],
+          builder: (_, child) => DesktopShortcuts(child: child!),
+          home: ReaderScreen(
+            book: book,
+            chapters: chapters,
+            ttsService: tts,
+            immersiveService: coord,
+            resumeSavedPosition: false,
+            bookDocuments: () async => root,
+            initialSettings: const ReaderSettingsRecord(
+              ReaderSettings(
+                pageMode: true,
+                pageAnimation: 'none',
+                commentBubbles: false,
+                showHeader: false,
+                showStatus: false,
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(ReaderPlatform.isWindows, isTrue);
+      expect(find.byKey(const ValueKey('immersive-listen-button')), findsOneWidget);
+      final oldHeight = tester.getSize(find.byType(ReaderPageView)).height;
+
+      await tester.tap(find.byTooltip('阅读操作'));
+      await tester.pumpAndSettle();
+      expect(find.text('沉浸式多角色听书'), findsOneWidget);
+      expect(find.text('沉浸式听书设置'), findsOneWidget);
+      expect(find.text('本书角色与音色'), findsOneWidget);
+
+      await tester.tap(find.text('沉浸式听书设置'));
+      await tester.pump();
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(find.byKey(const ValueKey('desktop-reader-dialog')), findsOneWidget);
+      expect(find.byType(BottomSheet), findsNothing);
+      expect(find.text('沉浸式多角色听书设置'), findsOneWidget);
+      await tester.tap(find.byIcon(Icons.close).first);
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 250));
+
+      await tester.runAsync(() async {
+        await coord.startImmersivePlayback(
+          book: book,
+          chapters: chapters,
+          chapterIndex: 0,
+        );
+        for (var i = 0; i < 60 && !coord.isPlaying; i++) {
+          await Future<void>.delayed(const Duration(milliseconds: 30));
+        }
+      });
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 50));
+
+      expect(coord.isPlaying, isTrue);
+      expect(find.byKey(const ValueKey('immersive-player-panel')), findsOneWidget);
+      expect(
+        tester.getSize(find.byType(ReaderPageView)).height,
+        oldHeight - ImmersivePlayerPanel.desktopHeight,
+      );
+      expect(
+        immersiveCalls.any((c) => c.$1 == 'playAudioFile'),
+        isTrue,
+      );
+
+      await tester.tap(find.byTooltip('本书角色与音色'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byKey(const ValueKey('desktop-reader-dialog')), findsOneWidget);
+      expect(find.byType(BottomSheet), findsNothing);
+      await tester.tap(
+        find.descendant(
+          of: find.byKey(const ValueKey('desktop-reader-dialog')),
+          matching: find.byIcon(Icons.close),
+        ),
+      );
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      await tester.runAsync(() => coord.stop());
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 100));
+      expect(coord.isActive, isFalse);
+      expect(find.byKey(const ValueKey('immersive-player-panel')), findsNothing);
+      expect(tester.getSize(find.byType(ReaderPageView)).height, oldHeight);
+      expect(tester.takeException(), isNull);
+
+      coord.dispose();
+    },
+  );
+
+  windowsTest('Windows 端 WebDAV 同步界面以居中桌面弹窗呈现', (tester) async {
+    tester.view.physicalSize = const Size(1200, 820);
+    tester.view.devicePixelRatio = 1;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: Builder(
+            builder: (context) => TextButton(
+              onPressed: () => showWebDavSyncSheet(context),
+              child: const Text('打开WebDAV'),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开WebDAV'));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 250));
+    expect(find.byKey(const ValueKey('desktop-reader-dialog')), findsOneWidget);
+    expect(find.byType(BottomSheet), findsNothing);
+    expect(tester.takeException(), isNull);
+  });
+}
+
+class _WinFakeTextAdapter implements TextModelAdapter {
+  @override
+  void cancelAll() {}
+
+  @override
+  Future<StructuredModelResponse> analyzeChunk({
+    required TextAnalysisConfig config,
+    required String apiKey,
+    required String systemMessage,
+    required String userMessage,
+    bool Function()? isCancelled,
+  }) async {
+    final targetSection = userMessage
+        .split('[TARGET_UNITS')
+        .last
+        .split('[/TARGET_UNITS]')
+        .first;
+    final ids = RegExp(r'^(u_[^\s:]+):', multiLine: true)
+        .allMatches(targetSection)
+        .map((m) => m.group(1)!)
+        .toList();
+    return StructuredModelResponse(
+      data: {
+        'assignments': [
+          for (var i = 0; i < ids.length; i++)
+            {
+              'source_unit_ids': [ids[i]],
+              'kind': i == 1 ? 'dialogue' : 'narration',
+              'speaker_ref': i == 1 ? 'local:new_1' : 'narrator',
+              'evidence_unit_ids': [ids[i]],
+              'evidence_type': 'explicit_attribution',
+            },
+        ],
+        'new_character_proposals': [
+          if (ids.length > 1)
+            {
+              'local_ref': 'local:new_1',
+              'display_name': '林晚',
+              'gender': 'female',
+              'suggested_voice_profile_id': 'vp_oneapi_DeepSeek_female',
+              'evidence_unit_ids': [ids[1]],
+            },
+        ],
+        'alias_evidence': const <Map<String, dynamic>>[],
+        'merge_proposals': const <Map<String, dynamic>>[],
+        'chapter_summary': '雨夜客栈初遇',
+      },
+      latencyMs: 5,
+      schemaVersion: ImmersiveNativeSchemas.chunkAnalysisVersion,
+    );
+  }
+
+  @override
+  Future<StructuredModelResponse> recheckIdentity({
+    required TextAnalysisConfig config,
+    required String apiKey,
+    required String systemMessage,
+    required String userMessage,
+    bool Function()? isCancelled,
+  }) async => const StructuredModelResponse(
+    data: {
+      'decision': 'unresolved',
+      'resolved_character_id': null,
+      'suggested_name': null,
+      'gender': 'unknown',
+      'suggested_voice_profile_id': null,
+      'evidence_unit_ids': <String>[],
+      'reason': 'test',
+    },
+    latencyMs: 5,
+    schemaVersion: ImmersiveNativeSchemas.identityRecheckVersion,
+  );
+
+  @override
+  Future<StructuredModelResponse> updateSummary({
+    required TextAnalysisConfig config,
+    required String apiKey,
+    required String systemMessage,
+    required String userMessage,
+    bool Function()? isCancelled,
+  }) async => const StructuredModelResponse(
+    data: {'chapter_summary': '摘要', 'active_character_ids': <String>[]},
+    latencyMs: 5,
+    schemaVersion: ImmersiveNativeSchemas.summaryUpdateVersion,
+  );
+
+  @override
+  Future<AnalysisProviderTestResult> testProvider({
+    required TextAnalysisConfig config,
+    required String apiKey,
+  }) async => const AnalysisProviderTestResult(
+    success: true,
+    message: 'ok',
+    latencyMs: 1,
+    modeUsed: 'mock',
+  );
+}
+
+class _WinFakeTtsAdapter implements TtsProviderAdapter {
+  final Uint8List wavBytes;
+  _WinFakeTtsAdapter(this.wavBytes);
+
+  @override
+  void cancelAll() {}
+
+  @override
+  Future<SynthesizedAudioPayload> synthesize({
+    required RenderSpec spec,
+    required String apiKey,
+    required int timeoutMs,
+    bool Function()? isCancelled,
+  }) async => SynthesizedAudioPayload(
+    bytes: wavBytes,
+    detectedFormat: 'wav',
+    durationMs: 300,
+    latencyMs: 5,
+  );
+
+  @override
+  Future<VoiceProfileTestResult> testVoiceProfile({
+    required VoiceProfileResolution resolution,
+    required String apiKey,
+    String sampleText = '',
+  }) async => VoiceProfileTestResult(
+    success: true,
+    message: 'ok',
+    audioFormat: 'wav',
+    durationMs: 300,
+    byteLength: wavBytes.length,
+    latencyMs: 5,
+    audioBytes: wavBytes,
+  );
+}

@@ -12,6 +12,7 @@ add_executable(${BINARY_NAME} WIN32
   "reader_file_exporter.cpp"
   "reader_platform_bridge.cpp"
   "reader_playback.cpp"
+  "reader_sqlite_bridge.cpp"
   "reader_text_decoder.cpp"
   "reader_window_state.cpp"
   "utils.cpp"
@@ -44,9 +45,13 @@ target_compile_definitions(${BINARY_NAME} PRIVATE "WIN32_LEAN_AND_MEAN")
 # Add dependency libraries and include directories. Add any application-specific
 # dependencies here.
 target_link_libraries(${BINARY_NAME} PRIVATE flutter flutter_wrapper_app)
+target_link_libraries(${BINARY_NAME} PRIVATE "bcrypt.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "crypt32.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "dwmapi.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "iphlpapi.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "mfplat.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "mfreadwrite.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "mfuuid.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "ole32.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "oleaut32.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "powrprof.lib")
@@ -55,6 +60,7 @@ target_link_libraries(${BINARY_NAME} PRIVATE "shell32.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "shlwapi.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "uuid.lib")
 target_link_libraries(${BINARY_NAME} PRIVATE "winmm.lib")
+target_link_libraries(${BINARY_NAME} PRIVATE "winsqlite3.lib")
 target_include_directories(${BINARY_NAME} PRIVATE "${CMAKE_SOURCE_DIR}")
 
 # Run the Flutter tool portions of the build. This must not be removed.

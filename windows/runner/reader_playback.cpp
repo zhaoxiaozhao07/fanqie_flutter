@@ -1,8 +1,15 @@
 #include "reader_playback.h"
 
 #include <ShlObj.h>
+#include <audioclient.h>
+#include <bcrypt.h>
+#include <mfapi.h>
+#include <mfidl.h>
+#include <mfreadwrite.h>
 #include <mmsystem.h>
+#include <oleauto.h>
 #include <sapi.h>
+#include <shlwapi.h>
 #include <wincrypt.h>
 #include <wrl/client.h>
 
@@ -11,7 +18,6 @@
 #include <cmath>
 #include <cwctype>
 #include <filesystem>
-#include <future>
 #include <regex>
 #include <thread>
 
@@ -19,6 +25,7 @@ namespace {
 
 constexpr uint64_t kMaxAudioBytes = 16ULL * 1024ULL * 1024ULL;
 constexpr size_t kMaxSecretBytes = 8192;
+constexpr size_t kMaxSecretKeyBytes = 256;
 
 std::string WideToUtf8(const std::wstring& value) {
   if (value.empty()) return std::string();
@@ -52,7 +59,48 @@ std::wstring ToLowerWide(std::wstring value) {
   return value;
 }
 
-std::filesystem::path SecretFilePath() {
+// 使用 Windows CNG 计算 SHA-256 十六进制字符串，用于安全映射命名密钥槽位。
+bool ComputeSha256Hex(const std::string& input, std::wstring* hex_out) {
+  BCRYPT_ALG_HANDLE alg = nullptr;
+  BCRYPT_HASH_HANDLE hash = nullptr;
+  if (BCryptOpenAlgorithmProvider(&alg, BCRYPT_SHA256_ALGORITHM, nullptr, 0) !=
+      0) {
+    return false;
+  }
+  DWORD obj_len = 0;
+  DWORD data_len = 0;
+  if (BCryptGetProperty(alg, BCRYPT_OBJECT_LENGTH,
+                        reinterpret_cast<PUCHAR>(&obj_len), sizeof(obj_len),
+                        &data_len, 0) != 0) {
+    BCryptCloseAlgorithmProvider(alg, 0);
+    return false;
+  }
+  std::vector<UCHAR> hash_obj(obj_len);
+  UCHAR digest[32]{};
+  bool ok = false;
+  if (BCryptCreateHash(alg, &hash, hash_obj.data(), obj_len, nullptr, 0, 0) ==
+      0) {
+    if (BCryptHashData(
+            hash, reinterpret_cast<PUCHAR>(const_cast<char*>(input.data())),
+            static_cast<ULONG>(input.size()), 0) == 0 &&
+        BCryptFinishHash(hash, digest, sizeof(digest), 0) == 0) {
+      static constexpr wchar_t kHex[] = L"0123456789abcdef";
+      std::wstring out;
+      out.reserve(64);
+      for (UCHAR b : digest) {
+        out.push_back(kHex[(b >> 4) & 0x0F]);
+        out.push_back(kHex[b & 0x0F]);
+      }
+      *hex_out = std::move(out);
+      ok = true;
+    }
+    BCryptDestroyHash(hash);
+  }
+  BCryptCloseAlgorithmProvider(alg, 0);
+  return ok;
+}
+
+std::filesystem::path LocalAppDataRoot() {
   PWSTR raw = nullptr;
   std::filesystem::path base;
   if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr, &raw)) &&
@@ -64,9 +112,114 @@ std::filesystem::path SecretFilePath() {
     GetTempPathW(MAX_PATH, temp);
     base = std::filesystem::path(temp);
   }
-  return base / L"com.fanqie" / L"FanqieReader" / L"tts_secret.dpapi";
+  return base / L"com.fanqie" / L"FanqieReader";
 }
 
+std::filesystem::path SecretFilePath() {
+  return LocalAppDataRoot() / L"tts_secret.dpapi";
+}
+
+bool WriteDpapiFile(const std::filesystem::path& target,
+                    const std::string& value, std::string* error_out) {
+  if (value.size() > kMaxSecretBytes) {
+    if (error_out) *error_out = "密钥长度超过限制";
+    return false;
+  }
+  std::error_code ec;
+  if (value.empty()) {
+    std::filesystem::remove(target, ec);
+    return true;
+  }
+  std::filesystem::create_directories(target.parent_path(), ec);
+  DATA_BLOB input{};
+  input.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(value.data()));
+  input.cbData = static_cast<DWORD>(value.size());
+  DATA_BLOB output{};
+  if (!CryptProtectData(&input, L"FanqieReaderTTS", nullptr, nullptr, nullptr,
+                        CRYPTPROTECT_UI_FORBIDDEN, &output)) {
+    if (error_out) *error_out = "密钥未写入系统安全存储";
+    return false;
+  }
+  const std::filesystem::path pending =
+      target.parent_path() / (target.filename().wstring() + L".pending");
+  HANDLE file = CreateFileW(pending.c_str(), GENERIC_WRITE, 0, nullptr,
+                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    LocalFree(output.pbData);
+    if (error_out) *error_out = "无法创建安全存储文件";
+    return false;
+  }
+  DWORD written = 0;
+  const bool ok =
+      WriteFile(file, output.pbData, output.cbData, &written, nullptr) != 0 &&
+      written == output.cbData;
+  FlushFileBuffers(file);
+  CloseHandle(file);
+  LocalFree(output.pbData);
+  if (!ok ||
+      !MoveFileExW(pending.c_str(), target.c_str(),
+                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
+    std::filesystem::remove(pending, ec);
+    if (error_out) *error_out = "密钥未写入系统安全存储";
+    return false;
+  }
+  return true;
+}
+
+bool ReadDpapiFile(const std::filesystem::path& target,
+                   std::optional<std::string>* value_out,
+                   std::string* error_out) {
+  const DWORD attrs = GetFileAttributesW(target.c_str());
+  if (attrs == INVALID_FILE_ATTRIBUTES) {
+    *value_out = std::nullopt;
+    return true;
+  }
+  HANDLE file = CreateFileW(
+      target.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+  if (file == INVALID_HANDLE_VALUE) {
+    if (error_out) *error_out = "无法读取系统安全存储；未改写原密钥";
+    return false;
+  }
+  LARGE_INTEGER size{};
+  if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
+      size.QuadPart > 64 * 1024) {
+    CloseHandle(file);
+    if (error_out) *error_out = "无法读取系统安全存储；未改写原密钥";
+    return false;
+  }
+  std::vector<BYTE> encrypted(static_cast<size_t>(size.QuadPart));
+  DWORD read_bytes = 0;
+  const bool read_ok = ReadFile(file, encrypted.data(),
+                                static_cast<DWORD>(encrypted.size()),
+                                &read_bytes, nullptr) != 0 &&
+                       read_bytes == encrypted.size();
+  CloseHandle(file);
+  if (!read_ok) {
+    if (error_out) *error_out = "无法读取系统安全存储；未改写原密钥";
+    return false;
+  }
+  DATA_BLOB input{};
+  input.pbData = encrypted.data();
+  input.cbData = static_cast<DWORD>(encrypted.size());
+  DATA_BLOB output{};
+  if (!CryptUnprotectData(&input, nullptr, nullptr, nullptr, nullptr,
+                          CRYPTPROTECT_UI_FORBIDDEN, &output)) {
+    if (error_out) *error_out = "无法读取系统安全存储；未改写原密钥";
+    return false;
+  }
+  std::string secret(reinterpret_cast<const char*>(output.pbData),
+                     output.cbData);
+  LocalFree(output.pbData);
+  if (secret.size() > kMaxSecretBytes) {
+    if (error_out) *error_out = "无法读取系统安全存储；未改写原密钥";
+    return false;
+  }
+  *value_out = std::move(secret);
+  return true;
+}
+
+// 放行临时目录、LocalAppData 与 RoamingAppData（沉浸式音频缓存落于 AppData\Roaming）。
 std::vector<std::filesystem::path> AllowedAudioRoots() {
   std::vector<std::filesystem::path> roots;
   wchar_t temp[MAX_PATH + 1]{};
@@ -74,16 +227,127 @@ std::vector<std::filesystem::path> AllowedAudioRoots() {
     std::error_code ec;
     roots.push_back(std::filesystem::weakly_canonical(temp, ec));
   }
-  PWSTR local_appdata = nullptr;
-  if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_LocalAppData, 0, nullptr,
-                                     &local_appdata)) &&
-      local_appdata != nullptr) {
-    std::error_code ec;
-    roots.push_back(std::filesystem::weakly_canonical(local_appdata, ec));
-    CoTaskMemFree(local_appdata);
+  const KNOWNFOLDERID folders[] = {
+      FOLDERID_LocalAppData,
+      FOLDERID_RoamingAppData,
+  };
+  for (const auto& fid : folders) {
+    PWSTR raw = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(fid, 0, nullptr, &raw)) &&
+        raw != nullptr) {
+      std::error_code ec;
+      roots.push_back(std::filesystem::weakly_canonical(raw, ec));
+      CoTaskMemFree(raw);
+    }
   }
   return roots;
 }
+
+// 魔数校验音频容器格式（支持 RIFF/WAVE 与 ID3/MP3 帧同步头）。
+bool DetectAudioContainer(const std::vector<uint8_t>& bytes, bool* is_wav_out) {
+  if (bytes.size() < 12) return false;
+  if (bytes[0] == 'R' && bytes[1] == 'I' && bytes[2] == 'F' &&
+      bytes[3] == 'F' && bytes[8] == 'W' && bytes[9] == 'A' &&
+      bytes[10] == 'V' && bytes[11] == 'E') {
+    *is_wav_out = true;
+    return true;
+  }
+  if (bytes[0] == 'I' && bytes[1] == 'D' && bytes[2] == '3') {
+    *is_wav_out = false;
+    return true;
+  }
+  const size_t scan_limit = std::min<size_t>(bytes.size() - 4, 4096);
+  for (size_t i = 0; i <= scan_limit; ++i) {
+    if (bytes[i] == 0xFF && (bytes[i + 1] & 0xE0) == 0xE0) {
+      const uint8_t version = (bytes[i + 1] >> 3) & 0x03;
+      const uint8_t layer = (bytes[i + 1] >> 1) & 0x03;
+      const uint8_t bitrate = (bytes[i + 2] >> 4) & 0x0F;
+      const uint8_t sample_rate = (bytes[i + 2] >> 2) & 0x03;
+      if (version != 1 && layer != 0 && bitrate != 0 && bitrate != 15 &&
+          sample_rate != 3) {
+        *is_wav_out = false;
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// 从内存字节创建附带 MIME 类型和虚拟文件名的 IMFByteStream（不占用磁盘句柄）。
+bool CreateMemoryByteStream(const std::vector<uint8_t>& bytes, bool is_wav,
+                            Microsoft::WRL::ComPtr<IMFByteStream>* stream_out) {
+  if (bytes.empty() || bytes.size() > kMaxAudioBytes) return false;
+  IStream* raw_mem = SHCreateMemStream(bytes.data(),
+                                       static_cast<UINT>(bytes.size()));
+  if (raw_mem == nullptr) return false;
+  Microsoft::WRL::ComPtr<IStream> mem_stream;
+  mem_stream.Attach(raw_mem);
+  Microsoft::WRL::ComPtr<IMFByteStream> byte_stream;
+  if (FAILED(MFCreateMFByteStreamOnStream(mem_stream.Get(), &byte_stream)) ||
+      byte_stream == nullptr) {
+    return false;
+  }
+  Microsoft::WRL::ComPtr<IMFAttributes> attrs;
+  if (SUCCEEDED(byte_stream.As(&attrs)) && attrs != nullptr) {
+    attrs->SetString(MF_BYTESTREAM_CONTENT_TYPE,
+                     is_wav ? L"audio/wav" : L"audio/mpeg");
+    attrs->SetString(MF_BYTESTREAM_ORIGIN_NAME,
+                     is_wav ? L"audio.wav" : L"audio.mp3");
+  }
+  *stream_out = std::move(byte_stream);
+  return true;
+}
+
+// 线程安全的 IMFMediaEngine 事件接收器，始终通过 post_main 回到主线程。
+class MediaEngineNotify final : public IMFMediaEngineNotify {
+ public:
+  MediaEngineNotify(std::weak_ptr<ReaderPlayback> owner,
+                    ReaderPlayback::PostMainCallback post_main,
+                    uint64_t slot_id)
+      : owner_(std::move(owner)),
+        post_main_(std::move(post_main)),
+        slot_id_(slot_id) {}
+
+  HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid,
+                                           void** ppv_object) override {
+    if (ppv_object == nullptr) return E_POINTER;
+    if (riid == __uuidof(IUnknown) || riid == __uuidof(IMFMediaEngineNotify)) {
+      *ppv_object = static_cast<IMFMediaEngineNotify*>(this);
+      AddRef();
+      return S_OK;
+    }
+    *ppv_object = nullptr;
+    return E_NOINTERFACE;
+  }
+
+  ULONG STDMETHODCALLTYPE AddRef() override {
+    return static_cast<ULONG>(ref_count_.fetch_add(1) + 1);
+  }
+
+  ULONG STDMETHODCALLTYPE Release() override {
+    const ULONG count = static_cast<ULONG>(ref_count_.fetch_sub(1) - 1);
+    if (count == 0) delete this;
+    return count;
+  }
+
+  HRESULT STDMETHODCALLTYPE EventNotify(DWORD event, DWORD_PTR param1,
+                                        DWORD param2) override {
+    auto weak = owner_;
+    const uint64_t sid = slot_id_;
+    post_main_([weak, sid, event, param1, param2] {
+      if (auto locked = weak.lock()) {
+        locked->OnEngineEventMain(sid, event, param1, param2);
+      }
+    });
+    return S_OK;
+  }
+
+ private:
+  std::atomic<long> ref_count_{1};
+  std::weak_ptr<ReaderPlayback> owner_;
+  ReaderPlayback::PostMainCallback post_main_;
+  uint64_t slot_id_;
+};
 
 std::wstring ReadRegString(HKEY key, const wchar_t* value_name) {
   DWORD type = 0;
@@ -181,10 +445,17 @@ std::vector<VoiceEntry> EnumerateSapiVoices() {
 ReaderPlayback::ReaderPlayback(PostMainCallback post_main, EmitCallback emit)
     : post_main_(std::move(post_main)), emit_(std::move(emit)) {
   speech_stop_event_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+  if (SUCCEEDED(MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET))) {
+    mf_started_ = true;
+  }
 }
 
 ReaderPlayback::~ReaderPlayback() {
   Release();
+  if (mf_started_) {
+    MFShutdown();
+    mf_started_ = false;
+  }
   if (speech_stop_event_ != nullptr) {
     CloseHandle(speech_stop_event_);
     speech_stop_event_ = nullptr;
@@ -211,122 +482,65 @@ flutter::EncodableList ReaderPlayback::Voices() {
   return out;
 }
 
+bool ReaderPlayback::IsValidSecretKey(const std::string& key) {
+  return !key.empty() && key.size() <= kMaxSecretKeyBytes &&
+         key.find('\0') == std::string::npos;
+}
+
 bool ReaderPlayback::WriteSecret(const std::string& value,
                                  std::string* error_out) {
-  if (value.size() > kMaxSecretBytes) {
-    if (error_out) *error_out = "密钥长度超过限制";
-    return false;
-  }
-  const std::filesystem::path target = SecretFilePath();
-  std::error_code ec;
-  if (value.empty()) {
-    std::filesystem::remove(target, ec);
-    return true;
-  }
-  std::filesystem::create_directories(target.parent_path(), ec);
-  DATA_BLOB input{};
-  input.pbData = reinterpret_cast<BYTE*>(const_cast<char*>(value.data()));
-  input.cbData = static_cast<DWORD>(value.size());
-  DATA_BLOB output{};
-  if (!CryptProtectData(&input, L"FanqieReaderTTS", nullptr, nullptr, nullptr,
-                        CRYPTPROTECT_UI_FORBIDDEN, &output)) {
-    if (error_out) *error_out = "密钥未写入系统安全存储";
-    return false;
-  }
-  const std::filesystem::path pending =
-      target.parent_path() / L"tts_secret.pending";
-  HANDLE file = CreateFileW(pending.c_str(), GENERIC_WRITE, 0, nullptr,
-                            CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-  if (file == INVALID_HANDLE_VALUE) {
-    LocalFree(output.pbData);
-    if (error_out) *error_out = "无法创建安全存储文件";
-    return false;
-  }
-  DWORD written = 0;
-  const bool ok =
-      WriteFile(file, output.pbData, output.cbData, &written, nullptr) != 0 &&
-      written == output.cbData;
-  FlushFileBuffers(file);
-  CloseHandle(file);
-  LocalFree(output.pbData);
-  if (!ok ||
-      !MoveFileExW(pending.c_str(), target.c_str(),
-                   MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-    std::filesystem::remove(pending, ec);
-    if (error_out) *error_out = "密钥未写入系统安全存储";
-    return false;
-  }
-  return true;
+  return WriteDpapiFile(SecretFilePath(), value, error_out);
 }
 
 bool ReaderPlayback::ReadSecret(std::optional<std::string>* value_out,
                                 std::string* error_out) {
-  const std::filesystem::path target = SecretFilePath();
-  const DWORD attrs = GetFileAttributesW(target.c_str());
-  if (attrs == INVALID_FILE_ATTRIBUTES) {
+  return ReadDpapiFile(SecretFilePath(), value_out, error_out);
+}
+
+bool ReaderPlayback::WriteNamedSecret(const std::string& key,
+                                      const std::string& value,
+                                      std::string* error_out) {
+  if (!IsValidSecretKey(key)) {
+    if (error_out) *error_out = "无效的安全存储槽位名称";
+    return false;
+  }
+  std::wstring hash_hex;
+  if (!ComputeSha256Hex(key, &hash_hex)) {
+    if (error_out) *error_out = "无法计算安全存储槽位标识";
+    return false;
+  }
+  const std::filesystem::path target =
+      LocalAppDataRoot() / L"secrets" / (hash_hex + L".dpapi");
+  return WriteDpapiFile(target, value, error_out);
+}
+
+bool ReaderPlayback::ReadNamedSecret(const std::string& key,
+                                     std::optional<std::string>* value_out,
+                                     std::string* error_out) {
+  if (!IsValidSecretKey(key)) {
     *value_out = std::nullopt;
     return true;
   }
-  HANDLE file = CreateFileW(
-      target.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING,
-      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
-  if (file == INVALID_HANDLE_VALUE) {
-    if (error_out) *error_out = "无法读取系统安全存储；未改写原密钥";
+  std::wstring hash_hex;
+  if (!ComputeSha256Hex(key, &hash_hex)) {
+    if (error_out) *error_out = "无法计算安全存储槽位标识";
     return false;
   }
-  LARGE_INTEGER size{};
-  if (!GetFileSizeEx(file, &size) || size.QuadPart <= 0 ||
-      size.QuadPart > 64 * 1024) {
-    CloseHandle(file);
-    if (error_out) *error_out = "无法读取系统安全存储；未改写原密钥";
-    return false;
-  }
-  std::vector<BYTE> encrypted(static_cast<size_t>(size.QuadPart));
-  DWORD read_bytes = 0;
-  const bool read_ok = ReadFile(file, encrypted.data(),
-                                static_cast<DWORD>(encrypted.size()),
-                                &read_bytes, nullptr) != 0 &&
-                       read_bytes == encrypted.size();
-  CloseHandle(file);
-  if (!read_ok) {
-    if (error_out) *error_out = "无法读取系统安全存储；未改写原密钥";
-    return false;
-  }
-  DATA_BLOB input{};
-  input.pbData = encrypted.data();
-  input.cbData = static_cast<DWORD>(encrypted.size());
-  DATA_BLOB output{};
-  if (!CryptUnprotectData(&input, nullptr, nullptr, nullptr, nullptr,
-                          CRYPTPROTECT_UI_FORBIDDEN, &output)) {
-    if (error_out) *error_out = "无法读取系统安全存储；未改写原密钥";
-    return false;
-  }
-  std::string secret(reinterpret_cast<const char*>(output.pbData),
-                     output.cbData);
-  LocalFree(output.pbData);
-  if (secret.size() > kMaxSecretBytes) {
-    if (error_out) *error_out = "无法读取系统安全存储；未改写原密钥";
-    return false;
-  }
-  *value_out = std::move(secret);
-  return true;
+  const std::filesystem::path target =
+      LocalAppDataRoot() / L"secrets" / (hash_hex + L".dpapi");
+  return ReadDpapiFile(target, value_out, error_out);
 }
 
-bool ReaderPlayback::ValidateAudioFile(const std::wstring& raw_path) const {
-  if (raw_path.empty()) return false;
-  const std::filesystem::path path(raw_path);
-  const std::string filename = WideToUtf8(path.filename().wstring());
-  static const std::regex kPattern(
-      "^tts_[0-9]+-[0-9]+-[0-9]+-[0-9]+\\.(mp3|wav)$", std::regex::icase);
-  if (!std::regex_match(filename, kPattern)) return false;
-
+bool ReaderPlayback::ReadAudioBytes(const std::wstring& path,
+                                    std::vector<uint8_t>* bytes_out,
+                                    bool* is_wav_out) {
+  if (path.empty()) return false;
   const DWORD attrs = GetFileAttributesW(path.c_str());
   if (attrs == INVALID_FILE_ATTRIBUTES ||
       (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
       (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
     return false;
   }
-
   HANDLE handle = CreateFileW(
       path.c_str(), GENERIC_READ,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
@@ -335,14 +549,211 @@ bool ReaderPlayback::ValidateAudioFile(const std::wstring& raw_path) const {
   if (handle == INVALID_HANDLE_VALUE) return false;
   BY_HANDLE_FILE_INFORMATION info{};
   LARGE_INTEGER size{};
-  const bool valid_handle =
+  const bool valid_meta =
       GetFileInformationByHandle(handle, &info) != 0 &&
       (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
       (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0 &&
       GetFileSizeEx(handle, &size) != 0 && size.QuadPart > 12 &&
       static_cast<uint64_t>(size.QuadPart) <= kMaxAudioBytes;
+  if (!valid_meta) {
+    CloseHandle(handle);
+    return false;
+  }
+  std::vector<uint8_t> bytes(static_cast<size_t>(size.QuadPart));
+  DWORD total_read = 0;
+  while (total_read < bytes.size()) {
+    DWORD chunk = 0;
+    if (!ReadFile(handle, bytes.data() + total_read,
+                  static_cast<DWORD>(bytes.size() - total_read), &chunk,
+                  nullptr) ||
+        chunk == 0) {
+      CloseHandle(handle);
+      return false;
+    }
+    total_read += chunk;
+  }
   CloseHandle(handle);
-  if (!valid_handle) return false;
+
+  bool is_wav = false;
+  if (!DetectAudioContainer(bytes, &is_wav)) {
+    return false;
+  }
+  *bytes_out = std::move(bytes);
+  *is_wav_out = is_wav;
+  return true;
+}
+
+flutter::EncodableMap ReaderPlayback::ProbeAudioDuration(
+    const std::string& file_path) {
+  auto invalid = []() {
+    flutter::EncodableMap map;
+    map[flutter::EncodableValue("valid")] = flutter::EncodableValue(false);
+    map[flutter::EncodableValue("durationMs")] = flutter::EncodableValue(0LL);
+    return map;
+  };
+  const std::wstring wide_path = Utf8ToWide(file_path);
+  std::vector<uint8_t> bytes;
+  bool is_wav = false;
+  if (!ReadAudioBytes(wide_path, &bytes, &is_wav)) {
+    return invalid();
+  }
+
+  const HRESULT co_hr = CoInitializeEx(nullptr, COINIT_MULTITHREADED);
+  const HRESULT mf_hr = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
+  int64_t duration_ms = 0;
+  bool decoded_sample = false;
+
+  if (SUCCEEDED(mf_hr)) {
+    {
+      Microsoft::WRL::ComPtr<IMFByteStream> byte_stream;
+      Microsoft::WRL::ComPtr<IMFSourceReader> reader;
+      if (CreateMemoryByteStream(bytes, is_wav, &byte_stream) &&
+          SUCCEEDED(MFCreateSourceReaderFromByteStream(
+              byte_stream.Get(), nullptr, &reader)) &&
+          reader != nullptr) {
+        // 强制输出 PCM 解码以验证音频内容真实完整而非伪造文件头。
+        Microsoft::WRL::ComPtr<IMFMediaType> pcm_type;
+        if (SUCCEEDED(MFCreateMediaType(&pcm_type)) &&
+            SUCCEEDED(pcm_type->SetGUID(MF_MT_MAJOR_TYPE, MFMediaType_Audio)) &&
+            SUCCEEDED(pcm_type->SetGUID(MF_MT_SUBTYPE, MFAudioFormat_PCM)) &&
+            SUCCEEDED(reader->SetCurrentMediaType(
+                static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM),
+                nullptr, pcm_type.Get()))) {
+          PROPVARIANT var{};
+          PropVariantInit(&var);
+          if (SUCCEEDED(reader->GetPresentationAttribute(
+                  static_cast<DWORD>(MF_SOURCE_READER_MEDIASOURCE),
+                  MF_PD_DURATION, &var))) {
+            if (var.vt == VT_UI8 && var.uhVal.QuadPart > 0) {
+              duration_ms = static_cast<int64_t>(
+                  std::llround(static_cast<double>(var.uhVal.QuadPart) / 10000.0));
+            } else if (var.vt == VT_I8 && var.hVal.QuadPart > 0) {
+              duration_ms = static_cast<int64_t>(
+                  std::llround(static_cast<double>(var.hVal.QuadPart) / 10000.0));
+            }
+          }
+          PropVariantClear(&var);
+
+          // 若容器未提供总时长元数据则全量扫描样本累计时长，否则只需成功解码首包。
+          const bool need_full_scan = duration_ms <= 0;
+          LONGLONG accumulated_hns = 0;
+          for (int i = 0; i < (need_full_scan ? 200000 : 32); ++i) {
+            DWORD stream_index = 0;
+            DWORD flags = 0;
+            LONGLONG timestamp = 0;
+            Microsoft::WRL::ComPtr<IMFSample> sample;
+            const HRESULT rhr = reader->ReadSample(
+                static_cast<DWORD>(MF_SOURCE_READER_FIRST_AUDIO_STREAM), 0,
+                &stream_index, &flags, &timestamp, &sample);
+            if (FAILED(rhr)) {
+              decoded_sample = false;
+              break;
+            }
+            if ((flags & MF_SOURCE_READERF_ENDOFSTREAM) != 0) {
+              break;
+            }
+            if (sample != nullptr) {
+              DWORD total_len = 0;
+              if (SUCCEEDED(sample->GetTotalLength(&total_len)) &&
+                  total_len > 0) {
+                decoded_sample = true;
+              }
+              LONGLONG sample_dur = 0;
+              if (SUCCEEDED(sample->GetSampleDuration(&sample_dur)) &&
+                  sample_dur > 0) {
+                accumulated_hns += sample_dur;
+              }
+              if (!need_full_scan && decoded_sample) {
+                break;
+              }
+            }
+          }
+          if (need_full_scan && accumulated_hns > 0) {
+            duration_ms = static_cast<int64_t>(
+                std::llround(static_cast<double>(accumulated_hns) / 10000.0));
+          }
+        }
+      }
+    }
+    MFShutdown();
+  }
+  if (SUCCEEDED(co_hr)) {
+    CoUninitialize();
+  }
+
+  if (!decoded_sample || duration_ms <= 0 || duration_ms > 3600LL * 1000LL) {
+    return invalid();
+  }
+
+  flutter::EncodableMap map;
+  map[flutter::EncodableValue("valid")] = flutter::EncodableValue(true);
+  map[flutter::EncodableValue("durationMs")] =
+      flutter::EncodableValue(std::max<int64_t>(1, duration_ms));
+  map[flutter::EncodableValue("mime")] =
+      flutter::EncodableValue(is_wav ? "audio/wav" : "audio/mpeg");
+  return map;
+}
+
+int64_t ReaderPlayback::FreeDiskBytes(const std::string& raw_path) {
+  std::string trimmed = raw_path;
+  while (!trimmed.empty() &&
+         std::isspace(static_cast<unsigned char>(trimmed.front()))) {
+    trimmed.erase(trimmed.begin());
+  }
+  while (!trimmed.empty() &&
+         std::isspace(static_cast<unsigned char>(trimmed.back()))) {
+    trimmed.pop_back();
+  }
+
+  std::filesystem::path target;
+  if (trimmed.empty()) {
+    PWSTR raw = nullptr;
+    if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_RoamingAppData, 0, nullptr,
+                                       &raw)) &&
+        raw != nullptr) {
+      target = std::filesystem::path(raw);
+      CoTaskMemFree(raw);
+    } else {
+      wchar_t temp[MAX_PATH + 1]{};
+      GetTempPathW(MAX_PATH, temp);
+      target = std::filesystem::path(temp);
+    }
+  } else {
+    target = std::filesystem::path(Utf8ToWide(trimmed));
+  }
+
+  std::error_code ec;
+  while (!target.empty() && !std::filesystem::exists(target, ec)) {
+    const auto parent = target.parent_path();
+    if (parent == target) break;
+    target = parent;
+  }
+  if (target.empty()) return -1;
+  if (std::filesystem::is_regular_file(target, ec)) {
+    target = target.parent_path();
+  }
+  ULARGE_INTEGER free_avail{};
+  if (!GetDiskFreeSpaceExW(target.c_str(), &free_avail, nullptr, nullptr)) {
+    return -1;
+  }
+  return static_cast<int64_t>(free_avail.QuadPart);
+}
+
+bool ReaderPlayback::ValidateAudioFile(const std::wstring& raw_path) {
+  if (raw_path.empty()) return false;
+  const std::filesystem::path path(raw_path);
+  const std::string filename = WideToUtf8(path.filename().wstring());
+  static const std::regex kPattern(
+      "^(?:tts_[0-9]+-[0-9]+-[0-9]+-[0-9]+|[0-9a-f]{64}|immersive_preview_-?[0-9]+)\\.(mp3|wav)$",
+      std::regex::icase);
+  if (!std::regex_match(filename, kPattern)) return false;
+
+  const DWORD attrs = GetFileAttributesW(path.c_str());
+  if (attrs == INVALID_FILE_ATTRIBUTES ||
+      (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0 ||
+      (attrs & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+    return false;
+  }
 
   std::error_code ec;
   const std::wstring canonical_file =
@@ -360,38 +771,118 @@ bool ReaderPlayback::ValidateAudioFile(const std::wstring& raw_path) const {
   return false;
 }
 
-void ReaderPlayback::CloseMci() {
-  if (mci_open_) {
-    mciSendStringW(L"stop fanqie_tts", nullptr, 0, nullptr);
-    mciSendStringW(L"close fanqie_tts", nullptr, 0, nullptr);
-    mci_open_ = false;
+std::unique_ptr<ReaderPlayback::EngineSlot> ReaderPlayback::CreateEngineSlot(
+    const std::string& token_id, const std::vector<uint8_t>& bytes, bool is_wav,
+    double rate, int64_t start_position_ms) {
+  if (!mf_started_) return nullptr;
+
+  Microsoft::WRL::ComPtr<IMFMediaEngineClassFactory> factory;
+  if (FAILED(CoCreateInstance(CLSID_MFMediaEngineClassFactory, nullptr,
+                              CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) ||
+      factory == nullptr) {
+    return nullptr;
+  }
+
+  const uint64_t sid = next_slot_id_++;
+  Microsoft::WRL::ComPtr<MediaEngineNotify> notify;
+  notify.Attach(new MediaEngineNotify(weak_from_this(), post_main_, sid));
+
+  Microsoft::WRL::ComPtr<IMFAttributes> attrs;
+  if (FAILED(MFCreateAttributes(&attrs, 2)) || attrs == nullptr) {
+    return nullptr;
+  }
+  attrs->SetUnknown(MF_MEDIA_ENGINE_CALLBACK, notify.Get());
+  attrs->SetUINT32(MF_MEDIA_ENGINE_AUDIO_CATEGORY, AudioCategory_Speech);
+
+  Microsoft::WRL::ComPtr<IMFMediaEngine> engine;
+  if (FAILED(factory->CreateInstance(MF_MEDIA_ENGINE_AUDIOONLY, attrs.Get(),
+                                     &engine)) ||
+      engine == nullptr) {
+    return nullptr;
+  }
+
+  Microsoft::WRL::ComPtr<IMFMediaEngineEx> engine_ex;
+  Microsoft::WRL::ComPtr<IMFByteStream> byte_stream;
+  if (FAILED(engine.As(&engine_ex)) || engine_ex == nullptr ||
+      !CreateMemoryByteStream(bytes, is_wav, &byte_stream)) {
+    engine->Shutdown();
+    return nullptr;
+  }
+
+  engine->SetAutoPlay(FALSE);
+  engine->SetVolume(volume_);
+  engine->SetDefaultPlaybackRate(rate);
+  engine->SetPlaybackRate(rate);
+
+  BSTR virtual_url = SysAllocString(is_wav ? L"audio.wav" : L"audio.mp3");
+  const HRESULT src_hr =
+      engine_ex->SetSourceFromByteStream(byte_stream.Get(), virtual_url);
+  SysFreeString(virtual_url);
+  if (FAILED(src_hr)) {
+    engine->Shutdown();
+    return nullptr;
+  }
+
+  auto slot = std::make_unique<EngineSlot>();
+  slot->slot_id = sid;
+  slot->engine = std::move(engine);
+  slot->token_id = token_id;
+  slot->start_position_ms = std::max<int64_t>(0, start_position_ms);
+  return slot;
+}
+
+void ReaderPlayback::ShutdownSlot(std::unique_ptr<EngineSlot>* slot) {
+  if (slot == nullptr || *slot == nullptr) return;
+  auto owned = std::move(*slot);
+  if (owned->engine != nullptr) {
+    owned->engine->Pause();
+    owned->engine->Shutdown();
+    owned->engine.Reset();
   }
 }
 
-int64_t ReaderPlayback::QueryMciPositionMs() const {
-  if (!mci_open_) return 0;
-  wchar_t buffer[64]{};
-  if (mciSendStringW(L"status fanqie_tts position", buffer, 64, nullptr) != 0) {
-    return 0;
-  }
-  try {
-    return std::stoll(buffer);
-  } catch (...) {
-    return 0;
-  }
+void ReaderPlayback::ApplyRateToSlot(const std::unique_ptr<EngineSlot>& slot,
+                                     double rate) {
+  if (slot == nullptr || slot->engine == nullptr) return;
+  slot->engine->SetDefaultPlaybackRate(rate);
+  slot->engine->SetPlaybackRate(rate);
 }
 
-bool ReaderPlayback::IsMciPlaying() const {
-  if (!mci_open_) return false;
-  wchar_t buffer[64]{};
-  if (mciSendStringW(L"status fanqie_tts mode", buffer, 64, nullptr) != 0) {
-    return false;
+void ReaderPlayback::ApplyVolumeToSlot(const std::unique_ptr<EngineSlot>& slot,
+                                       double volume) {
+  if (slot == nullptr || slot->engine == nullptr) return;
+  slot->engine->SetVolume(volume);
+}
+
+int64_t ReaderPlayback::QueryActivePositionMs() const {
+  if (active_slot_ == nullptr || active_slot_->engine == nullptr) return 0;
+  const double sec = active_slot_->engine->GetCurrentTime();
+  if (!std::isfinite(sec) || sec <= 0.0) return 0;
+  return static_cast<int64_t>(std::llround(sec * 1000.0));
+}
+
+int64_t ReaderPlayback::QueryActiveDurationMs() const {
+  if (active_slot_ == nullptr || active_slot_->engine == nullptr) return 0;
+  const double sec = active_slot_->engine->GetDuration();
+  if (std::isfinite(sec) && sec > 0.0 && sec <= 3600.0) {
+    return static_cast<int64_t>(std::llround(sec * 1000.0));
   }
-  return ToLowerWide(buffer) == L"playing";
+  return active_slot_->duration_hint_ms;
+}
+
+bool ReaderPlayback::IsActiveEnginePlaying() const {
+  if (active_slot_ == nullptr || active_slot_->engine == nullptr) return false;
+  if (paused_) return false;
+  if (active_slot_->engine->IsEnded() != FALSE) return false;
+  if (!active_slot_->started) {
+    return active_slot_->start_requested;
+  }
+  return active_slot_->engine->IsPaused() == FALSE;
 }
 
 bool ReaderPlayback::Speak(const std::string& id, const std::string& text,
                            double rate, const std::string& voice_id) {
+  (void)voice_id;
   const std::wstring wide_text = Utf8ToWide(text);
   bool non_whitespace = false;
   for (wchar_t ch : wide_text) {
@@ -476,122 +967,327 @@ bool ReaderPlayback::Speak(const std::string& id, const std::string& text,
   return true;
 }
 
-bool ReaderPlayback::Play(const std::string& id, const std::string& file_path) {
+bool ReaderPlayback::Play(const std::string& id, const std::string& file_path,
+                          double rate, bool preserve_pitch,
+                          int64_t start_position_ms) {
   const std::wstring wide_path = Utf8ToWide(file_path);
-  if (id.empty() || id.size() > 512 || !ValidateAudioFile(wide_path) ||
+  if (id.empty() || id.size() > 512 || !std::isfinite(rate) ||
+      start_position_ms < 0 || !ValidateAudioFile(wide_path) ||
       !HasOutputDevice()) {
     return false;
   }
 
+  std::vector<uint8_t> bytes;
+  bool is_wav = false;
+  if (!ReadAudioBytes(wide_path, &bytes, &is_wav)) {
+    return false;
+  }
+
+  const double clamped_rate = std::clamp(rate, 0.5, 2.0);
   Stop();
-  const std::wstring open_cmd = L"open \"" + wide_path + L"\" alias fanqie_tts";
-  if (mciSendStringW(open_cmd.c_str(), nullptr, 0, nullptr) != 0) {
+
+  auto slot = CreateEngineSlot(id, bytes, is_wav, clamped_rate,
+                               start_position_ms);
+  if (slot == nullptr) {
     return false;
   }
-  mci_open_ = true;
-  mciSendStringW(L"set fanqie_tts time format milliseconds", nullptr, 0,
-                 nullptr);
-  wchar_t len_buf[64]{};
-  int64_t duration_ms = 0;
-  if (mciSendStringW(L"status fanqie_tts length", len_buf, 64, nullptr) == 0) {
-    try {
-      duration_ms = std::stoll(len_buf);
-    } catch (...) {
-      duration_ms = 0;
-    }
-  }
-  if (duration_ms <= 0 || duration_ms > 1800 * 1000) {
-    CloseMci();
-    return false;
-  }
+  slot->start_requested = true;
 
-  const int mci_vol =
-      static_cast<int>(std::clamp(std::round(volume_ * 1000.0), 0.0, 1000.0));
-  const std::wstring vol_cmd =
-      L"setaudio fanqie_tts volume to " + std::to_wstring(mci_vol);
-  mciSendStringW(vol_cmd.c_str(), nullptr, 0, nullptr);
-
-  if (mciSendStringW(L"play fanqie_tts", nullptr, 0, nullptr) != 0) {
-    CloseMci();
-    return false;
-  }
-
-  uint64_t generation = 0;
   {
     std::lock_guard<std::mutex> lock(mutex_);
     current_id_ = id;
-    generation = ++token_generation_;
+    ++token_generation_;
     native_ = false;
     paused_ = false;
+    playback_rate_ = clamped_rate;
+    preserve_pitch_ = preserve_pitch;
+  }
+  active_slot_ = std::move(slot);
+  return true;
+}
+
+bool ReaderPlayback::PreloadNext(const std::string& after_id,
+                                 const std::string& id,
+                                 const std::string& file_path, double rate,
+                                 bool preserve_pitch, int64_t gap_ms) {
+  ClearPreloaded();
+  const std::wstring wide_path = Utf8ToWide(file_path);
+  std::string active_id;
+  bool is_native = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    active_id = current_id_;
+    is_native = native_;
+  }
+  if (after_id.empty() || id.empty() || id.size() > 512 || is_native ||
+      after_id != active_id || active_slot_ == nullptr || !std::isfinite(rate) ||
+      !ValidateAudioFile(wide_path) || !HasOutputDevice()) {
+    return false;
+  }
+
+  const int64_t clamped_gap = std::clamp<int64_t>(gap_ms, 0, 3000);
+  const double clamped_rate = std::clamp(rate, 0.5, 2.0);
+  const uint64_t gen = ++preload_generation_;
+  next_after_id_ = after_id;
+  next_gap_ms_ = clamped_gap;
+  (void)preserve_pitch;
+
+  const auto self = shared_from_this();
+  std::thread([self, gen, after_id, id, wide_path, clamped_rate] {
+    std::vector<uint8_t> bytes;
+    bool is_wav = false;
+    const bool ok = ReadAudioBytes(wide_path, &bytes, &is_wav);
+    self->post_main_([self, gen, after_id, id, bytes = std::move(bytes), is_wav,
+                      ok, clamped_rate] {
+      std::string cur_id;
+      bool is_nat = false;
+      double cur_rate = clamped_rate;
+      {
+        std::lock_guard<std::mutex> lock(self->mutex_);
+        cur_id = self->current_id_;
+        is_nat = self->native_;
+        cur_rate = self->playback_rate_;
+      }
+      if (self->preload_generation_ != gen || is_nat || cur_id != after_id ||
+          self->active_slot_ == nullptr || !ok) {
+        if (self->preload_generation_ == gen) {
+          self->ClearPreloaded();
+        }
+        return;
+      }
+      auto slot = self->CreateEngineSlot(id, bytes, is_wav, cur_rate, 0);
+      if (slot == nullptr) {
+        self->ClearPreloaded();
+        return;
+      }
+      self->next_slot_ = std::move(slot);
+    });
+  }).detach();
+  return true;
+}
+
+void ReaderPlayback::ClearPreloaded() {
+  ++preload_generation_;
+  ++transition_generation_;
+  ShutdownSlot(&pending_transition_slot_);
+  ShutdownSlot(&next_slot_);
+  next_after_id_.clear();
+  next_gap_ms_ = 0;
+}
+
+bool ReaderPlayback::TryAdvanceToPreloaded(const std::string& completed_id) {
+  if (next_slot_ == nullptr || !next_slot_->can_play ||
+      next_after_id_ != completed_id) {
+    ClearPreloaded();
+    return false;
+  }
+
+  const std::string target_id = next_slot_->token_id;
+  const int64_t gap = next_gap_ms_;
+
+  // 先接管槽位所有权，防止被并发 ClearPreloaded 误释放。
+  ++preload_generation_;
+  const uint64_t trans_gen = ++transition_generation_;
+  pending_transition_slot_ = std::move(next_slot_);
+  next_after_id_.clear();
+  next_gap_ms_ = 0;
+
+  if (gap <= 0) {
+    CommitTransition(trans_gen, completed_id, target_id);
+    return true;
   }
 
   const auto self = shared_from_this();
-  std::thread([self, id, generation] {
-    for (;;) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(60));
-      {
-        std::lock_guard<std::mutex> lock(self->mutex_);
-        if (self->token_generation_ != generation || self->current_id_ != id) {
-          return;
-        }
+  std::thread([self, trans_gen, completed_id, target_id, gap] {
+    std::this_thread::sleep_for(std::chrono::milliseconds(gap));
+    self->post_main_([self, trans_gen, completed_id, target_id] {
+      self->CommitTransition(trans_gen, completed_id, target_id);
+    });
+  }).detach();
+  return true;
+}
+
+void ReaderPlayback::CommitTransition(uint64_t transition_gen,
+                                      const std::string& completed_id,
+                                      const std::string& target_id) {
+  if (transition_generation_ != transition_gen ||
+      pending_transition_slot_ == nullptr) {
+    return;
+  }
+
+  std::string cur_id;
+  double cur_vol = 1.0;
+  double cur_rate = 1.0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cur_id = current_id_;
+    cur_vol = volume_;
+    cur_rate = playback_rate_;
+  }
+  if (cur_id != completed_id && cur_id != target_id) {
+    ShutdownSlot(&pending_transition_slot_);
+    return;
+  }
+
+  auto ready = std::move(pending_transition_slot_);
+  ShutdownSlot(&active_slot_);
+
+  ApplyVolumeToSlot(ready, cur_vol);
+  ApplyRateToSlot(ready, cur_rate);
+  ready->start_requested = true;
+  ready->started = true;
+
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    current_id_ = target_id;
+    native_ = false;
+    paused_ = false;
+  }
+  active_slot_ = std::move(ready);
+
+  if (SUCCEEDED(active_slot_->engine->Play())) {
+    ApplyRateToSlot(active_slot_, cur_rate);
+    flutter::EncodableMap payload;
+    payload[flutter::EncodableValue("completedId")] =
+        flutter::EncodableValue(completed_id);
+    payload[flutter::EncodableValue("startedId")] =
+        flutter::EncodableValue(target_id);
+    emit_("onAudioTransition", payload);
+  } else {
+    ShutdownSlot(&active_slot_);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      current_id_.clear();
+    }
+    flutter::EncodableMap payload;
+    payload[flutter::EncodableValue("id")] =
+        flutter::EncodableValue(completed_id);
+    emit_("onAudioComplete", payload);
+  }
+}
+
+void ReaderPlayback::OnEngineEventMain(uint64_t slot_id, DWORD event,
+                                       DWORD_PTR param1, DWORD param2) {
+  (void)param1;
+  (void)param2;
+
+  // 1. 预热槽位事件
+  if (next_slot_ != nullptr && next_slot_->slot_id == slot_id) {
+    if (event == MF_MEDIA_ENGINE_EVENT_LOADEDMETADATA ||
+        event == MF_MEDIA_ENGINE_EVENT_CANPLAY ||
+        event == MF_MEDIA_ENGINE_EVENT_CANPLAYTHROUGH) {
+      const double dur = next_slot_->engine->GetDuration();
+      if (std::isfinite(dur) && dur > 0.0 && dur <= 1800.0) {
+        next_slot_->duration_hint_ms =
+            static_cast<int64_t>(std::llround(dur * 1000.0));
       }
-      std::promise<bool> done_promise;
-      auto done_future = done_promise.get_future();
-      self->post_main_([self, id, generation, &done_promise] {
-        bool active = false;
-        bool is_paused = false;
-        {
-          std::lock_guard<std::mutex> lock(self->mutex_);
-          active =
-              self->token_generation_ == generation && self->current_id_ == id;
-          is_paused = self->paused_;
+      if (event == MF_MEDIA_ENGINE_EVENT_CANPLAY ||
+          event == MF_MEDIA_ENGINE_EVENT_CANPLAYTHROUGH) {
+        next_slot_->can_play = true;
+      }
+    } else if (event == MF_MEDIA_ENGINE_EVENT_ERROR) {
+      ClearPreloaded();
+    }
+    return;
+  }
+
+  // 2. 当前活动槽位事件
+  if (active_slot_ == nullptr || active_slot_->slot_id != slot_id) {
+    return;
+  }
+  const std::string token_id = active_slot_->token_id;
+  std::string cur_id;
+  bool is_paused = false;
+  double cur_vol = 1.0;
+  double cur_rate = 1.0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cur_id = current_id_;
+    is_paused = paused_;
+    cur_vol = volume_;
+    cur_rate = playback_rate_;
+  }
+  if (cur_id != token_id) return;
+
+  if (event == MF_MEDIA_ENGINE_EVENT_LOADEDMETADATA ||
+      event == MF_MEDIA_ENGINE_EVENT_CANPLAY ||
+      event == MF_MEDIA_ENGINE_EVENT_CANPLAYTHROUGH) {
+    const double dur = active_slot_->engine->GetDuration();
+    if (std::isfinite(dur) && dur > 0.0 && dur <= 1800.0) {
+      active_slot_->duration_hint_ms =
+          static_cast<int64_t>(std::llround(dur * 1000.0));
+    }
+    if (event == MF_MEDIA_ENGINE_EVENT_CANPLAY ||
+        event == MF_MEDIA_ENGINE_EVENT_CANPLAYTHROUGH) {
+      active_slot_->can_play = true;
+      if (active_slot_->start_requested && !active_slot_->started &&
+          !is_paused) {
+        if (active_slot_->start_position_ms > 0 &&
+            active_slot_->duration_hint_ms > 0 &&
+            active_slot_->start_position_ms <
+                active_slot_->duration_hint_ms - 100) {
+          active_slot_->engine->SetCurrentTime(
+              static_cast<double>(active_slot_->start_position_ms) / 1000.0);
         }
-        if (!active) {
-          done_promise.set_value(true);
-          return;
-        }
-        if (is_paused) {
-          done_promise.set_value(false);
-          return;
-        }
-        wchar_t mode_buf[64]{};
-        if (mciSendStringW(L"status fanqie_tts mode", mode_buf, 64, nullptr) !=
-            0) {
-          self->CloseMci();
+        ApplyVolumeToSlot(active_slot_, cur_vol);
+        ApplyRateToSlot(active_slot_, cur_rate);
+        active_slot_->started = true;
+        if (FAILED(active_slot_->engine->Play())) {
+          ClearPreloaded();
+          ShutdownSlot(&active_slot_);
           {
-            std::lock_guard<std::mutex> lock(self->mutex_);
-            self->current_id_.clear();
+            std::lock_guard<std::mutex> lock(mutex_);
+            current_id_.clear();
           }
           flutter::EncodableMap payload;
-          payload[flutter::EncodableValue("id")] = flutter::EncodableValue(id);
-          self->emit_("onAudioError", payload);
-          done_promise.set_value(true);
+          payload[flutter::EncodableValue("id")] =
+              flutter::EncodableValue(token_id);
+          emit_("onAudioError", payload);
           return;
         }
-        const std::wstring mode = ToLowerWide(mode_buf);
-        if (mode == L"stopped") {
-          self->CloseMci();
-          {
-            std::lock_guard<std::mutex> lock(self->mutex_);
-            self->current_id_.clear();
-          }
-          flutter::EncodableMap payload;
-          payload[flutter::EncodableValue("id")] = flutter::EncodableValue(id);
-          self->emit_("onAudioComplete", payload);
-          done_promise.set_value(true);
-          return;
-        }
-        done_promise.set_value(false);
-      });
-      if (done_future.wait_for(std::chrono::seconds(2)) !=
-              std::future_status::ready ||
-          done_future.get()) {
-        return;
+        ApplyRateToSlot(active_slot_, cur_rate);
       }
     }
-  }).detach();
+    return;
+  }
 
-  return true;
+  if (event == MF_MEDIA_ENGINE_EVENT_PLAYING) {
+    ApplyVolumeToSlot(active_slot_, cur_vol);
+    ApplyRateToSlot(active_slot_, cur_rate);
+    return;
+  }
+
+  if (event == MF_MEDIA_ENGINE_EVENT_ENDED) {
+    if (TryAdvanceToPreloaded(token_id)) {
+      return;
+    }
+    ClearPreloaded();
+    ShutdownSlot(&active_slot_);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      current_id_.clear();
+    }
+    flutter::EncodableMap payload;
+    payload[flutter::EncodableValue("id")] = flutter::EncodableValue(token_id);
+    emit_("onAudioComplete", payload);
+    return;
+  }
+
+  if (event == MF_MEDIA_ENGINE_EVENT_ERROR) {
+    ClearPreloaded();
+    ShutdownSlot(&active_slot_);
+    {
+      std::lock_guard<std::mutex> lock(mutex_);
+      current_id_.clear();
+    }
+    flutter::EncodableMap payload;
+    payload[flutter::EncodableValue("id")] = flutter::EncodableValue(token_id);
+    payload[flutter::EncodableValue("code")] =
+        flutter::EncodableValue(static_cast<int64_t>(param1));
+    payload[flutter::EncodableValue("hresult")] =
+        flutter::EncodableValue(static_cast<int64_t>(param2));
+    emit_("onAudioError", payload);
+  }
 }
 
 bool ReaderPlayback::Stop(const std::optional<std::string>& id) {
@@ -608,7 +1304,8 @@ bool ReaderPlayback::Stop(const std::optional<std::string>& id) {
       SetEvent(speech_stop_event_);
     }
   }
-  CloseMci();
+  ClearPreloaded();
+  ShutdownSlot(&active_slot_);
   return true;
 }
 
@@ -631,28 +1328,53 @@ bool ReaderPlayback::StopAudio() {
 }
 
 bool ReaderPlayback::PauseAudio(const std::optional<std::string>& id) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (native_ || current_id_.empty() || !mci_open_ ||
-      (id.has_value() && !id->empty() && *id != current_id_)) {
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (native_ || current_id_.empty() ||
+        (id.has_value() && !id->empty() && *id != current_id_)) {
+      return false;
+    }
+  }
+  if (active_slot_ == nullptr || active_slot_->engine == nullptr) {
     return false;
   }
-  if (mciSendStringW(L"pause fanqie_tts", nullptr, 0, nullptr) != 0) {
-    return false;
+  ClearPreloaded();
+  active_slot_->engine->Pause();
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    paused_ = true;
   }
-  paused_ = true;
   return true;
 }
 
 bool ReaderPlayback::ResumeAudio(const std::optional<std::string>& id) {
-  std::lock_guard<std::mutex> lock(mutex_);
-  if (native_ || current_id_.empty() || !mci_open_ ||
-      (id.has_value() && !id->empty() && *id != current_id_)) {
+  double cur_vol = 1.0;
+  double cur_rate = 1.0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (native_ || current_id_.empty() ||
+        (id.has_value() && !id->empty() && *id != current_id_)) {
+      return false;
+    }
+    paused_ = false;
+    cur_vol = volume_;
+    cur_rate = playback_rate_;
+  }
+  if (active_slot_ == nullptr || active_slot_->engine == nullptr) {
     return false;
   }
-  if (mciSendStringW(L"resume fanqie_tts", nullptr, 0, nullptr) != 0) {
+  ApplyVolumeToSlot(active_slot_, cur_vol);
+  ApplyRateToSlot(active_slot_, cur_rate);
+  if (active_slot_->can_play) {
+    active_slot_->started = true;
+    const HRESULT hr = active_slot_->engine->Play();
+    if (SUCCEEDED(hr)) {
+      ApplyRateToSlot(active_slot_, cur_rate);
+      return true;
+    }
     return false;
   }
-  paused_ = false;
+  active_slot_->start_requested = true;
   return true;
 }
 
@@ -660,15 +1382,27 @@ bool ReaderPlayback::SetVolume(double value) {
   if (!std::isfinite(value) || value < 0.0 || value > 1.0) {
     return false;
   }
-  std::lock_guard<std::mutex> lock(mutex_);
-  volume_ = value;
-  if (mci_open_) {
-    const int mci_vol =
-        static_cast<int>(std::clamp(std::round(volume_ * 1000.0), 0.0, 1000.0));
-    const std::wstring vol_cmd =
-        L"setaudio fanqie_tts volume to " + std::to_wstring(mci_vol);
-    mciSendStringW(vol_cmd.c_str(), nullptr, 0, nullptr);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    volume_ = value;
   }
+  ApplyVolumeToSlot(active_slot_, value);
+  ApplyVolumeToSlot(next_slot_, value);
+  ApplyVolumeToSlot(pending_transition_slot_, value);
+  return true;
+}
+
+bool ReaderPlayback::SetPlaybackRate(double rate, bool preserve_pitch) {
+  if (!std::isfinite(rate)) return false;
+  const double clamped = std::clamp(rate, 0.5, 2.0);
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    playback_rate_ = clamped;
+    preserve_pitch_ = preserve_pitch;
+  }
+  ApplyRateToSlot(active_slot_, clamped);
+  ApplyRateToSlot(next_slot_, clamped);
+  ApplyRateToSlot(pending_transition_slot_, clamped);
   return true;
 }
 
@@ -712,22 +1446,58 @@ bool ReaderPlayback::SetDeadline(int64_t milliseconds) {
   return true;
 }
 
-flutter::EncodableMap ReaderPlayback::PlaybackState() {
-  std::lock_guard<std::mutex> lock(mutex_);
+flutter::EncodableMap ReaderPlayback::AudioPosition() {
+  std::string cur_id;
+  bool is_nat = false;
+  bool is_paused = false;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cur_id = current_id_;
+    is_nat = native_;
+    is_paused = paused_;
+  }
   const bool playing =
-      !current_id_.empty() && !paused_ && (native_ ? true : IsMciPlaying());
+      !is_nat && !is_paused && !cur_id.empty() && IsActiveEnginePlaying();
+  const int64_t pos_ms = is_nat ? 0LL : QueryActivePositionMs();
+  const int64_t dur_ms = is_nat ? 0LL : QueryActiveDurationMs();
+  flutter::EncodableMap out;
+  out[flutter::EncodableValue("id")] =
+      cur_id.empty() ? flutter::EncodableValue()
+                     : flutter::EncodableValue(cur_id);
+  out[flutter::EncodableValue("playing")] = flutter::EncodableValue(playing);
+  out[flutter::EncodableValue("positionMs")] = flutter::EncodableValue(pos_ms);
+  out[flutter::EncodableValue("durationMs")] = flutter::EncodableValue(dur_ms);
+  return out;
+}
+
+flutter::EncodableMap ReaderPlayback::PlaybackState() {
+  std::string cur_id;
+  bool is_nat = false;
+  bool is_paused = false;
+  double cur_vol = 1.0;
+  int64_t cur_deadline = 0;
+  {
+    std::lock_guard<std::mutex> lock(mutex_);
+    cur_id = current_id_;
+    is_nat = native_;
+    is_paused = paused_;
+    cur_vol = volume_;
+    cur_deadline = sleep_deadline_;
+  }
+  const bool playing =
+      !cur_id.empty() && !is_paused && (is_nat ? true : IsActiveEnginePlaying());
   flutter::EncodableMap state;
   state[flutter::EncodableValue("id")] =
-      current_id_.empty() ? flutter::EncodableValue()
-                          : flutter::EncodableValue(current_id_);
+      cur_id.empty() ? flutter::EncodableValue()
+                     : flutter::EncodableValue(cur_id);
   state[flutter::EncodableValue("playing")] = flutter::EncodableValue(playing);
-  state[flutter::EncodableValue("native")] = flutter::EncodableValue(native_);
-  state[flutter::EncodableValue("paused")] = flutter::EncodableValue(paused_);
-  state[flutter::EncodableValue("volume")] = flutter::EncodableValue(volume_);
+  state[flutter::EncodableValue("native")] = flutter::EncodableValue(is_nat);
+  state[flutter::EncodableValue("paused")] = flutter::EncodableValue(is_paused);
+  state[flutter::EncodableValue("volume")] = flutter::EncodableValue(cur_vol);
   state[flutter::EncodableValue("deadline")] =
-      flutter::EncodableValue(sleep_deadline_);
+      flutter::EncodableValue(cur_deadline);
   state[flutter::EncodableValue("position_ms")] =
-      flutter::EncodableValue(native_ ? 0LL : QueryMciPositionMs());
+      flutter::EncodableValue(is_nat ? 0LL : QueryActivePositionMs());
   return state;
 }
 

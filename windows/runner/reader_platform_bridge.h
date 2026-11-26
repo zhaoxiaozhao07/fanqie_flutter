@@ -17,6 +17,7 @@
 
 #include "reader_file_exporter.h"
 #include "reader_playback.h"
+#include "reader_sqlite_bridge.h"
 #include "reader_text_decoder.h"
 #include "win32_window.h"
 
@@ -66,6 +67,7 @@ class ReaderPlatformBridge {
   std::shared_ptr<ReaderTextDecoder> decoder_;
   std::shared_ptr<ReaderFileExporter> exporter_;
   std::shared_ptr<ReaderPlayback> playback_;
+  std::unique_ptr<ReaderSqliteBridge> sqlite_;
 
   struct ExternalImportState {
     std::mutex mutex;

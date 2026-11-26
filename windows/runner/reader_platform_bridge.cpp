@@ -12,6 +12,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cwctype>
 #include <filesystem>
 #include <memory>
@@ -235,6 +236,7 @@ ReaderPlatformBridge::ReaderPlatformBridge(
               method, std::make_unique<flutter::EncodableValue>(payload));
         }
       });
+  sqlite_ = std::make_unique<ReaderSqliteBridge>(messenger, post_main_);
   channel_->SetMethodCallHandler([this](const auto& call, auto result) {
     HandleMethodCall(call, std::move(result));
   });
@@ -463,6 +465,9 @@ void ReaderPlatformBridge::SaveWindowStateAndClose(HWND hwnd) {
   if (playback_ != nullptr) {
     playback_->Release();
   }
+  if (sqlite_ != nullptr) {
+    sqlite_->Shutdown();
+  }
   // Never persist the borderless full-screen geometry; restore the durable
   // normal placement first.
   if (Win32Window* window = window_(); window != nullptr &&
@@ -515,6 +520,81 @@ void ReaderPlatformBridge::HandleMethodCall(
     result->Success(flutter::EncodableValue(true));
     return;
   }
+  if (method == "readNamedSecret") {
+    std::string key = StringArg(args, "key");
+    while (!key.empty() && std::isspace(static_cast<unsigned char>(key.front()))) {
+      key.erase(key.begin());
+    }
+    while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back()))) {
+      key.pop_back();
+    }
+    if (!ReaderPlayback::IsValidSecretKey(key)) {
+      result->Success();
+      return;
+    }
+    std::optional<std::string> secret;
+    std::string error;
+    if (!ReaderPlayback::ReadNamedSecret(key, &secret, &error)) {
+      result->Error("secureStorage",
+                    error.empty() ? "无法读取系统安全存储；未改写原密钥" : error);
+      return;
+    }
+    if (secret.has_value()) {
+      result->Success(flutter::EncodableValue(*secret));
+    } else {
+      result->Success();
+    }
+    return;
+  }
+  if (method == "writeNamedSecret") {
+    std::string key = StringArg(args, "key");
+    while (!key.empty() && std::isspace(static_cast<unsigned char>(key.front()))) {
+      key.erase(key.begin());
+    }
+    while (!key.empty() && std::isspace(static_cast<unsigned char>(key.back()))) {
+      key.pop_back();
+    }
+    const auto value = OptionalStringArg(args, "value");
+    if (!ReaderPlayback::IsValidSecretKey(key) || !value.has_value()) {
+      result->Success(flutter::EncodableValue(false));
+      return;
+    }
+    std::string error;
+    if (!ReaderPlayback::WriteNamedSecret(key, *value, &error)) {
+      result->Error("secureStorage",
+                    error.empty() ? "密钥未写入系统安全存储" : error);
+      return;
+    }
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+  if (method == "probeAudioDuration") {
+    const std::string file_path = StringArg(args, "filePath");
+    const std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>> owned(
+        result.release());
+    const auto post_main = post_main_;
+    std::thread([file_path, owned, post_main] {
+      flutter::EncodableMap probed =
+          ReaderPlayback::ProbeAudioDuration(file_path);
+      post_main([owned, probed = std::move(probed)] {
+        owned->Success(flutter::EncodableValue(probed));
+      });
+    }).detach();
+    return;
+  }
+  if (method == "getFreeDiskBytes") {
+    const std::string dir_path = StringArg(args, "path");
+    const std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>> owned(
+        result.release());
+    const auto post_main = post_main_;
+    std::thread([dir_path, owned, post_main] {
+      const int64_t free_bytes = ReaderPlayback::FreeDiskBytes(dir_path);
+      post_main([owned, free_bytes] {
+        owned->Success(flutter::EncodableValue(free_bytes));
+      });
+    }).detach();
+    return;
+  }
   if (method == "initNativeTts") {
     result->Success(
         flutter::EncodableValue(ReaderPlayback::NativeSpeechAvailable()));
@@ -532,7 +612,31 @@ void ReaderPlatformBridge::HandleMethodCall(
   }
   if (method == "playAudioFile") {
     result->Success(flutter::EncodableValue(playback_->Play(
-        StringArg(args, "id"), StringArg(args, "filePath"))));
+        StringArg(args, "id"), StringArg(args, "filePath"),
+        DoubleArg(args, "rate", 1.0), BoolArg(args, "preservePitch", true),
+        std::max<int64_t>(0, Int64Arg(args, "startPositionMs", 0)))));
+    return;
+  }
+  if (method == "preloadNextAudio") {
+    result->Success(flutter::EncodableValue(playback_->PreloadNext(
+        StringArg(args, "afterId"), StringArg(args, "id"),
+        StringArg(args, "filePath"), DoubleArg(args, "rate", 1.0),
+        BoolArg(args, "preservePitch", true),
+        Int64Arg(args, "gapMs", 0))));
+    return;
+  }
+  if (method == "clearPreloadedAudio") {
+    playback_->ClearPreloaded();
+    result->Success(flutter::EncodableValue(true));
+    return;
+  }
+  if (method == "setPlaybackRate") {
+    result->Success(flutter::EncodableValue(playback_->SetPlaybackRate(
+        DoubleArg(args, "rate", 1.0), BoolArg(args, "preservePitch", true))));
+    return;
+  }
+  if (method == "getAudioPosition") {
+    result->Success(flutter::EncodableValue(playback_->AudioPosition()));
     return;
   }
   if (method == "stopPlayback") {
