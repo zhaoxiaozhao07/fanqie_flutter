@@ -139,7 +139,7 @@
               "provider_id": { "type": "string", "minLength": 1 },
               "display_name": { "type": "string", "minLength": 1 },
               "enabled": { "type": "boolean" },
-              "adapter": { "type": "string", "enum": ["openai_speech"] },
+              "adapter": { "type": "string", "enum": ["openai_speech", "native_tts"] },
               "base_url": { "type": "string", "minLength": 1 },
               "endpoint": { "type": "string", "minLength": 1 },
               "api_key": { "type": ["string", "null"] },

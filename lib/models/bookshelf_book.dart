@@ -18,6 +18,8 @@ class BookshelfBook {
   final int? latestRemoteChapters;
   final bool hasUpdate;
   final DateTime? lastCheckedTime;
+  final bool isPinned;
+  final DateTime? pinnedTime;
 
   BookshelfBook({
     required this.bookId,
@@ -36,6 +38,8 @@ class BookshelfBook {
     this.latestRemoteChapters,
     this.hasUpdate = false,
     this.lastCheckedTime,
+    this.isPinned = false,
+    this.pinnedTime,
   }) : addedTime = addedTime ?? DateTime.now();
 
   factory BookshelfBook.fromBook(
@@ -84,6 +88,9 @@ class BookshelfBook {
     int? latestRemoteChapters,
     bool? hasUpdate,
     DateTime? lastCheckedTime,
+    bool? isPinned,
+    DateTime? pinnedTime,
+    bool clearPinnedTime = false,
   }) {
     return BookshelfBook(
       bookId: bookId,
@@ -102,6 +109,8 @@ class BookshelfBook {
       latestRemoteChapters: latestRemoteChapters ?? this.latestRemoteChapters,
       hasUpdate: hasUpdate ?? this.hasUpdate,
       lastCheckedTime: lastCheckedTime ?? this.lastCheckedTime,
+      isPinned: isPinned ?? this.isPinned,
+      pinnedTime: clearPinnedTime ? null : (pinnedTime ?? this.pinnedTime),
     );
   }
 
@@ -123,6 +132,8 @@ class BookshelfBook {
       latestRemoteChapters: latestRemoteChapters,
       hasUpdate: hasUpdate,
       lastCheckedTime: lastCheckedTime,
+      isPinned: isPinned,
+      pinnedTime: pinnedTime,
     );
   }
 
@@ -144,6 +155,8 @@ class BookshelfBook {
       'latest_remote_chapters': latestRemoteChapters,
       'has_update': hasUpdate,
       'last_checked_time': lastCheckedTime?.toIso8601String(),
+      'is_pinned': isPinned,
+      if (pinnedTime != null) 'pinned_time': pinnedTime!.toIso8601String(),
     };
   }
 
@@ -176,6 +189,10 @@ class BookshelfBook {
       hasUpdate: json['has_update'] == true,
       lastCheckedTime: json['last_checked_time'] != null
           ? DateTime.tryParse(json['last_checked_time'].toString())
+          : null,
+      isPinned: json['is_pinned'] == true,
+      pinnedTime: json['pinned_time'] != null
+          ? DateTime.tryParse(json['pinned_time'].toString())
           : null,
     );
   }

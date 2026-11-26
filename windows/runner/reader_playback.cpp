@@ -694,6 +694,98 @@ flutter::EncodableMap ReaderPlayback::ProbeAudioDuration(
   return map;
 }
 
+flutter::EncodableMap ReaderPlayback::SynthesizeNativeTtsToFile(
+    const std::string& text, double rate, const std::string& voice_id,
+    const std::string& output_path) {
+  auto fail = [](const std::string& msg) {
+    flutter::EncodableMap map;
+    map[flutter::EncodableValue("ok")] = flutter::EncodableValue(false);
+    map[flutter::EncodableValue("error")] = flutter::EncodableValue(msg);
+    return map;
+  };
+  if (text.empty() || output_path.empty()) {
+    return fail("待合成文本或输出路径为空");
+  }
+  const std::wstring wide_text = Utf8ToWide(text);
+  const std::wstring wide_path = Utf8ToWide(output_path);
+  if (wide_text.empty() || wide_path.empty()) {
+    return fail("文本或路径编码无效");
+  }
+
+  std::error_code ec;
+  const std::filesystem::path target(wide_path);
+  if (target.has_parent_path()) {
+    std::filesystem::create_directories(target.parent_path(), ec);
+  }
+  std::filesystem::remove(target, ec);
+
+  static const GUID kSpdfidWaveFormatEx = {
+      0xC31ADBAE,
+      0x527F,
+      0x4FF5,
+      {0xA2, 0x30, 0xF6, 0x2B, 0xB6, 0x1F, 0xF7, 0x0C},
+  };
+
+  const HRESULT co_hr = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  bool ok = false;
+  std::string err = "Windows 系统语音离线合成失败";
+  {
+    Microsoft::WRL::ComPtr<ISpVoice> voice;
+    Microsoft::WRL::ComPtr<ISpStream> stream;
+    if (SUCCEEDED(CoCreateInstance(CLSID_SpVoice, nullptr, CLSCTX_ALL,
+                                   IID_PPV_ARGS(&voice))) &&
+        voice != nullptr &&
+        SUCCEEDED(CoCreateInstance(CLSID_SpStream, nullptr, CLSCTX_ALL,
+                                   IID_PPV_ARGS(&stream))) &&
+        stream != nullptr) {
+      WAVEFORMATEX wfx{};
+      wfx.wFormatTag = WAVE_FORMAT_PCM;
+      wfx.nChannels = 1;
+      wfx.nSamplesPerSec = 22050;
+      wfx.wBitsPerSample = 16;
+      wfx.nBlockAlign = wfx.nChannels * (wfx.wBitsPerSample / 8);
+      wfx.nAvgBytesPerSec = wfx.nSamplesPerSec * wfx.nBlockAlign;
+      wfx.cbSize = 0;
+
+      if (SUCCEEDED(stream->BindToFile(wide_path.c_str(), SPFM_CREATE_ALWAYS,
+                                       &kSpdfidWaveFormatEx, &wfx, 0))) {
+        const long sapi_rate = static_cast<long>(
+            std::clamp(std::round((rate - 1.0) * 6.0), -10.0, 10.0));
+        voice->SetRate(sapi_rate);
+        voice->SetVolume(100);
+        if (SUCCEEDED(voice->SetOutput(stream.Get(), TRUE)) &&
+            SUCCEEDED(voice->Speak(wide_text.c_str(), SPF_IS_NOT_XML,
+                                   nullptr))) {
+          ok = true;
+        }
+        stream->Close();
+      } else {
+        err = "无法创建本地语音输出文件";
+      }
+    } else {
+      err = "无法初始化 Windows SAPI 语音引擎";
+    }
+  }
+  if (SUCCEEDED(co_hr)) {
+    CoUninitialize();
+  }
+
+  if (!ok) {
+    std::filesystem::remove(target, ec);
+    return fail(err);
+  }
+  const uint64_t size = std::filesystem::file_size(target, ec);
+  if (ec || size <= 44ULL) {
+    std::filesystem::remove(target, ec);
+    return fail("系统语音输出音频为空");
+  }
+  flutter::EncodableMap map;
+  map[flutter::EncodableValue("ok")] = flutter::EncodableValue(true);
+  map[flutter::EncodableValue("filePath")] =
+      flutter::EncodableValue(output_path);
+  return map;
+}
+
 int64_t ReaderPlayback::FreeDiskBytes(const std::string& raw_path) {
   std::string trimmed = raw_path;
   while (!trimmed.empty() &&

@@ -45,6 +45,7 @@ class NotesWorkspaceScreenState extends State<NotesWorkspaceScreen> {
   NoteLibrarySort _sort = NoteLibrarySort.newest;
   final _selected = <String>{};
   bool _selecting = false;
+  bool _mobileFiltersExpanded = false;
   String? _previewKey, _previewText;
   int _previewGeneration = 0;
   double? _restoredOffset;
@@ -547,6 +548,12 @@ class NotesWorkspaceScreenState extends State<NotesWorkspaceScreen> {
     final tags =
         _snapshot.entries.expand((entry) => entry.note.tags).toSet().toList()
           ..sort();
+    final isCompact = MediaQuery.sizeOf(context).width < 640;
+    final activeFilterCount =
+        (_bookId.isEmpty ? 0 : 1) +
+        (_tag.isEmpty ? 0 : 1) +
+        (_color == -1 ? 0 : 1) +
+        (_sort == NoteLibrarySort.newest ? 0 : 1);
     return Focus(
       onKeyEvent: (_, event) {
         if (event is KeyDownEvent &&
@@ -600,79 +607,149 @@ class NotesWorkspaceScreenState extends State<NotesWorkspaceScreen> {
         body: Column(
           children: [
             Padding(
-              padding: const EdgeInsets.fromLTRB(16, 8, 16, 12),
-              child: TextField(
-                key: const ValueKey('notes-workspace-query'),
-                controller: _query,
-                focusNode: _queryFocus,
-                maxLength: 128,
-                decoration: const InputDecoration(
-                  hintText: '搜索书名、摘录、笔记、章节或标签',
-                  prefixIcon: Icon(Icons.search),
-                  counterText: '',
-                ),
-                onChanged: _queryChanged,
-                onSubmitted: (_) {
-                  _debounce?.cancel();
-                  if (!_composing) setState(_filter);
-                },
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 16),
-              child: Align(
-                alignment: Alignment.centerLeft,
-                child: Wrap(
-                  spacing: 12,
-                  runSpacing: 12,
-                  children: [
-                    _choice('notes-workspace-book', '书籍', 220, _bookId, [
-                      const DropdownMenuItem(value: '', child: Text('全部书籍')),
-                      for (final book in books)
-                        DropdownMenuItem(
-                          value: book.bookId,
-                          child: Text(
-                            book.bookName,
-                            overflow: TextOverflow.ellipsis,
-                          ),
+              padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      key: const ValueKey('notes-workspace-query'),
+                      controller: _query,
+                      focusNode: _queryFocus,
+                      maxLength: 128,
+                      decoration: const InputDecoration(
+                        hintText: '搜索书名、摘录、笔记、章节或标签',
+                        prefixIcon: Icon(Icons.search),
+                        counterText: '',
+                      ),
+                      onChanged: _queryChanged,
+                      onSubmitted: (_) {
+                        _debounce?.cancel();
+                        if (!_composing) setState(_filter);
+                      },
+                    ),
+                  ),
+                  if (isCompact) ...[
+                    const SizedBox(width: 8),
+                    Badge(
+                      isLabelVisible: activeFilterCount > 0,
+                      label: Text('$activeFilterCount'),
+                      child: IconButton.outlined(
+                        key: const ValueKey('notes-workspace-filter-toggle'),
+                        tooltip: _mobileFiltersExpanded ? '收起筛选条件' : '展开筛选条件',
+                        icon: Icon(
+                          _mobileFiltersExpanded
+                              ? Icons.filter_list_off
+                              : Icons.filter_list,
                         ),
-                    ], (value) => _bookId = value),
-                    _choice('notes-workspace-tag', '标签', 170, _tag, [
-                      const DropdownMenuItem(value: '', child: Text('全部标签')),
-                      for (final tag in tags)
-                        DropdownMenuItem(
-                          value: tag,
-                          child: Text('#$tag', overflow: TextOverflow.ellipsis),
+                        onPressed: () => setState(
+                          () => _mobileFiltersExpanded = !_mobileFiltersExpanded,
                         ),
-                    ], (value) => _tag = value),
-                    _choice('notes-workspace-color', '划线颜色', 140, _color, [
-                      for (final entry in const {
-                        -1: '全部颜色',
-                        0: '黄色',
-                        1: '绿色',
-                        2: '蓝色',
-                        3: '粉色',
-                      }.entries)
-                        DropdownMenuItem(
-                          value: entry.key,
-                          child: Text(entry.value),
-                        ),
-                    ], (value) => _color = value),
-                    _choice('notes-workspace-sort', '排序', 180, _sort, [
-                      for (final entry in const {
-                        NoteLibrarySort.newest: '最近更新',
-                        NoteLibrarySort.oldest: '最早摘录',
-                        NoteLibrarySort.bookAndChapter: '书名与章节',
-                      }.entries)
-                        DropdownMenuItem(
-                          value: entry.key,
-                          child: Text(entry.value),
-                        ),
-                    ], (value) => _sort = value),
+                      ),
+                    ),
                   ],
-                ),
+                ],
               ),
             ),
+            if (!isCompact || _mobileFiltersExpanded)
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 4, 16, 0),
+                child: Align(
+                  alignment: Alignment.centerLeft,
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final halfWidth = isCompact
+                          ? ((constraints.maxWidth - 12) / 2).clamp(130.0, 260.0)
+                          : null;
+                      return Wrap(
+                        spacing: 12,
+                        runSpacing: 10,
+                        children: [
+                          _choice(
+                            'notes-workspace-book',
+                            '书籍',
+                            halfWidth ?? 220,
+                            _bookId,
+                            [
+                              const DropdownMenuItem(
+                                value: '',
+                                child: Text('全部书籍'),
+                              ),
+                              for (final book in books)
+                                DropdownMenuItem(
+                                  value: book.bookId,
+                                  child: Text(
+                                    book.bookName,
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                            ],
+                            (value) => _bookId = value,
+                          ),
+                          _choice(
+                            'notes-workspace-tag',
+                            '标签',
+                            halfWidth ?? 170,
+                            _tag,
+                            [
+                              const DropdownMenuItem(
+                                value: '',
+                                child: Text('全部标签'),
+                              ),
+                              for (final tag in tags)
+                                DropdownMenuItem(
+                                  value: tag,
+                                  child: Text(
+                                    '#$tag',
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                            ],
+                            (value) => _tag = value,
+                          ),
+                          _choice(
+                            'notes-workspace-color',
+                            '划线颜色',
+                            halfWidth ?? 140,
+                            _color,
+                            [
+                              for (final entry in const {
+                                -1: '全部颜色',
+                                0: '黄色',
+                                1: '绿色',
+                                2: '蓝色',
+                                3: '粉色',
+                              }.entries)
+                                DropdownMenuItem(
+                                  value: entry.key,
+                                  child: Text(entry.value),
+                                ),
+                            ],
+                            (value) => _color = value,
+                          ),
+                          _choice(
+                            'notes-workspace-sort',
+                            '排序',
+                            halfWidth ?? 180,
+                            _sort,
+                            [
+                              for (final entry in const {
+                                NoteLibrarySort.newest: '最近更新',
+                                NoteLibrarySort.oldest: '最早摘录',
+                                NoteLibrarySort.bookAndChapter: '书名与章节',
+                              }.entries)
+                                DropdownMenuItem(
+                                  value: entry.key,
+                                  child: Text(entry.value),
+                                ),
+                            ],
+                            (value) => _sort = value,
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ),
             Padding(
               padding: const EdgeInsets.all(16),
               child: Row(

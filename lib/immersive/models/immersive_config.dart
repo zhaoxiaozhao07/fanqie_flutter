@@ -2160,7 +2160,8 @@ class ImmersiveConfigValidator {
             ),
           );
         }
-        if (checkedProviders.add(res.provider.providerId)) {
+        if (checkedProviders.add(res.provider.providerId) &&
+            res.provider.adapter != 'native_tts') {
           _checkActiveEndpointAndKey(
             baseUrl: res.provider.baseUrl,
             apiKey: res.provider.apiKey,
@@ -2667,7 +2668,7 @@ class ImmersiveConfigValidator {
       map,
       'adapter',
       '$path.adapter',
-      const {'openai_speech'},
+      const {'openai_speech', 'native_tts'},
       issues,
     );
     final baseUrl = _reqNonEmptyString(map, 'base_url', '$path.base_url', issues);

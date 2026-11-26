@@ -11,7 +11,9 @@ import 'reader_shortcuts_dialog.dart';
 import 'reader_colors_dialog.dart';
 import '../services/reader_display_text.dart';
 import '../services/external_reader_fonts.dart';
+import '../services/app_theme_service.dart';
 import 'reader_fonts_dialog.dart';
+import 'text_replace_rules_dialog.dart';
 
 class ReaderSettingsSheet extends StatefulWidget {
   final String bookId;
@@ -196,6 +198,9 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
         next,
         bookId: _bookOverride ? widget.bookId : null,
       );
+      if (!_bookOverride) {
+        AppThemeService().syncReaderSettings(next);
+      }
       await widget.onChanged(next, _bookOverride);
       if (mounted) setState(() => _settings = next);
     } catch (error) {
@@ -667,7 +672,26 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                           ),
                         if (ReaderPlatform.capabilities.windowBrightness)
                           const Text('仅调整阅读窗口，退出阅读后恢复。'),
-                        const SizedBox(height: 16),
+                        const SizedBox(height: 12),
+                        AnimatedBuilder(
+                          animation: AppThemeService(),
+                          builder: (context, _) => _section(
+                            '应用外围外观（书架/主页/详情）',
+                            _choices<AppThemePreference>(
+                              {
+                                AppThemePreference.system: '跟随系统',
+                                AppThemePreference.light: '浅色',
+                                AppThemePreference.dark: '深色',
+                                AppThemePreference.followReader: '跟随阅读日夜',
+                              },
+                              AppThemeService().preference,
+                              (value) => unawaited(
+                                AppThemeService().setPreference(value),
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 8),
                         _section(
                           '翻页模式',
                           _choices(
@@ -788,6 +812,18 @@ class _ReaderSettingsSheetState extends State<ReaderSettingsSheet>
                             ),
                             const Text(
                               '简繁为离线逐字显示转换，复制、搜索、批注和听书仍使用原文；多义字可能需要人工判断。',
+                            ),
+                            const SizedBox(height: 8),
+                            OutlinedButton.icon(
+                              onPressed: () => _dialog<void>(
+                                (_) => TextReplaceRulesDialog(
+                                  bookId: widget.bookId == 'desktop-global'
+                                      ? null
+                                      : widget.bookId,
+                                ),
+                              ),
+                              icon: const Icon(Icons.cleaning_services_outlined, size: 18),
+                              label: const Text('正文净化与替换规则'),
                             ),
                             if (ReaderPlatform.isDesktop)
                               _section(

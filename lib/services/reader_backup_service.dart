@@ -23,6 +23,9 @@ import 'reading_activity_service.dart';
 import 'external_reader_fonts.dart';
 import 'reader_trash_service.dart';
 import 'reader_library_service.dart';
+import 'app_theme_service.dart';
+import 'text_replace_rule_service.dart';
+import 'search_history_service.dart';
 
 enum ReaderRestoreMode { merge, replace }
 
@@ -70,6 +73,9 @@ class ReaderBackupService {
     ExternalReaderFonts.preferencesKey,
     ReaderTrashService.preferencesKey,
     ReaderLibraryService.preferencesKey,
+    AppThemeService.preferencesKey,
+    TextReplaceRuleService.preferencesKey,
+    SearchHistoryService.preferencesKey,
   };
   static const _prefixes = [
     'reader_position_',
@@ -95,6 +101,7 @@ class ReaderBackupService {
     await BookmarkService().flush();
     await ReaderTrashService().flush();
     await ReaderLibraryService().flush();
+    await TextReplaceRuleService().flush();
     if (notifyServices) await BookshelfService().flush();
     await ReaderPositionService.flush();
     await ReaderSettingsRepository.flush();
@@ -273,6 +280,11 @@ class ReaderBackupService {
             (expected is String && value is! String)) {
           throw const FormatException('旧版设置类型不正确');
         }
+      } else if (key == AppThemeService.preferencesKey) {
+        if (value is! String ||
+            !AppThemePreference.values.any((e) => e.name == value)) {
+          throw const FormatException('外观主题设置无效');
+        }
       } else if (key.startsWith('read_progress_title_')) {
         if (value is! String || value.length > 1000) {
           throw const FormatException('章节名不正确');
@@ -295,6 +307,10 @@ class ReaderBackupService {
           ReaderLibrarySnapshot.fromJson(json as Map);
         } else if (key == ReaderTrashService.preferencesKey) {
           ReaderTrashService.decode(value);
+        } else if (key == TextReplaceRuleService.preferencesKey) {
+          TextReplaceRuleService.decodeRules(value);
+        } else if (key == SearchHistoryService.preferencesKey) {
+          SearchHistoryService.decodeHistory(value);
         } else if (key == ExternalReaderFonts.preferencesKey) {
           if (json is! List || json.length > 20) {
             throw const FormatException('字体索引超限');
@@ -449,6 +465,16 @@ class ReaderBackupService {
         });
         ReaderTrashService.decode(raw);
         output[key] = raw;
+      } else if (key == TextReplaceRuleService.preferencesKey) {
+        output[key] = TextReplaceRuleService.mergeEncoded(
+          previous as String,
+          entry.value as String,
+        );
+      } else if (key == SearchHistoryService.preferencesKey) {
+        output[key] = SearchHistoryService.mergeEncoded(
+          previous as String,
+          entry.value as String,
+        );
       } else if (key == ExternalReaderFonts.preferencesKey) {
         final fonts = <String, dynamic>{
           for (final font in jsonDecode(previous as String) as List)
@@ -676,6 +702,9 @@ class ReaderBackupService {
     await ReadingActivityService().reload();
     await ExternalReaderFonts().reload();
     await ReaderLibraryService().load();
+    await AppThemeService().reload();
+    await TextReplaceRuleService().reload();
+    await SearchHistoryService().reload();
   }
 
   static Directory _destination(Directory base, String kind, String id) =>

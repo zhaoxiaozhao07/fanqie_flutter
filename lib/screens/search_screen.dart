@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -5,6 +6,8 @@ import '../app_theme.dart';
 import '../models/book.dart';
 import '../models/discovery.dart';
 import '../services/api_service.dart';
+import '../services/app_theme_service.dart';
+import '../services/search_history_service.dart';
 import '../widgets/book_card.dart';
 import '../widgets/download_action_button.dart';
 import '../webdav/widgets/webdav_sync_sheet.dart';
@@ -25,6 +28,14 @@ class _SearchScreenState extends State<SearchScreen> {
   late final ApiService _api = widget.apiService ?? ApiService();
   final _search = TextEditingController();
   final _scroll = ScrollController();
+  final _searchHistory = SearchHistoryService();
+  FocusNode? _ownedSearchFocus;
+  FocusNode get _effectiveSearchFocus =>
+      widget.searchFocusNode ?? (_ownedSearchFocus ??= FocusNode());
+  bool _searchFocused = false;
+  Timer? _suggestDebounce;
+  List<Book> _suggestions = const [];
+  int _suggestGeneration = 0;
   List<LibraryCategory> _categories = const [];
   LibraryCategory _category = LibraryCategory.all;
   List<Book> _books = [];
@@ -39,16 +50,49 @@ class _SearchScreenState extends State<SearchScreen> {
   void initState() {
     super.initState();
     _scroll.addListener(_onScroll);
+    _effectiveSearchFocus.addListener(_onSearchFocusChanged);
+    unawaited(_searchHistory.initialize());
     _reload(refreshCatalog: true);
   }
 
   @override
   void dispose() {
     _generation++;
+    _suggestGeneration++;
+    _suggestDebounce?.cancel();
+    _effectiveSearchFocus.removeListener(_onSearchFocusChanged);
+    _ownedSearchFocus?.dispose();
     _search.dispose();
     _scroll.dispose();
     if (widget.apiService == null) _api.dispose();
     super.dispose();
+  }
+
+  void _onSearchFocusChanged() {
+    if (!mounted) return;
+    final focused = _effectiveSearchFocus.hasFocus;
+    if (focused != _searchFocused) {
+      setState(() => _searchFocused = focused);
+    }
+  }
+
+  void _onSearchTextChanged(String raw) {
+    _suggestDebounce?.cancel();
+    final q = raw.trim();
+    if (q.isEmpty) {
+      if (_suggestions.isNotEmpty) {
+        setState(() => _suggestions = const []);
+      }
+      return;
+    }
+    final gen = ++_suggestGeneration;
+    _suggestDebounce = Timer(const Duration(milliseconds: 350), () async {
+      try {
+        final results = await _api.searchBooks(q, offset: 0);
+        if (!mounted || gen != _suggestGeneration) return;
+        setState(() => _suggestions = results.take(5).toList());
+      } catch (_) {}
+    });
   }
 
   void _onScroll() {
@@ -168,17 +212,36 @@ class _SearchScreenState extends State<SearchScreen> {
     _reload(refreshCatalog: true);
   }
 
-  void _performSearch() {
-    final keyword = _search.text.trim();
+  void _performSearch([String? explicitKeyword]) {
+    final keyword = (explicitKeyword ?? _search.text).trim();
     if (keyword.isEmpty) {
       ScaffoldMessenger.of(
         context,
       ).showSnackBar(const SnackBar(content: Text('请输入搜索关键词')));
       return;
     }
+    _search.text = keyword;
+    _effectiveSearchFocus.unfocus();
+    setState(() => _suggestions = const []);
+    unawaited(_searchHistory.addKeyword(keyword));
     Navigator.push(
       context,
       MaterialPageRoute(builder: (_) => SearchResultsScreen(keyword: keyword)),
+    );
+  }
+
+  Future<void> _cycleAppTheme() async {
+    final service = AppThemeService();
+    final next = AppTheme.isDark(context)
+        ? AppThemePreference.light
+        : AppThemePreference.dark;
+    await service.setPreference(next);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text('已切换外围外观：${AppThemeService.labelOf(next)}'),
+        duration: const Duration(seconds: 2),
+      ),
     );
   }
 
@@ -207,7 +270,7 @@ class _SearchScreenState extends State<SearchScreen> {
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      backgroundColor: Colors.white,
+      backgroundColor: AppTheme.surfaceOf(context),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
@@ -393,7 +456,9 @@ class _SearchScreenState extends State<SearchScreen> {
       Container(
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
-          color: active ? AppTheme.primaryLight : const Color(0xFFF5F6F8),
+          color: active
+              ? AppTheme.primarySoftOf(context)
+              : AppTheme.inputFillOf(context),
           borderRadius: BorderRadius.circular(16),
         ),
         child: Row(
@@ -403,7 +468,9 @@ class _SearchScreenState extends State<SearchScreen> {
               Icon(
                 icon,
                 size: 14,
-                color: active ? AppTheme.primaryColor : AppTheme.textSecondary,
+                color: active
+                    ? AppTheme.primaryColor
+                    : AppTheme.textSecondaryOf(context),
               ),
               const SizedBox(width: 5),
             ],
@@ -415,7 +482,9 @@ class _SearchScreenState extends State<SearchScreen> {
                 style: TextStyle(
                   fontSize: 12,
                   fontWeight: active ? FontWeight.w600 : FontWeight.normal,
-                  color: active ? AppTheme.primaryDark : AppTheme.textSecondary,
+                  color: active
+                      ? AppTheme.primaryAccentTextOf(context)
+                      : AppTheme.textSecondaryOf(context),
                 ),
               ),
             ),
@@ -423,7 +492,9 @@ class _SearchScreenState extends State<SearchScreen> {
             Icon(
               Icons.keyboard_arrow_down_rounded,
               size: 14,
-              color: active ? AppTheme.primaryColor : AppTheme.textSecondary,
+              color: active
+                  ? AppTheme.primaryColor
+                  : AppTheme.textSecondaryOf(context),
             ),
           ],
         ),
@@ -477,7 +548,7 @@ class _SearchScreenState extends State<SearchScreen> {
   );
 
   Widget _genderSegment() => Material(
-    color: const Color(0xFFF2F4F7),
+    color: AppTheme.inputFillOf(context),
     borderRadius: BorderRadius.circular(20),
     child: Padding(
       padding: const EdgeInsets.all(3),
@@ -528,7 +599,9 @@ class _SearchScreenState extends State<SearchScreen> {
         (_status == -1 ? 0 : 1) +
         (_wordCount == -1 ? 0 : 1);
     return Material(
-      color: count == 0 ? const Color(0xFFF2F4F7) : AppTheme.primaryLight,
+      color: count == 0
+          ? AppTheme.inputFillOf(context)
+          : AppTheme.primarySoftOf(context),
       borderRadius: BorderRadius.circular(18),
       child: InkWell(
         key: const ValueKey('home-filter-button'),
@@ -575,100 +648,211 @@ class _SearchScreenState extends State<SearchScreen> {
     );
   }
 
-  Widget _searchBar() => Padding(
-    padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-    child: Row(
-      children: [
-        Expanded(
-          child: ValueListenableBuilder<TextEditingValue>(
-            valueListenable: _search,
-            builder: (context, value, _) => TextField(
-              controller: _search,
-              focusNode: widget.searchFocusNode,
-              textInputAction: TextInputAction.search,
-              textAlignVertical: TextAlignVertical.center,
-              style: const TextStyle(fontSize: 14, color: AppTheme.textPrimary),
-              decoration: InputDecoration(
-                hintText: '搜索书名、作者...',
-                filled: true,
-                fillColor: const Color(0xFFF2F4F7),
-                hintStyle: const TextStyle(
-                  fontSize: 14,
-                  color: AppTheme.textHint,
-                ),
-                prefixIcon: const Icon(
-                  Icons.search_rounded,
-                  size: 18,
-                  color: AppTheme.textHint,
-                ),
-                prefixIconConstraints: const BoxConstraints(minWidth: 36),
-                suffixIcon: value.text.isEmpty
-                    ? null
-                    : IconButton(
-                        tooltip: '清空',
-                        onPressed: _search.clear,
-                        icon: const Icon(
-                          Icons.close_rounded,
-                          size: 16,
-                          color: AppTheme.textHint,
-                        ),
-                      ),
-                isDense: true,
-                contentPadding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 11,
-                ),
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(22),
-                  borderSide: BorderSide.none,
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(22),
-                  borderSide: BorderSide.none,
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(22),
-                  borderSide: BorderSide(
-                    color: AppTheme.primaryColor.withValues(alpha: .25),
+  Widget _searchBar() => Column(
+    children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: ValueListenableBuilder<TextEditingValue>(
+                valueListenable: _search,
+                builder: (context, value, _) => TextField(
+                  controller: _search,
+                  focusNode: _effectiveSearchFocus,
+                  textInputAction: TextInputAction.search,
+                  textAlignVertical: TextAlignVertical.center,
+                  style: TextStyle(
+                    fontSize: 14,
+                    color: AppTheme.textPrimaryOf(context),
                   ),
+                  onChanged: _onSearchTextChanged,
+                  decoration: InputDecoration(
+                    hintText: '搜索书名、作者...',
+                    filled: true,
+                    fillColor: AppTheme.inputFillOf(context),
+                    hintStyle: TextStyle(
+                      fontSize: 14,
+                      color: AppTheme.textHintOf(context),
+                    ),
+                    prefixIcon: Icon(
+                      Icons.search_rounded,
+                      size: 18,
+                      color: AppTheme.textHintOf(context),
+                    ),
+                    prefixIconConstraints: const BoxConstraints(minWidth: 36),
+                    suffixIcon: value.text.isEmpty
+                        ? null
+                        : IconButton(
+                            tooltip: '清空',
+                            onPressed: () {
+                              _search.clear();
+                              setState(() => _suggestions = const []);
+                            },
+                            icon: Icon(
+                              Icons.close_rounded,
+                              size: 16,
+                              color: AppTheme.textHintOf(context),
+                            ),
+                          ),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 11,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(22),
+                      borderSide: BorderSide.none,
+                    ),
+                    enabledBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(22),
+                      borderSide: BorderSide.none,
+                    ),
+                    focusedBorder: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(22),
+                      borderSide: BorderSide(
+                        color: AppTheme.primaryColor.withValues(alpha: .35),
+                      ),
+                    ),
+                  ),
+                  onSubmitted: (_) => _performSearch(),
                 ),
               ),
-              onSubmitted: (_) => _performSearch(),
             ),
+            const SizedBox(width: 10),
+            FilledButton(
+              key: const ValueKey('home-search-action'),
+              onPressed: () => _performSearch(),
+              style: FilledButton.styleFrom(
+                backgroundColor: AppTheme.primaryColor,
+                foregroundColor: Colors.white,
+                minimumSize: const Size(0, 42),
+                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(22),
+                ),
+              ),
+              child: const Text(
+                '搜索',
+                style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
+              ),
+            ),
+          ],
+        ),
+      ),
+      if (_searchFocused && _suggestions.isNotEmpty)
+        Container(
+          margin: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+          decoration: BoxDecoration(
+            color: AppTheme.surfaceOf(context),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: AppTheme.dividerOf(context)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              for (final book in _suggestions)
+                ListTile(
+                  dense: true,
+                  visualDensity: VisualDensity.compact,
+                  leading: const Icon(Icons.menu_book_outlined, size: 16),
+                  title: Text(
+                    book.bookName,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 13),
+                  ),
+                  subtitle: Text(
+                    '${book.author}${book.category?.isNotEmpty == true ? ' · ${book.category}' : ''}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(fontSize: 11),
+                  ),
+                  onTap: () {
+                    _effectiveSearchFocus.unfocus();
+                    unawaited(_searchHistory.addKeyword(book.bookName));
+                    setState(() => _suggestions = const []);
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder: (_) => BookDetailScreen(book: book),
+                      ),
+                    );
+                  },
+                ),
+            ],
           ),
         ),
-        const SizedBox(width: 10),
-        FilledButton(
-          key: const ValueKey('home-search-action'),
-          onPressed: _performSearch,
-          style: FilledButton.styleFrom(
-            backgroundColor: AppTheme.primaryColor,
-            foregroundColor: Colors.white,
-            minimumSize: const Size(0, 42),
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(22),
+      AnimatedBuilder(
+        animation: _searchHistory,
+        builder: (context, _) {
+          final history = _searchHistory.items;
+          if (!_searchFocused || history.isEmpty || _suggestions.isNotEmpty) {
+            return const SizedBox.shrink();
+          }
+          return Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 10),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(
+                      '最近搜索',
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: AppTheme.textSecondaryOf(context),
+                      ),
+                    ),
+                    const Spacer(),
+                    TextButton(
+                      onPressed: () => unawaited(_searchHistory.clearAll()),
+                      style: TextButton.styleFrom(
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                      ),
+                      child: const Text('清空', style: TextStyle(fontSize: 12)),
+                    ),
+                  ],
+                ),
+                Wrap(
+                  spacing: 6,
+                  runSpacing: 6,
+                  children: [
+                    for (final item in history.take(10))
+                      InputChip(
+                        key: ValueKey('search-history-$item'),
+                        label: Text(item, style: const TextStyle(fontSize: 12)),
+                        visualDensity: VisualDensity.compact,
+                        onPressed: () => _performSearch(item),
+                        onDeleted: () =>
+                            unawaited(_searchHistory.removeKeyword(item)),
+                      ),
+                  ],
+                ),
+              ],
             ),
-          ),
-          child: const Text(
-            '搜索',
-            style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600),
-          ),
-        ),
-      ],
-    ),
+          );
+        },
+      ),
+    ],
   );
 
-  Widget _header() => Column(
+  Widget _header() {
+    final isDark = AppTheme.isDark(context);
+    return Column(
     children: [
       Container(
         key: const ValueKey('home-red-header'),
         padding: EdgeInsets.only(top: MediaQuery.paddingOf(context).top),
-        decoration: const BoxDecoration(
+        decoration: BoxDecoration(
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [Color(0xFFFFE8E8), Colors.white],
+            colors: isDark
+                ? const [Color(0xFF28191B), AppTheme.darkSurfaceColor]
+                : const [Color(0xFFFFE8E8), Colors.white],
           ),
         ),
         child: Column(
@@ -682,8 +866,23 @@ class _SearchScreenState extends State<SearchScreen> {
               child: Stack(
                 alignment: Alignment.center,
                 children: [
-                  const Padding(
-                    padding: EdgeInsets.symmetric(horizontal: 56),
+                  Positioned(
+                    left: 8,
+                    child: IconButton(
+                      key: const ValueKey('home-theme-toggle-btn'),
+                      tooltip: isDark ? '切换为浅色外观' : '切换为深色外观',
+                      icon: Icon(
+                        isDark
+                            ? Icons.light_mode_outlined
+                            : Icons.dark_mode_outlined,
+                        size: 20,
+                        color: AppTheme.textPrimaryOf(context),
+                      ),
+                      onPressed: _cycleAppTheme,
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.symmetric(horizontal: 56),
                     child: Text(
                       '番茄Reader',
                       textAlign: TextAlign.center,
@@ -692,7 +891,7 @@ class _SearchScreenState extends State<SearchScreen> {
                       style: TextStyle(
                         fontSize: 18,
                         fontWeight: FontWeight.w600,
-                        color: AppTheme.textPrimary,
+                        color: AppTheme.textPrimaryOf(context),
                       ),
                     ),
                   ),
@@ -714,7 +913,7 @@ class _SearchScreenState extends State<SearchScreen> {
         ),
       ),
       Container(
-        color: Colors.white,
+        color: AppTheme.surfaceOf(context),
         width: double.infinity,
         child: Column(
           children: [
@@ -814,6 +1013,7 @@ class _SearchScreenState extends State<SearchScreen> {
       ),
     ],
   );
+  }
 
   Widget _message(String text, {bool loading = false, VoidCallback? retry}) =>
       Center(
@@ -882,30 +1082,33 @@ class _SearchScreenState extends State<SearchScreen> {
   }
 
   @override
-  Widget build(BuildContext context) => AnnotatedRegion<SystemUiOverlayStyle>(
-    value: const SystemUiOverlayStyle(
-      statusBarColor: Colors.transparent,
-      statusBarIconBrightness: Brightness.dark,
-      statusBarBrightness: Brightness.light,
-    ),
-    child: Scaffold(
-      body: SafeArea(
-        top: false,
-        bottom: false,
-        child: LayoutBuilder(
-          builder: (context, bounds) => Column(
-            children: [
-              ConstrainedBox(
-                constraints: BoxConstraints(maxHeight: bounds.maxHeight * .55),
-                child: SingleChildScrollView(child: _header()),
-              ),
-              Expanded(child: _bookList()),
-            ],
+  Widget build(BuildContext context) {
+    final isDark = AppTheme.isDark(context);
+    return AnnotatedRegion<SystemUiOverlayStyle>(
+      value: SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        statusBarIconBrightness: isDark ? Brightness.light : Brightness.dark,
+        statusBarBrightness: isDark ? Brightness.dark : Brightness.light,
+      ),
+      child: Scaffold(
+        body: SafeArea(
+          top: false,
+          bottom: false,
+          child: LayoutBuilder(
+            builder: (context, bounds) => Column(
+              children: [
+                ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: bounds.maxHeight * .55),
+                  child: SingleChildScrollView(child: _header()),
+                ),
+                Expanded(child: _bookList()),
+              ],
+            ),
           ),
         ),
       ),
-    ),
-  );
+    );
+  }
 }
 
 class _CategoryPicker extends StatefulWidget {

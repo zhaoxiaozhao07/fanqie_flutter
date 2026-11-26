@@ -173,6 +173,9 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
   int? _firstReadyObservedAtMs;
   Timer? _startupGraceTimer;
   Timer? _cursorSaveTimer;
+  Timer? _sleepTimer;
+  DateTime? _sleepDeadline;
+  bool _stopAfterCurrentChapter = false;
   int? _sessionStartedAtMs;
   int? _firstAudioLatencyMs;
   int _stallCount = 0;
@@ -220,6 +223,15 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
       '';
   bool get isUsingFallbackTextModel =>
       _scheduler?.isUsingFallbackTextModel ?? false;
+  bool get stopAfterCurrentChapter => _stopAfterCurrentChapter;
+  DateTime? get sleepDeadline => _sleepDeadline;
+  bool get hasSleepSchedule =>
+      _stopAfterCurrentChapter || _sleepDeadline != null;
+  int get timerRemainingMinutes => _sleepDeadline == null
+      ? 0
+      : (_sleepDeadline!.difference(_now()).inMilliseconds / 60000)
+            .ceil()
+            .clamp(0, 1440);
 
   /// 当前正在播放的阅读位置（供阅读页自动滚动跟随）
   ReadingPosition? get currentPosition {
@@ -452,7 +464,9 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
       );
     }
     try {
-      final key = _configService.resolveTtsApiKey(res.provider);
+      final key = res.provider.adapter == 'native_tts'
+          ? ''
+          : _configService.resolveTtsApiKey(res.provider);
       final result = await _ttsAdapter.testVoiceProfile(
         resolution: res,
         apiKey: key,
@@ -895,6 +909,7 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
     _activePlayingSegmentId = null;
     _startupGraceTimer?.cancel();
     _cursorSaveTimer?.cancel();
+    _clearSleepSchedule(notifyNative: true);
     _startupSatisfied = false;
     _firstReadyObservedAtMs = null;
     _pendingResumePositionMs = 0;
@@ -1002,6 +1017,87 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
     await _persistCursor(userPaused: isPaused);
     await _pushDemandToScheduler();
     _notify();
+  }
+
+  /// 设置“播完本章停止”开关，开启后禁止跨章预装与超前拉取下一章
+  void setStopAfterCurrentChapter(bool value) {
+    if (_stopAfterCurrentChapter == value) return;
+    _stopAfterCurrentChapter = value;
+    if (value) {
+      _sleepTimer?.cancel();
+      _sleepTimer = null;
+      _sleepDeadline = null;
+      unawaited(_safeInvoke('setSleepDeadline', {'milliseconds': 0}));
+      if (_preloadedSegmentIndex != null &&
+          _preloadedSegmentIndex! < _manifestSegments.length) {
+        final nextSeg = _manifestSegments[_preloadedSegmentIndex!];
+        if (nextSeg.chapterIndex != _currentChapterIndex) {
+          _releasePreloadedPin(notifyNative: true);
+        }
+      }
+    }
+    if (isActive) {
+      unawaited(_pushDemandToScheduler());
+    }
+    _notify();
+  }
+
+  /// 切换“播完本章停止”开关
+  void toggleStopAfterCurrentChapter() =>
+      setStopAfterCurrentChapter(!_stopAfterCurrentChapter);
+
+  /// 设置睡眠定时关闭（minutes <= 0 表示取消定时）
+  void setSleepTimer(int minutes) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    if (minutes <= 0) {
+      _sleepDeadline = null;
+      _stopAfterCurrentChapter = false;
+      unawaited(_safeInvoke('setSleepDeadline', {'milliseconds': 0}));
+      if (isActive) {
+        unawaited(_pushDemandToScheduler());
+      }
+      _notify();
+      return;
+    }
+    final clamped = minutes.clamp(1, 1440);
+    _stopAfterCurrentChapter = false;
+    _sleepDeadline = _now().add(Duration(minutes: clamped));
+    final deadlineMs = _sleepDeadline!.millisecondsSinceEpoch;
+    unawaited(_safeInvoke('setSleepDeadline', {'milliseconds': deadlineMs}));
+    _sleepTimer = Timer(Duration(minutes: clamped), () {
+      if (_sleepDeadline?.millisecondsSinceEpoch == deadlineMs) {
+        unawaited(_handleSleepTimerExpired());
+      }
+    });
+    if (isActive) {
+      unawaited(_pushDemandToScheduler());
+    }
+    _notify();
+  }
+
+  void _clearSleepSchedule({bool notifyNative = false}) {
+    _sleepTimer?.cancel();
+    _sleepTimer = null;
+    _sleepDeadline = null;
+    _stopAfterCurrentChapter = false;
+    if (notifyNative) {
+      unawaited(_safeInvoke('setSleepDeadline', {'milliseconds': 0}));
+    }
+  }
+
+  Future<void> _handleSleepTimerExpired({String? reason}) async {
+    _clearSleepSchedule(notifyNative: true);
+    if (!isActive) {
+      _notify();
+      return;
+    }
+    _notice = reason ?? '定时听书时间已到，已自动暂停';
+    if (!isPaused) {
+      await pause();
+    } else {
+      _notify();
+    }
   }
 
   /// 更新本书配音方案（人物候选池或固定旁白），不影响其他书，播放中在下一片段原文边界平滑切换
@@ -1342,6 +1438,24 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
       return;
     }
 
+    if (method == 'onSleepTimerExpired' || method == 'onAudioSleepTimer') {
+      final rawExpired = args is Map
+          ? (args['deadline'] ?? args['milliseconds'])
+          : null;
+      final expired = rawExpired is num ? rawExpired.toInt() : null;
+      if (_sleepDeadline != null &&
+          (expired == null ||
+              expired == _sleepDeadline!.millisecondsSinceEpoch)) {
+        if (isActive) {
+          unawaited(_handleSleepTimerExpired());
+        } else {
+          _clearSleepSchedule(notifyNative: false);
+          _notify();
+        }
+      }
+      return;
+    }
+
     // 仅处理属于沉浸式听书的 token
     if (id != null && !id.startsWith(_tokenPrefix)) {
       return;
@@ -1459,12 +1573,25 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
     if (!isActive || isPaused || _book == null || _currentRevision == null) {
       return;
     }
+    if (_sleepDeadline != null && !_sleepDeadline!.isAfter(_now())) {
+      await _handleSleepTimerExpired();
+      return;
+    }
     final prevSeg = currentSegment;
     final nextIdx = _currentSegmentIndex + 1;
 
     if (nextIdx < _manifestSegments.length) {
-      _currentSegmentIndex = nextIdx;
       final nextSeg = _manifestSegments[nextIdx];
+      if (_stopAfterCurrentChapter &&
+          nextSeg.chapterIndex != _currentChapterIndex) {
+        _currentSegmentIndex = nextIdx;
+        _currentChapterIndex = nextSeg.chapterIndex;
+        _targetGlobalOrder = nextSeg.startGlobalOrder;
+        await _persistCursor(userPaused: true);
+        await _handleSleepTimerExpired(reason: '本章已播完，已按定时暂停');
+        return;
+      }
+      _currentSegmentIndex = nextIdx;
       _targetGlobalOrder = nextSeg.startGlobalOrder;
       if (nextSeg.chapterIndex != _currentChapterIndex) {
         _currentChapterIndex = nextSeg.chapterIndex;
@@ -1482,6 +1609,15 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
       _book!.bookId,
       _currentRevision!.revisionId,
     );
+    final hasUnconfirmedChunksInCurrentChapter = _chunks.any(
+      (c) =>
+          c.chapterIndex == _currentChapterIndex &&
+          c.chunkOrder > (latestCp?.confirmedChunkOrder ?? -1),
+    );
+    if (_stopAfterCurrentChapter && !hasUnconfirmedChunksInCurrentChapter) {
+      await _handleSleepTimerExpired(reason: '本章已播完，已按定时暂停');
+      return;
+    }
     final hasUnconfirmedChunks =
         _chunks.isNotEmpty &&
         (latestCp?.confirmedChunkOrder ?? -1) < _chunks.last.chunkOrder;
@@ -1696,6 +1832,12 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
     final curSeg = currentSegment;
     final nextSeg = _manifestSegments[nextIdx];
     if (curSeg == null || nextSeg.status != AudioSegmentStatus.ready) return;
+    if (_stopAfterCurrentChapter &&
+        nextSeg.chapterIndex != curSeg.chapterIndex) {
+      // 开启“播完本章停止”时，禁止预装下一章音频，避免原生双缓冲越界切入下一章
+      _releasePreloadedPin(notifyNative: true);
+      return;
+    }
     if (_preloadingSegmentId == nextSeg.segmentId) {
       return;
     }
@@ -1973,6 +2115,11 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
     }
     final cfg = _configService.currentConfig!;
     final continuous = await computeContinuousReadySeconds();
+    final limitToCurrentChapter =
+        _stopAfterCurrentChapter ||
+        (_sleepDeadline != null &&
+            _sleepDeadline!.difference(_now()).inSeconds <=
+                (continuous.isFinite ? continuous.round() + 60 : 60));
     await _scheduler!.updateDemand(
       SchedulerDemandSnapshot(
         bookId: _book!.bookId,
@@ -1985,6 +2132,7 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
         paused: isPaused,
         currentManifestSegments: List.unmodifiable(_manifestSegments),
         currentSegmentIndex: _currentSegmentIndex,
+        limitPrefetchToCurrentChapter: limitToCurrentChapter,
         resolveTtsApiKey: (provider) => _configService.resolveTtsApiKey(provider),
         resolveTextApiKey: () => _configService.resolveTextApiKey(cfg),
         resolveTextModelApiKey: (model) =>

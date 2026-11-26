@@ -50,9 +50,18 @@ class BookshelfService {
   final ValueNotifier<int> changeNotifier = ValueNotifier<int>(0);
 
   List<BookshelfBook> get books {
-    // 默认按最后阅读时间降序排序（最新阅读过的在最前），若无阅读记录则按添加时间降序
+    // 置顶书籍优先展示，其余按最后阅读时间降序排序，若无阅读记录则按添加时间降序
     final sorted = List<BookshelfBook>.from(_books);
     sorted.sort((a, b) {
+      if (a.isPinned != b.isPinned) {
+        return a.isPinned ? -1 : 1;
+      }
+      if (a.isPinned && b.isPinned) {
+        final ap = a.pinnedTime ?? a.lastReadTime ?? a.addedTime;
+        final bp = b.pinnedTime ?? b.lastReadTime ?? b.addedTime;
+        final pinOrder = bp.compareTo(ap);
+        if (pinOrder != 0) return pinOrder;
+      }
       final aTime = a.lastReadTime ?? a.addedTime;
       final bTime = b.lastReadTime ?? b.addedTime;
       final order = bTime.compareTo(aTime);
@@ -382,6 +391,43 @@ class BookshelfService {
       return found;
     } finally {
       api?.dispose();
+    }
+  }
+
+  /// 切换单本书的置顶状态，返回切换后的置顶标记
+  Future<bool> togglePin(String bookId) async {
+    await initialize();
+    final index = _books.indexWhere((b) => b.bookId == bookId);
+    if (index == -1) return false;
+    final nextPinned = !_books[index].isPinned;
+    _books[index] = _books[index].copyWith(
+      isPinned: nextPinned,
+      pinnedTime: nextPinned ? _clock() : null,
+      clearPinnedTime: !nextPinned,
+    );
+    await _save();
+    return nextPinned;
+  }
+
+  /// 批量设置书架书籍的置顶状态
+  Future<void> setPinned(List<String> bookIds, bool pinned) async {
+    await initialize();
+    if (bookIds.isEmpty) return;
+    final idSet = bookIds.toSet();
+    var changed = false;
+    final now = _clock();
+    for (var i = 0; i < _books.length; i++) {
+      final b = _books[i];
+      if (!idSet.contains(b.bookId) || b.isPinned == pinned) continue;
+      _books[i] = b.copyWith(
+        isPinned: pinned,
+        pinnedTime: pinned ? now : null,
+        clearPinnedTime: !pinned,
+      );
+      changed = true;
+    }
+    if (changed) {
+      await _save();
     }
   }
 

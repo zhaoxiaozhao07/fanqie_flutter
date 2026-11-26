@@ -15,6 +15,7 @@ import '../widgets/download_dialog.dart';
 import '../widgets/loading_widget.dart';
 import '../widgets/paragraph_comment_sheet.dart';
 import 'reader_screen.dart';
+import 'search_results_screen.dart';
 import '../services/reader_settings_repository.dart';
 
 /// 书籍详情页面
@@ -44,6 +45,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
   bool _isInBookshelf = false;
   CommentPageData? _bookReviews;
   bool _isLoadingReviews = false;
+  List<Book> _authorBooks = const [];
+  List<Book> _similarBooks = const [];
+  bool _recommendationsLoaded = false;
 
   int? _lastReadIndex;
   String? _lastReadTitle;
@@ -60,6 +64,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     _loadBookDetail();
     _loadBookReviews();
     unawaited(_refreshDownloadedState());
+    unawaited(_loadRelatedRecommendations(widget.book));
   }
 
   @override
@@ -102,10 +107,87 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       if (mounted && detail != null) {
         setState(() => _bookDetail = detail);
         unawaited(_refreshDownloadedState());
+        if (!_recommendationsLoaded ||
+            (_similarBooks.isEmpty && (detail.category?.isNotEmpty == true))) {
+          unawaited(_loadRelatedRecommendations(detail));
+        }
       }
     } catch (_) {
       /* Keep the book metadata supplied by home/search. */
     }
+  }
+
+  /// 异步加载同作者其他作品与同类相似推荐（失败静默，不阻塞详情浏览）
+  Future<void> _loadRelatedRecommendations(Book book) async {
+    _recommendationsLoaded = true;
+    final author = book.author.trim();
+    final category = book.category?.trim() ?? '';
+    final futures = <Future<void>>[];
+
+    if (author.isNotEmpty && author != '未知作者' && _authorBooks.isEmpty) {
+      futures.add(() async {
+        try {
+          final found = await _apiService.searchBooks(author);
+          final filtered = found
+              .where(
+                (b) =>
+                    b.bookId != book.bookId &&
+                    (b.author.trim() == author ||
+                        b.author.contains(author) ||
+                        author.contains(b.author.trim())),
+              )
+              .take(6)
+              .toList();
+          if (mounted && filtered.isNotEmpty) {
+            setState(() => _authorBooks = filtered);
+          }
+        } catch (_) {}
+      }());
+    }
+
+    if (category.isNotEmpty && _similarBooks.isEmpty) {
+      futures.add(() async {
+        try {
+          final found = await _apiService.searchBooks(category);
+          final filtered = found
+              .where((b) => b.bookId != book.bookId)
+              .take(8)
+              .toList();
+          if (mounted && filtered.isNotEmpty) {
+            setState(() => _similarBooks = filtered);
+          }
+        } catch (_) {}
+      }());
+    }
+
+    if (futures.isNotEmpty) {
+      await Future.wait(futures);
+    }
+  }
+
+  void _openAuthorWorks(String author) {
+    final clean = author.trim();
+    if (clean.isEmpty) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SearchResultsScreen(keyword: clean, authorOnly: clean),
+      ),
+    );
+  }
+
+  void _openCategoryWorks(String category) {
+    final clean = category.trim();
+    if (clean.isEmpty) return;
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => SearchResultsScreen(
+          keyword: clean,
+          titlePrefix: '分类探索：$clean',
+        ),
+      ),
+    );
   }
 
   Future<void> _loadDirectory({bool refresh = true}) {
@@ -189,10 +271,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       paraText: '',
       chapterTitle: '',
       isBookReview: true,
-      backgroundColor: Colors.white,
-      textColor: AppTheme.textPrimary,
-      secondaryColor: AppTheme.textSecondary,
-      highlightColor: AppTheme.primaryLight,
+      backgroundColor: AppTheme.surfaceOf(context),
+      textColor: AppTheme.textPrimaryOf(context),
+      secondaryColor: AppTheme.textSecondaryOf(context),
+      highlightColor: AppTheme.primarySoftOf(context),
     );
   }
 
@@ -285,7 +367,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     showModalBottomSheet(
       context: context,
       isScrollControlled: true,
-      backgroundColor: Colors.white,
+      backgroundColor: AppTheme.surfaceOf(context),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
@@ -316,10 +398,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                           Expanded(
                             child: Text(
                               '完整目录 (共 ${_chapters!.length} 章)',
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.bold,
-                                color: AppTheme.textPrimary,
+                                color: AppTheme.textPrimaryOf(context),
                               ),
                             ),
                           ),
@@ -328,7 +410,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                               isReverse
                                   ? Icons.vertical_align_top
                                   : Icons.vertical_align_bottom,
-                              color: AppTheme.textSecondary,
+                              color: AppTheme.textSecondaryOf(context),
                             ),
                             tooltip: isReverse ? '正序' : '倒序',
                             onPressed: () {
@@ -347,13 +429,18 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       ),
                       child: TextField(
                         controller: searchController,
-                        style: const TextStyle(fontSize: 14),
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: AppTheme.textPrimaryOf(context),
+                        ),
                         decoration: InputDecoration(
                           hintText: '搜索章节名...',
-                          hintStyle: const TextStyle(color: AppTheme.textHint),
+                          hintStyle: TextStyle(
+                            color: AppTheme.textHintOf(context),
+                          ),
                           prefixIcon: const Icon(Icons.search, size: 20),
                           filled: true,
-                          fillColor: const Color(0xFFF2F4F7),
+                          fillColor: AppTheme.inputFillOf(context),
                           contentPadding: const EdgeInsets.symmetric(
                             horizontal: 12,
                             vertical: 8,
@@ -384,7 +471,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                                 fontSize: 14,
                                 color: isCurrent
                                     ? AppTheme.primaryColor
-                                    : AppTheme.textPrimary,
+                                    : AppTheme.textPrimaryOf(context),
                                 fontWeight: isCurrent
                                     ? FontWeight.bold
                                     : FontWeight.normal,
@@ -601,7 +688,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
             MediaQuery.of(context).padding.bottom + 8,
           ),
           decoration: BoxDecoration(
-            color: Colors.white,
+            color: AppTheme.surfaceOf(context),
             boxShadow: [
               BoxShadow(
                 color: Colors.black.withValues(alpha: 0.08),
@@ -720,6 +807,26 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
             ),
             SliverToBoxAdapter(child: _buildBookInfo(book)),
             SliverToBoxAdapter(child: _buildReviewsSection(book)),
+            if (_authorBooks.isNotEmpty)
+              SliverToBoxAdapter(
+                child: _buildRecommendationShelf(
+                  title: '同作者其他作品',
+                  books: _authorBooks,
+                  actionLabel: '全部作品',
+                  onAction: () => _openAuthorWorks(book.author),
+                ),
+              ),
+            if (_similarBooks.isNotEmpty)
+              SliverToBoxAdapter(
+                child: _buildRecommendationShelf(
+                  title: '同类相似推荐',
+                  books: _similarBooks,
+                  actionLabel: book.category?.isNotEmpty == true ? '更多同类' : null,
+                  onAction: book.category?.isNotEmpty == true
+                      ? () => _openCategoryWorks(book.category!)
+                      : null,
+                ),
+              ),
 
             // 如果当前书籍正在后台下载，在此处展示清晰的非阻塞进度卡片
             if (activeTask != null)
@@ -872,7 +979,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                         fontSize: 13,
                         color: isCurrent
                             ? AppTheme.primaryColor
-                            : AppTheme.textSecondary,
+                            : AppTheme.textSecondaryOf(context),
                         fontWeight: isCurrent
                             ? FontWeight.bold
                             : FontWeight.normal,
@@ -886,7 +993,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                         fontSize: 14,
                         color: isCurrent
                             ? AppTheme.primaryColor
-                            : AppTheme.textPrimary,
+                            : AppTheme.textPrimaryOf(context),
                         fontWeight: isCurrent
                             ? FontWeight.bold
                             : FontWeight.normal,
@@ -898,10 +1005,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                             size: 18,
                             color: AppTheme.primaryColor,
                           )
-                        : const Icon(
+                        : Icon(
                             Icons.arrow_forward_ios,
                             size: 12,
-                            color: AppTheme.textHint,
+                            color: AppTheme.textHintOf(context),
                           ),
                     onTap: () => _openReader(index),
                   );
@@ -959,7 +1066,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: AppTheme.surfaceOf(context),
         borderRadius: BorderRadius.circular(12),
         boxShadow: [
           BoxShadow(
@@ -977,21 +1084,21 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
             children: [
               Row(
                 children: [
-                  const Text(
+                  Text(
                     '读者书评',
                     style: TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.bold,
-                      color: AppTheme.textPrimary,
+                      color: AppTheme.textPrimaryOf(context),
                     ),
                   ),
                   const SizedBox(width: 8),
                   if (_bookReviews != null && _bookReviews!.total > 0)
                     Text(
                       '(${_bookReviews!.total}条)',
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 12,
-                        color: AppTheme.textSecondary,
+                        color: AppTheme.textSecondaryOf(context),
                       ),
                     ),
                 ],
@@ -1018,16 +1125,16 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                     children: [
                       CircleAvatar(
                         radius: 11,
-                        backgroundColor: Colors.grey.shade200,
+                        backgroundColor: AppTheme.inputFillOf(context),
                         backgroundImage: r.avatar.isNotEmpty
                             ? NetworkImage(r.avatar)
                             : null,
                         child: r.avatar.isEmpty
                             ? Text(
                                 r.userName.isNotEmpty ? r.userName[0] : '友',
-                                style: const TextStyle(
+                                style: TextStyle(
                                   fontSize: 9,
-                                  color: AppTheme.textPrimary,
+                                  color: AppTheme.textPrimaryOf(context),
                                 ),
                               )
                             : null,
@@ -1038,10 +1145,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                           r.userName,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 12,
                             fontWeight: FontWeight.bold,
-                            color: AppTheme.textPrimary,
+                            color: AppTheme.textPrimaryOf(context),
                           ),
                         ),
                       ),
@@ -1050,17 +1157,17 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                         Row(
                           mainAxisSize: MainAxisSize.min,
                           children: [
-                            const Icon(
+                            Icon(
                               Icons.thumb_up_alt_outlined,
                               size: 11,
-                              color: AppTheme.textHint,
+                              color: AppTheme.textHintOf(context),
                             ),
                             const SizedBox(width: 3),
                             Text(
                               '${r.diggCount}',
-                              style: const TextStyle(
+                              style: TextStyle(
                                 fontSize: 11,
-                                color: AppTheme.textHint,
+                                color: AppTheme.textHintOf(context),
                               ),
                             ),
                           ],
@@ -1072,9 +1179,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                     r.text,
                     maxLines: 2,
                     overflow: TextOverflow.ellipsis,
-                    style: const TextStyle(
+                    style: TextStyle(
                       fontSize: 13,
-                      color: AppTheme.textSecondary,
+                      color: AppTheme.textSecondaryOf(context),
                       height: 1.4,
                     ),
                   ),
@@ -1082,8 +1189,129 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               ),
             ),
             if (r != previewReviews.last)
-              Divider(height: 12, thickness: 0.5, color: Colors.grey.shade100),
+              Divider(
+                height: 12,
+                thickness: 0.5,
+                color: AppTheme.dividerOf(context),
+              ),
           ],
+        ],
+      ),
+    );
+  }
+
+  /// 同作者其他作品 / 同类相似推荐横向书架
+  Widget _buildRecommendationShelf({
+    required String title,
+    required List<Book> books,
+    String? actionLabel,
+    VoidCallback? onAction,
+  }) {
+    return Container(
+      margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+      padding: const EdgeInsets.fromLTRB(16, 14, 16, 14),
+      decoration: BoxDecoration(
+        color: AppTheme.surfaceOf(context),
+        borderRadius: BorderRadius.circular(12),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.04),
+            blurRadius: 8,
+            offset: const Offset(0, 2),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Text(
+                title,
+                style: TextStyle(
+                  fontSize: 15,
+                  fontWeight: FontWeight.bold,
+                  color: AppTheme.textPrimaryOf(context),
+                ),
+              ),
+              const Spacer(),
+              if (actionLabel != null && onAction != null)
+                TextButton.icon(
+                  onPressed: onAction,
+                  icon: const Icon(Icons.arrow_forward_ios, size: 11),
+                  label: Text(actionLabel, style: const TextStyle(fontSize: 12)),
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: EdgeInsets.zero,
+                  ),
+                ),
+            ],
+          ),
+          const SizedBox(height: 10),
+          SizedBox(
+            height: 166,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: books.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 12),
+              itemBuilder: (context, idx) {
+                final item = books[idx];
+                return InkWell(
+                  key: ValueKey('rec-book-${item.bookId}'),
+                  borderRadius: BorderRadius.circular(8),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => BookDetailScreen(book: item),
+                    ),
+                  ),
+                  child: SizedBox(
+                    width: 92,
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        ClipRRect(
+                          borderRadius: BorderRadius.circular(6),
+                          child: SizedBox(
+                            width: 92,
+                            height: 120,
+                            child: BookCoverWidget(
+                              bookId: item.bookId,
+                              bookName: item.bookName,
+                              thumbUrl: item.thumbUrl,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(height: 6),
+                        Text(
+                          item.bookName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: AppTheme.textPrimaryOf(context),
+                          ),
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          item.score?.isNotEmpty == true
+                              ? '${item.score}分 · ${item.author}'
+                              : item.author,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 10,
+                            color: AppTheme.textSecondaryOf(context),
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
         ],
       ),
     );
@@ -1134,22 +1362,49 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       overflow: TextOverflow.ellipsis,
                     ),
                     const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        const Icon(
-                          Icons.person_outline,
-                          size: 16,
-                          color: Colors.white70,
+                    InkWell(
+                      key: const ValueKey('book-detail-author-link'),
+                      onTap: () => _openAuthorWorks(book.author),
+                      borderRadius: BorderRadius.circular(14),
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
                         ),
-                        const SizedBox(width: 4),
-                        Text(
-                          book.author,
-                          style: const TextStyle(
-                            color: Colors.white70,
-                            fontSize: 14,
-                          ),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(14),
                         ),
-                      ],
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(
+                              Icons.person_outline,
+                              size: 15,
+                              color: Colors.white,
+                            ),
+                            const SizedBox(width: 4),
+                            Flexible(
+                              child: Text(
+                                book.author,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                            ),
+                            const SizedBox(width: 2),
+                            const Icon(
+                              Icons.chevron_right_rounded,
+                              size: 15,
+                              color: Colors.white70,
+                            ),
+                          ],
+                        ),
+                      ),
                     ),
                   ],
                 ),
@@ -1224,7 +1479,12 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                     : AppTheme.tagSerializing,
               ),
               if (book.category != null && book.category!.isNotEmpty)
-                _buildTag(book.category!, AppTheme.tagCategory),
+                InkWell(
+                  key: const ValueKey('book-detail-category-link'),
+                  onTap: () => _openCategoryWorks(book.category!),
+                  borderRadius: BorderRadius.circular(16),
+                  child: _buildTag('${book.category!} >', AppTheme.tagCategory),
+                ),
               _buildTag(book.formattedWordCount, AppTheme.textSecondary),
               if (_chapters != null)
                 _buildTag('${_chapters!.length}章', AppTheme.accentColor),

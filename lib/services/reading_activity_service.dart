@@ -5,6 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/book.dart';
+import '../immersive/services/immersive_playback_coordinator.dart';
 import 'tts_service.dart';
 
 class ReadingActivityPosition {
@@ -136,13 +137,17 @@ class ReadingActivityService extends ChangeNotifier {
     if (!_automatic || _closed) return;
     if (_enabled && !_listening) {
       TtsService().addListener(_syncTimer);
+      ImmersivePlaybackCoordinator().addListener(_syncTimer);
       _listening = true;
     }
     if (!_enabled && _listening) {
       TtsService().removeListener(_syncTimer);
+      ImmersivePlaybackCoordinator().removeListener(_syncTimer);
       _listening = false;
     }
-    final needs = _enabled && (_owner != null || TtsService().isPlaying);
+    final ttsPlaying = TtsService().isPlaying;
+    final immersivePlaying = ImmersivePlaybackCoordinator().isPlaying;
+    final needs = _enabled && (_owner != null || ttsPlaying || immersivePlaying);
     if (!needs) {
       _timer?.cancel();
       _timer = null;
@@ -151,9 +156,22 @@ class ReadingActivityService extends ChangeNotifier {
     }
     _timer ??= Timer.periodic(const Duration(seconds: 1), (_) {
       final tts = TtsService();
+      final immersive = ImmersivePlaybackCoordinator();
+      final String? listeningBookId;
+      final String listeningTitle;
+      if (immersive.isPlaying && immersive.currentBookId != null) {
+        listeningBookId = immersive.currentBookId;
+        listeningTitle = immersive.currentBookTitle;
+      } else if (tts.isPlaying) {
+        listeningBookId = tts.currentBookId;
+        listeningTitle = tts.currentBookTitle;
+      } else {
+        listeningBookId = null;
+        listeningTitle = '';
+      }
       tick(
-        listeningBookId: tts.isPlaying ? tts.currentBookId : null,
-        listeningTitle: tts.currentBookTitle,
+        listeningBookId: listeningBookId,
+        listeningTitle: listeningTitle,
       );
     });
   }
@@ -229,6 +247,82 @@ class ReadingActivityService extends ChangeNotifier {
     _days[key] = day;
   }
 
+  /// 汇总所有记录的累计看书毫秒数
+  int get totalReadingMs => _books.values.fold<int>(
+    0,
+    (sum, item) => sum + (((item as Map)['reading_ms'] as num?)?.toInt() ?? 0),
+  );
+
+  /// 汇总所有记录的累计听书毫秒数（含普通朗读与沉浸式多角色听书）
+  int get totalListeningMs => _books.values.fold<int>(
+    0,
+    (sum, item) => sum + (((item as Map)['listening_ms'] as num?)?.toInt() ?? 0),
+  );
+
+  /// 汇总所有记录的累计阅读字符数
+  int get totalCharacters => _books.values.fold<int>(
+    0,
+    (sum, item) => sum + (((item as Map)['characters'] as num?)?.toInt() ?? 0),
+  );
+
+  /// 估算全局平均阅读速度（字/分钟）
+  double? get averageCharsPerMinute {
+    final ms = totalReadingMs;
+    final chars = totalCharacters;
+    if (ms < 60000 || chars < 100) return null;
+    return (chars * 60000 / ms).clamp(80, 2000).toDouble();
+  }
+
+  /// 生成日期索引键 YYYY-MM-DD
+  static String dayKeyOf(DateTime date) =>
+      '${date.year}-${date.month.toString().padLeft(2, '0')}-${date.day.toString().padLeft(2, '0')}';
+
+  /// 获取最近 N 天（含今天）按日聚合的阅读与听书时长序列（升序）
+  List<({DateTime date, int readingMs, int listeningMs})> recentDailyStats(
+    int count, {
+    DateTime? anchor,
+  }) {
+    final safeCount = count.clamp(1, 365);
+    final base = anchor ?? _now();
+    final today = DateTime(base.year, base.month, base.day);
+    final result = <({DateTime date, int readingMs, int listeningMs})>[];
+    for (var i = safeCount - 1; i >= 0; i--) {
+      final date = today.subtract(Duration(days: i));
+      final raw = _days[dayKeyOf(date)] as Map?;
+      result.add((
+        date: date,
+        readingMs: (raw?['reading_ms'] as num?)?.toInt() ?? 0,
+        listeningMs: (raw?['listening_ms'] as num?)?.toInt() ?? 0,
+      ));
+    }
+    return result;
+  }
+
+  /// 计算截至今日（或昨日若今日尚未阅读）的连续活跃天数
+  int currentStreakDays({DateTime? anchor}) {
+    final base = anchor ?? _now();
+    var cursor = DateTime(base.year, base.month, base.day);
+    bool hasActivity(DateTime d) {
+      final raw = _days[dayKeyOf(d)] as Map?;
+      if (raw == null) return false;
+      final total =
+          ((raw['reading_ms'] as num?)?.toInt() ?? 0) +
+          ((raw['listening_ms'] as num?)?.toInt() ?? 0);
+      return total >= 60000;
+    }
+
+    if (!hasActivity(cursor)) {
+      cursor = cursor.subtract(const Duration(days: 1));
+      if (!hasActivity(cursor)) return 0;
+    }
+    var streak = 0;
+    while (streak < 3650 && hasActivity(cursor)) {
+      streak++;
+      cursor = cursor.subtract(const Duration(days: 1));
+    }
+    return streak;
+  }
+
   int? remainingMinutes(String bookId, int remainingCharacters) {
     if (!_enabled) return null;
     final stats = _books[bookId] as Map? ?? {};
@@ -273,7 +367,10 @@ class ReadingActivityService extends ChangeNotifier {
     _closed = true;
     _timer?.cancel();
     _saveTimer?.cancel();
-    if (_listening) TtsService().removeListener(_syncTimer);
+    if (_listening) {
+      TtsService().removeListener(_syncTimer);
+      ImmersivePlaybackCoordinator().removeListener(_syncTimer);
+    }
     super.dispose();
   }
 }

@@ -220,6 +220,106 @@ final class ReaderPlayback: NSObject, AVSpeechSynthesizerDelegate, AVAudioPlayer
     }
   }
 
+  /// 通过 macOS 原生 AVSpeechSynthesizer 离线合成为 WAV 音频文件，供沉浸式听书旁白/角色无缝复用
+  static func synthesizeNativeTtsToFile(
+    text: String,
+    rate: Double,
+    voiceID: String,
+    outputPath: String,
+    completion: @escaping ([String: Any]) -> Void
+  ) {
+    let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmed.isEmpty, !outputPath.isEmpty else {
+      completion(["ok": false, "error": "待合成文本或输出路径为空"])
+      return
+    }
+    guard #available(macOS 10.15, *) else {
+      completion(["ok": false, "error": "当前 macOS 版本不支持系统语音离线合成"])
+      return
+    }
+    let voice = (voiceID.isEmpty || voiceID == "default")
+      ? (AVSpeechSynthesisVoice(language: "zh-CN")
+        ?? AVSpeechSynthesisVoice(language: Self.language)
+        ?? AVSpeechSynthesisVoice.speechVoices().first)
+      : (AVSpeechSynthesisVoice(identifier: voiceID)
+        ?? AVSpeechSynthesisVoice(language: "zh-CN")
+        ?? AVSpeechSynthesisVoice.speechVoices().first)
+    guard let selected = voice else {
+      completion(["ok": false, "error": "未找到可用的系统朗读语音"])
+      return
+    }
+
+    let outURL = URL(fileURLWithPath: outputPath)
+    try? FileManager.default.createDirectory(
+      at: outURL.deletingLastPathComponent(),
+      withIntermediateDirectories: true
+    )
+    try? FileManager.default.removeItem(at: outURL)
+
+    let utterance = AVSpeechUtterance(string: trimmed)
+    utterance.voice = selected
+    utterance.rate = min(
+      AVSpeechUtteranceMaximumSpeechRate,
+      max(AVSpeechUtteranceMinimumSpeechRate, AVSpeechUtteranceDefaultSpeechRate * Float(rate))
+    )
+
+    let synth = AVSpeechSynthesizer()
+    var audioFile: AVAudioFile?
+    var finished = false
+    let lock = NSLock()
+
+    func finish(_ payload: [String: Any]) {
+      lock.lock()
+      if finished {
+        lock.unlock()
+        return
+      }
+      finished = true
+      audioFile = nil
+      lock.unlock()
+      DispatchQueue.main.async { completion(payload) }
+    }
+
+    DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 25.0) {
+      finish(["ok": false, "error": "系统语音合成超时"])
+    }
+
+    synth.write(utterance) { buffer in
+      guard let pcm = buffer as? AVAudioPCMBuffer else {
+        finish(["ok": false, "error": "系统语音返回非 PCM 音频缓冲区"])
+        return
+      }
+      if pcm.frameLength == 0 {
+        lock.lock()
+        audioFile = nil
+        lock.unlock()
+        let size = (try? FileManager.default.attributesOfItem(atPath: outURL.path)[.size] as? Int64) ?? 0
+        if size > 44 {
+          finish(["ok": true, "filePath": outURL.path])
+        } else {
+          finish(["ok": false, "error": "系统语音输出音频为空"])
+        }
+        return
+      }
+      do {
+        lock.lock()
+        defer { lock.unlock() }
+        if finished { return }
+        if audioFile == nil {
+          audioFile = try AVAudioFile(
+            forWriting: outURL,
+            settings: pcm.format.settings,
+            commonFormat: pcm.format.commonFormat,
+            interleaved: pcm.format.isInterleaved
+          )
+        }
+        try audioFile?.write(from: pcm)
+      } catch {
+        finish(["ok": false, "error": "写入系统语音音频失败：\(error.localizedDescription)"])
+      }
+    }
+  }
+
   /// 查询目标路径所在文件系统的真实剩余磁盘空间字节数
   static func freeDiskBytes(at rawPath: String) -> Int64 {
     let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)

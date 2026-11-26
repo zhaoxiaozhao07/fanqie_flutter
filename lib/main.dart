@@ -15,12 +15,24 @@ import 'services/reader_auto_backup_service.dart';
 import 'services/reader_trash_service.dart';
 import 'immersive/services/immersive_playback_coordinator.dart';
 import 'webdav/services/webdav_sync_service.dart';
+import 'services/app_theme_service.dart';
+import 'services/text_replace_rule_service.dart';
+import 'services/search_history_service.dart';
 
 Future<void> initializeReaderApplication() async {
   AppLifecycleService.initialize();
   await ReaderPlatform.initialize();
   await ReaderBackupService().recover();
   await ReaderDisplayText.ensureLoaded();
+  try {
+    await AppThemeService().initialize();
+  } catch (_) {}
+  try {
+    await TextReplaceRuleService().initialize();
+  } catch (_) {}
+  try {
+    await SearchHistoryService().initialize();
+  } catch (_) {}
   try {
     await ReaderTrashService().pruneExpired();
   } catch (_) {}
@@ -108,14 +120,26 @@ class FanqieApp extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      title: '番茄Reader',
-      debugShowCheckedModeBanner: false,
-      theme: AppTheme.lightTheme,
-      navigatorObservers: [readerRouteObserver],
-      builder: (context, child) =>
-          DesktopShortcuts(child: child ?? const SizedBox.shrink()),
-      home: const MainScreen(),
+    final themeService = AppThemeService();
+    return AnimatedBuilder(
+      animation: themeService,
+      builder: (context, _) {
+        final platformBrightness =
+            WidgetsBinding.instance.platformDispatcher.platformBrightness;
+        return MaterialApp(
+          title: '番茄Reader',
+          debugShowCheckedModeBanner: false,
+          theme: AppTheme.lightTheme,
+          darkTheme: AppTheme.darkTheme,
+          themeMode: themeService.resolveThemeMode(
+            platformBrightness: platformBrightness,
+          ),
+          navigatorObservers: [readerRouteObserver],
+          builder: (context, child) =>
+              DesktopShortcuts(child: child ?? const SizedBox.shrink()),
+          home: const MainScreen(),
+        );
+      },
     );
   }
 }

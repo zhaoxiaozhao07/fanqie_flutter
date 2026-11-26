@@ -13,6 +13,8 @@ import '../models/chapter.dart';
 import '../models/download_history.dart';
 import '../services/api_service.dart';
 import '../services/bookshelf_service.dart';
+import '../services/bookshelf_update_cache_service.dart';
+import '../services/app_theme_service.dart';
 import '../services/history_service.dart';
 import '../services/local_book_service.dart';
 import '../widgets/local_book_import_dialog.dart';
@@ -46,6 +48,7 @@ enum BookshelfViewMode {
 
 class BookshelfScreen extends StatefulWidget {
   final VoidCallback? onGoToDiscover;
+  final VoidCallback? onGoToNotes;
   final bool isActive;
   final BookshelfService? bookshelfService;
   final HistoryService? historyService;
@@ -54,6 +57,7 @@ class BookshelfScreen extends StatefulWidget {
   const BookshelfScreen({
     super.key,
     this.onGoToDiscover,
+    this.onGoToNotes,
     this.isActive = true,
     this.bookshelfService,
     this.historyService,
@@ -93,17 +97,24 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
   final _queryFocus = FocusNode(debugLabel: 'shelf-search');
   String _groupFilter = '';
   ReaderBookStatus? _statusFilter;
+  bool _onlyUpdatedFilter = false;
   bool _filtersOpen = false;
+  bool _cachingUpdates = false;
+  bool _cancelUpdateCache = false;
+  UpdateCacheProgress? _updateCacheProgress;
   bool get _composing =>
       _query.value.composing.isValid && !_query.value.composing.isCollapsed;
+  int get _updatedBooksCount => _books.where((b) => b.hasUpdate).length;
   List<BookshelfBook> get _visibleBooks => _books
       .where(
-        (b) => _matches(
-          b.bookId,
-          b.bookName,
-          b.author,
-          hasRead: b.lastReadTime != null,
-        ),
+        (b) =>
+            (!_onlyUpdatedFilter || b.hasUpdate) &&
+            _matches(
+              b.bookId,
+              b.bookName,
+              b.author,
+              hasRead: b.lastReadTime != null,
+            ),
       )
       .toList();
   List<DownloadHistory> get _visibleDownloads => _downloadedBooks
@@ -394,28 +405,155 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
   }
 
   void _sortBooks(List<BookshelfBook> list) {
-    switch (_sortType) {
-      case BookshelfSortType.recentRead:
-        list.sort((a, b) {
+    list.sort((a, b) {
+      // 置顶书籍始终优先排在书架顶部
+      if (a.isPinned != b.isPinned) {
+        return a.isPinned ? -1 : 1;
+      }
+      if (a.isPinned && b.isPinned) {
+        final ap = a.pinnedTime ?? a.lastReadTime ?? a.addedTime;
+        final bp = b.pinnedTime ?? b.lastReadTime ?? b.addedTime;
+        final pinOrder = bp.compareTo(ap);
+        if (pinOrder != 0) return pinOrder;
+      }
+      switch (_sortType) {
+        case BookshelfSortType.recentRead:
           final aTime = a.lastReadTime ?? a.addedTime;
           final bTime = b.lastReadTime ?? b.addedTime;
           final order = bTime.compareTo(aTime);
           return order != 0 ? order : a.bookId.compareTo(b.bookId);
-        });
-        break;
-      case BookshelfSortType.recentAdded:
-        list.sort((a, b) {
+        case BookshelfSortType.recentAdded:
           final order = b.addedTime.compareTo(a.addedTime);
           return order != 0 ? order : a.bookId.compareTo(b.bookId);
-        });
-        break;
-      case BookshelfSortType.bookName:
-        list.sort((a, b) {
+        case BookshelfSortType.bookName:
           final order = a.bookName.compareTo(b.bookName);
           return order != 0 ? order : a.bookId.compareTo(b.bookId);
-        });
-        break;
+      }
+    });
+  }
+
+  Future<void> _togglePinBook(BookshelfBook book) async {
+    final pinned = await _bookshelfService.togglePin(book.bookId);
+    if (!mounted) return;
+    await _loadData(silent: true);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          pinned ? '已置顶《${book.bookName}》' : '已取消置顶《${book.bookName}》',
+        ),
+        duration: const Duration(seconds: 2),
+      ),
+    );
+  }
+
+  Future<void> _togglePinSelected() async {
+    if (_selectedBookIds.isEmpty || _currentSubTab != 0) return;
+    final selected = _books
+        .where((b) => _selectedBookIds.contains(b.bookId))
+        .toList();
+    final allPinned = selected.isNotEmpty && selected.every((b) => b.isPinned);
+    await _bookshelfService.setPinned(_selectedBookIds.toList(), !allPinned);
+    if (!mounted) return;
+    setState(() {
+      _isSelectionMode = false;
+      _selectedBookIds.clear();
+    });
+    await _loadData(silent: true);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          allPinned
+              ? '已取消置顶 ${selected.length} 本书'
+              : '已置顶 ${selected.length} 本书',
+        ),
+      ),
+    );
+  }
+
+  /// 一键增量离线缓存所有有更新的连载书籍新章节
+  Future<void> _cacheAllUpdatedChapters() async {
+    if (_cachingUpdates) return;
+    final targets = _books
+        .where((b) => b.hasUpdate && !b.bookId.startsWith('local_'))
+        .toList();
+    if (targets.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('当前没有检测到有新章节更新的书籍')),
+      );
+      return;
     }
+    setState(() {
+      _cachingUpdates = true;
+      _cancelUpdateCache = false;
+      _updateCacheProgress = UpdateCacheProgress(
+        processedBooks: 0,
+        totalBooks: targets.length,
+        cachedChapters: 0,
+        failedBooks: 0,
+        currentBookName: targets.first.bookName,
+        message: '准备增量缓存 ${targets.length} 本更新书籍…',
+      );
+    });
+    try {
+      final service = BookshelfUpdateCacheService(
+        apiService: _apiService,
+        bookshelfService: _bookshelfService,
+      );
+      final summary = await service.cacheUpdatedBooks(
+        targets,
+        isCancelled: () => _cancelUpdateCache || !mounted,
+        onProgress: (p) {
+          if (mounted) {
+            setState(() => _updateCacheProgress = p);
+          }
+        },
+      );
+      if (mounted) {
+        await _loadData(silent: true);
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(summary.summaryText)),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _cachingUpdates = false;
+          _cancelUpdateCache = false;
+          _updateCacheProgress = null;
+        });
+      }
+    }
+  }
+
+  Future<void> _showAppThemeDialog() async {
+    final service = AppThemeService();
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('应用外围外观模式'),
+        children: [
+          for (final pref in AppThemePreference.values)
+            SimpleDialogOption(
+              onPressed: () {
+                unawaited(service.setPreference(pref));
+                Navigator.pop(ctx);
+              },
+              child: Row(
+                children: [
+                  Text(AppThemeService.labelOf(pref)),
+                  if (service.preference == pref) ...[
+                    const Spacer(),
+                    const Icon(Icons.check, color: AppTheme.primaryColor),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
   }
 
   void _changeSort(BookshelfSortType type) {
@@ -732,6 +870,12 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                     context: context,
                     builder: (_) => const ReaderTrashDialog(),
                   );
+                } else if (value == 'cacheUpdates') {
+                  unawaited(_cacheAllUpdatedChapters());
+                } else if (value == 'theme') {
+                  await _showAppThemeDialog();
+                } else if (value == 'notes') {
+                  widget.onGoToNotes?.call();
                 } else {
                   await showDialog<void>(
                     context: context,
@@ -741,14 +885,25 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                   if (mounted) _loadData(silent: true);
                 }
               },
-              itemBuilder: (_) => const [
-                PopupMenuItem(value: 'import', child: Text('导入本地小说')),
-                PopupMenuItem(value: 'webdav', child: Text('WebDAV 云同步')),
-                PopupMenuItem(value: 'backup', child: Text('备份与恢复')),
-                PopupMenuItem(value: 'activity', child: Text('阅读统计')),
-                PopupMenuItem(value: 'groups', child: Text('管理分组与阅读状态')),
-                PopupMenuItem(value: 'offlineSearch', child: Text('搜索所有离线正文')),
-                PopupMenuItem(value: 'trash', child: Text('回收站与修改历史')),
+              itemBuilder: (_) => [
+                const PopupMenuItem(value: 'import', child: Text('导入本地小说')),
+                const PopupMenuItem(value: 'webdav', child: Text('WebDAV 云同步')),
+                const PopupMenuItem(value: 'backup', child: Text('备份与恢复')),
+                const PopupMenuItem(value: 'activity', child: Text('阅读统计')),
+                if (widget.onGoToNotes != null)
+                  const PopupMenuItem(value: 'notes', child: Text('跨书笔记工作台')),
+                PopupMenuItem(
+                  value: 'cacheUpdates',
+                  child: Text(
+                    _updatedBooksCount > 0
+                        ? '一键缓存更新章节 ($_updatedBooksCount本)'
+                        : '一键缓存更新章节',
+                  ),
+                ),
+                const PopupMenuItem(value: 'theme', child: Text('应用外观与深色模式')),
+                const PopupMenuItem(value: 'groups', child: Text('管理分组与阅读状态')),
+                const PopupMenuItem(value: 'offlineSearch', child: Text('搜索所有离线正文')),
+                const PopupMenuItem(value: 'trash', child: Text('回收站与修改历史')),
               ],
             ),
             // 切换 列表 / 三列 视图按钮
@@ -815,6 +970,8 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
         children: [
           _buildSubTabBar(),
           _buildLibraryFilters(),
+          if (_cachingUpdates && _updateCacheProgress != null)
+            _buildUpdateCacheBanner(_updateCacheProgress!),
           SizedBox(
             height: 2,
             child: _openingBookId == null
@@ -922,6 +1079,7 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                   onPressed: () => setState(() {
                     _statusFilter = null;
                     _groupFilter = '';
+                    _onlyUpdatedFilter = false;
                     _query.clear();
                     _selectedBookIds.clear();
                   }),
@@ -935,9 +1093,101 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
               ],
             ),
           ),
+        if (_currentSubTab == 0 && (_updatedBooksCount > 0 || _onlyUpdatedFilter))
+          Padding(
+            padding: const EdgeInsets.only(top: 6),
+            child: Row(
+              children: [
+                FilterChip(
+                  key: const ValueKey('shelf-filter-updated'),
+                  label: Text('仅看有更新 ($_updatedBooksCount)'),
+                  selected: _onlyUpdatedFilter,
+                  visualDensity: VisualDensity.compact,
+                  onSelected: (v) => setState(() {
+                    _onlyUpdatedFilter = v;
+                    _selectedBookIds.clear();
+                  }),
+                ),
+                const Spacer(),
+                if (_updatedBooksCount > 0 && !_cachingUpdates)
+                  TextButton.icon(
+                    key: const ValueKey('shelf-cache-updates-btn'),
+                    onPressed: _cacheAllUpdatedChapters,
+                    icon: const Icon(Icons.cloud_download_outlined, size: 16),
+                    label: const Text('一键缓存更新'),
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                    ),
+                  ),
+              ],
+            ),
+          ),
       ],
     ),
   );
+
+  Widget _buildUpdateCacheBanner(UpdateCacheProgress p) {
+    final progress = p.totalBooks > 0
+        ? (p.processedBooks / p.totalBooks).clamp(0.0, 1.0)
+        : null;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: AppTheme.primarySoftOf(context),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: AppTheme.primaryColor.withValues(alpha: 0.3)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              const SizedBox(
+                width: 14,
+                height: 14,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: AppTheme.primaryColor,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text(
+                  '${p.message}（已缓存 ${p.cachedChapters} 章）',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                    color: AppTheme.primaryAccentTextOf(context),
+                  ),
+                ),
+              ),
+              TextButton(
+                onPressed: () => setState(() => _cancelUpdateCache = true),
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                ),
+                child: const Text('取消', style: TextStyle(fontSize: 12)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(3),
+            child: LinearProgressIndicator(
+              value: progress,
+              minHeight: 4,
+              color: AppTheme.primaryColor,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _buildSubTabBar() {
     return Padding(
@@ -980,8 +1230,8 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
         decoration: BoxDecoration(
           color: isSelected
-              ? AppTheme.primaryColor.withValues(alpha: 0.12)
-              : const Color(0xFFF2F4F7),
+              ? AppTheme.primaryColor.withValues(alpha: 0.14)
+              : AppTheme.inputFillOf(context),
           borderRadius: BorderRadius.circular(20),
           border: isSelected
               ? Border.all(
@@ -1118,15 +1368,25 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
           key: ValueKey(shelfBook.bookId),
           margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
           decoration: BoxDecoration(
-            color: Colors.white,
+            color: AppTheme.surfaceOf(context),
             borderRadius: BorderRadius.circular(12),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.03),
-                blurRadius: 6,
-                offset: const Offset(0, 2),
-              ),
-            ],
+            border: shelfBook.isPinned
+                ? Border.all(
+                    color: AppTheme.primaryColor.withValues(alpha: 0.35),
+                    width: 1,
+                  )
+                : (AppTheme.isDark(context)
+                    ? Border.all(color: AppTheme.darkCardBorderColor)
+                    : null),
+            boxShadow: AppTheme.isDark(context)
+                ? null
+                : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.03),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
           ),
           child: Material(
             color: Colors.transparent,
@@ -1212,14 +1472,40 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                     _openBookDetail(shelfBook.toBook());
                   }
                 },
-                child: Text(
-                  shelfBook.bookName,
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 15,
-                  ),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
+                child: Row(
+                  children: [
+                    if (shelfBook.isPinned)
+                      Container(
+                        margin: const EdgeInsets.only(right: 6),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 5,
+                          vertical: 1,
+                        ),
+                        decoration: BoxDecoration(
+                          color: AppTheme.primaryColor.withValues(alpha: 0.14),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: const Text(
+                          '置顶',
+                          style: TextStyle(
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                            color: AppTheme.primaryColor,
+                          ),
+                        ),
+                      ),
+                    Expanded(
+                      child: Text(
+                        shelfBook.bookName,
+                        style: const TextStyle(
+                          fontWeight: FontWeight.bold,
+                          fontSize: 15,
+                        ),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
                 ),
               ),
               subtitle: GestureDetector(
@@ -1292,11 +1578,26 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                   ? Wrap(
                       crossAxisAlignment: WrapCrossAlignment.center,
                       children: [
-                        IconButton(
-                          tooltip: '分组与阅读状态',
-                          onPressed: () => _libraryDialog({shelfBook.bookId}),
+                        PopupMenuButton<String>(
+                          tooltip: '书籍操作',
                           icon: const Icon(Icons.more_horiz, size: 18),
-                          visualDensity: VisualDensity.compact,
+                          onSelected: (action) {
+                            if (action == 'pin') {
+                              unawaited(_togglePinBook(shelfBook));
+                            } else if (action == 'group') {
+                              unawaited(_libraryDialog({shelfBook.bookId}));
+                            }
+                          },
+                          itemBuilder: (_) => [
+                            PopupMenuItem(
+                              value: 'pin',
+                              child: Text(shelfBook.isPinned ? '取消置顶' : '置顶书籍'),
+                            ),
+                            const PopupMenuItem(
+                              value: 'group',
+                              child: Text('分组与阅读状态'),
+                            ),
+                          ],
                         ),
                         OutlinedButton(
                           onPressed: () => _continueReading(shelfBook),
@@ -1461,6 +1762,30 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                                 color: isSelected
                                     ? AppTheme.primaryColor
                                     : Colors.grey,
+                              ),
+                            ),
+                          ),
+                        // 置顶徽标
+                        if (!_isSelectionMode && shelfBook.isPinned)
+                          Positioned(
+                            top: 4,
+                            left: 4,
+                            child: Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 5,
+                                vertical: 2,
+                              ),
+                              decoration: BoxDecoration(
+                                color: AppTheme.primaryColor,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: const Text(
+                                '置顶',
+                                style: TextStyle(
+                                  color: Colors.white,
+                                  fontSize: 9,
+                                  fontWeight: FontWeight.bold,
+                                ),
                               ),
                             ),
                           ),
@@ -1667,15 +1992,20 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
           key: ValueKey(download.bookId),
           margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
           decoration: BoxDecoration(
-            color: Colors.white,
+            color: AppTheme.surfaceOf(context),
             borderRadius: BorderRadius.circular(12),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.03),
-                blurRadius: 6,
-                offset: const Offset(0, 2),
-              ),
-            ],
+            border: AppTheme.isDark(context)
+                ? Border.all(color: AppTheme.darkCardBorderColor)
+                : null,
+            boxShadow: AppTheme.isDark(context)
+                ? null
+                : [
+                    BoxShadow(
+                      color: Colors.black.withValues(alpha: 0.03),
+                      blurRadius: 6,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
           ),
           child: Material(
             color: Colors.transparent,
@@ -2029,6 +2359,12 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
   }
 
   Widget _buildBatchBottomBar() {
+    final selectedFavorites = _books
+        .where((b) => _selectedBookIds.contains(b.bookId))
+        .toList();
+    final allPinned =
+        selectedFavorites.isNotEmpty &&
+        selectedFavorites.every((b) => b.isPinned);
     return Container(
       padding: EdgeInsets.fromLTRB(
         16,
@@ -2037,7 +2373,12 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
         MediaQuery.of(context).padding.bottom + 8,
       ),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: AppTheme.surfaceOf(context),
+        border: AppTheme.isDark(context)
+            ? const Border(
+                top: BorderSide(color: AppTheme.darkDividerColor),
+              )
+            : null,
         boxShadow: [
           BoxShadow(
             color: Colors.black.withValues(alpha: 0.08),
@@ -2050,9 +2391,21 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
         children: [
           Text(
             '已选 ${_selectedBookIds.length} 项',
-            style: const TextStyle(fontSize: 14, color: AppTheme.textSecondary),
+            style: TextStyle(
+              fontSize: 14,
+              color: AppTheme.textSecondaryOf(context),
+            ),
           ),
           const Spacer(),
+          if (_currentSubTab == 0)
+            TextButton.icon(
+              onPressed: _selectedBookIds.isEmpty ? null : _togglePinSelected,
+              icon: Icon(
+                allPinned ? Icons.push_pin_outlined : Icons.push_pin,
+                size: 16,
+              ),
+              label: Text(allPinned ? '取消置顶' : '置顶'),
+            ),
           TextButton(
             onPressed: () {
               setState(() {

@@ -52,10 +52,11 @@ Future<void> showWebDavSyncSheet(
   BuildContext context, {
   WebDavSyncService? service,
 }) {
+  final bg = AppTheme.surfaceOf(context);
   if (ReaderPlatform.isDesktop) {
     return showReaderModal<void>(
       context: context,
-      backgroundColor: Colors.white,
+      backgroundColor: bg,
       heightFactor: 0.88,
       desktopWidth: 720,
       builder: (_) => WebDavSyncSheet(service: service),
@@ -65,7 +66,7 @@ Future<void> showWebDavSyncSheet(
     context: context,
     isScrollControlled: true,
     useSafeArea: true,
-    backgroundColor: Colors.white,
+    backgroundColor: bg,
     shape: const RoundedRectangleBorder(
       borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
     ),

@@ -46,6 +46,11 @@ class ReaderPlayback : public std::enable_shared_from_this<ReaderPlayback> {
   // 查询目标路径所在文件系统的真实剩余磁盘空间字节数，失败返回 -1。
   static int64_t FreeDiskBytes(const std::string& raw_path);
 
+  // 通过 Windows SAPI 系统语音离线合成为 WAV 文件，供沉浸式听书旁白/角色无缝复用。
+  static flutter::EncodableMap SynthesizeNativeTtsToFile(
+      const std::string& text, double rate, const std::string& voice_id,
+      const std::string& output_path);
+
   bool Speak(const std::string& id, const std::string& text, double rate,
              const std::string& voice_id);
   bool Play(const std::string& id, const std::string& file_path,

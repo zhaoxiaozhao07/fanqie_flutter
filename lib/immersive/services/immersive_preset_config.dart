@@ -39,6 +39,77 @@ class ImmersivePresetConfig {
   );
 
   static const defaultNarratorProfileId = 'vp_oneapi_Anthropic_male';
+  static const nativeSystemProviderId = 'tts_system_native';
+  static const nativeSystemModelKey = 'system_tts_default';
+  static const nativeSystemVoiceProfileId = 'vp_system_native_default';
+
+  /// 构建内置本地系统朗读 TTS 供应商（零 API Key、免费离线，特别适合设为全书固定旁白以节省 AI 额度）
+  static TtsProviderConfig nativeSystemTtsProvider() => const TtsProviderConfig(
+    providerId: nativeSystemProviderId,
+    displayName: '系统朗读 (本地离线免费)',
+    enabled: true,
+    adapter: 'native_tts',
+    baseUrl: 'http://127.0.0.1/native-tts',
+    endpoint: '/synthesize',
+    apiKey: '',
+    apiKeyEnv: null,
+    extraHeaders: {},
+    requestTimeoutMs: 25000,
+    maxConcurrency: 1,
+    reservedForegroundSlots: 0,
+    requestsPerMinute: null,
+    models: [
+      TtsModelConfig(
+        modelKey: nativeSystemModelKey,
+        modelId: 'system-tts',
+        displayName: '系统内置语音引擎',
+        enabled: true,
+        maxConcurrency: 1,
+        capabilities: TtsModelCapabilities(
+          maxInputLength: 2000,
+          inputLengthUnit: 'unicode_codepoints',
+          supportsInstructions: false,
+          supportsSpeed: true,
+          supportedAudioFormats: ['wav'],
+          responseTransport: 'binary',
+          supportsWordTimestamps: false,
+        ),
+        extraBody: {},
+        voices: [
+          TtsVoiceProfileConfig(
+            voiceProfileId: nativeSystemVoiceProfileId,
+            voiceId: 'default',
+            displayName: '系统默认朗读 (本地离线)',
+            enabled: true,
+            gender: 'neutral',
+            notes: '调用本机系统 TTS 离线合成，免费且响应快，适合设为固定旁白节省 AI 语音额度。',
+            tags: ['系统朗读', '离线', '旁白推荐'],
+            sampleAsset: null,
+            renderSettings: VoiceRenderSettings(
+              audioFormat: 'wav',
+              speed: 1.0,
+              instructions: null,
+            ),
+            extraBody: {},
+          ),
+        ],
+      ),
+    ],
+  );
+
+  /// 幂等地向现有沉浸式配置补入系统朗读供应商（保留原有所有模型、密钥与默认旁白）
+  static ImmersiveConfig ensureNativeSystemTts(ImmersiveConfig cfg) {
+    final exists = cfg.tts.providers.any(
+      (p) =>
+          p.adapter == 'native_tts' || p.providerId == nativeSystemProviderId,
+    );
+    if (exists) return cfg;
+    return cfg.copyWith(
+      tts: cfg.tts.copyWith(
+        providers: [...cfg.tts.providers, nativeSystemTtsProvider()],
+      ),
+    );
+  }
 
   /// 当前构建是否通过编译参数注入了完整默认密钥
   static bool get hasBundledCredentials =>

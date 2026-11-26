@@ -10,9 +10,9 @@ class TtsPlayerPanel extends StatelessWidget {
   static const desktopHeight = 128.0;
   static void showSettings(
     BuildContext context, {
-    Color backgroundColor = Colors.white,
-    Color textColor = AppTheme.textPrimary,
-    Color secondaryColor = AppTheme.textSecondary,
+    Color? backgroundColor,
+    Color? textColor,
+    Color? secondaryColor,
     ValueChanged<bool>? onModalChanged,
   }) {
     TtsPlayerPanel(
@@ -26,26 +26,38 @@ class TtsPlayerPanel extends StatelessWidget {
 
   final VoidCallback onClose;
 
-  final Color backgroundColor;
-  final Color textColor;
-  final Color secondaryColor;
+  final Color? backgroundColor;
+  final Color? textColor;
+  final Color? secondaryColor;
   final ValueChanged<bool>? onModalChanged;
   final TtsService? service;
 
   const TtsPlayerPanel({
     super.key,
     required this.onClose,
-    this.backgroundColor = Colors.white,
-    this.textColor = AppTheme.textPrimary,
-    this.secondaryColor = AppTheme.textSecondary,
+    this.backgroundColor,
+    this.textColor,
+    this.secondaryColor,
     this.onModalChanged,
     this.service,
   });
+
+  Color _bg(BuildContext context) =>
+      backgroundColor ?? AppTheme.surfaceOf(context);
+
+  Color _fg(BuildContext context) =>
+      textColor ?? AppTheme.textPrimaryOf(context);
+
+  Color _sec(BuildContext context) =>
+      secondaryColor ?? AppTheme.textSecondaryOf(context);
 
   @override
   Widget build(BuildContext context) {
     if (!ReaderPlatform.capabilities.tts) return const SizedBox.shrink();
     final ttsService = service ?? TtsService();
+    final bg = _bg(context);
+    final fg = _fg(context);
+    final sec = _sec(context);
 
     return AnimatedBuilder(
       animation: ttsService,
@@ -62,7 +74,7 @@ class TtsPlayerPanel extends StatelessWidget {
 
         return Container(
           decoration: BoxDecoration(
-            color: backgroundColor,
+            color: bg,
             borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
             boxShadow: [
               BoxShadow(
@@ -88,7 +100,7 @@ class TtsPlayerPanel extends StatelessWidget {
                         vertical: 2,
                       ),
                       decoration: BoxDecoration(
-                        color: AppTheme.primaryLight,
+                        color: AppTheme.primarySoftOf(context),
                         borderRadius: BorderRadius.circular(4),
                       ),
                       child: Text(
@@ -96,7 +108,7 @@ class TtsPlayerPanel extends StatelessWidget {
                                 TtsEngineType.openAi
                             ? 'AI 语音'
                             : '系统原生',
-                        style: TextStyle(
+                        style: const TextStyle(
                           fontSize: 10,
                           color: AppTheme.primaryColor,
                           fontWeight: FontWeight.bold,
@@ -109,7 +121,7 @@ class TtsPlayerPanel extends StatelessWidget {
                         currentText.isNotEmpty ? currentText : '准备播放中...',
                         style: TextStyle(
                           fontSize: 12,
-                          color: textColor,
+                          color: fg,
                           fontWeight: FontWeight.w500,
                         ),
                         maxLines: 1,
@@ -118,7 +130,7 @@ class TtsPlayerPanel extends StatelessWidget {
                     ),
                     const SizedBox(width: 4),
                     IconButton(
-                      icon: Icon(Icons.close, size: 18, color: secondaryColor),
+                      icon: Icon(Icons.close, size: 18, color: sec),
                       tooltip: '停止听书',
                       onPressed: () {
                         ttsService.stop().catchError((_) {});
@@ -133,7 +145,7 @@ class TtsPlayerPanel extends StatelessWidget {
                     padding: const EdgeInsets.symmetric(vertical: 4),
                     child: Text(
                       ttsService.errorMessage ?? ttsService.notice!,
-                      style: TextStyle(color: textColor, fontSize: 12),
+                      style: TextStyle(color: fg, fontSize: 12),
                     ),
                   ),
                 const SizedBox(height: 6),
@@ -151,7 +163,7 @@ class TtsPlayerPanel extends StatelessWidget {
                           ttsService.stopAfterCurrentChapter
                               ? '本章止'
                               : '${ttsService.timerRemainingMinutes}m',
-                          style: TextStyle(fontSize: 8),
+                          style: const TextStyle(fontSize: 8),
                         ),
                         child: Icon(
                           Icons.timer_outlined,
@@ -160,7 +172,7 @@ class TtsPlayerPanel extends StatelessWidget {
                               ttsService.stopAfterCurrentChapter ||
                                   ttsService.timerRemainingMinutes > 0
                               ? AppTheme.primaryColor
-                              : secondaryColor,
+                              : sec,
                         ),
                       ),
                       tooltip: '定时停止',
@@ -172,7 +184,7 @@ class TtsPlayerPanel extends StatelessWidget {
                       icon: Icon(
                         Icons.skip_previous_rounded,
                         size: 28,
-                        color: textColor,
+                        color: fg,
                       ),
                       tooltip: '上一句',
                       onPressed: curIdx > 0
@@ -212,7 +224,7 @@ class TtsPlayerPanel extends StatelessWidget {
                       icon: Icon(
                         Icons.skip_next_rounded,
                         size: 28,
-                        color: textColor,
+                        color: fg,
                       ),
                       tooltip: '下一句',
                       onPressed: curIdx < ttsService.chunks.length - 1
@@ -224,7 +236,7 @@ class TtsPlayerPanel extends StatelessWidget {
                       icon: Icon(
                         Icons.tune_rounded,
                         size: 22,
-                        color: secondaryColor,
+                        color: sec,
                       ),
                       tooltip: '发音与引擎设置',
                       onPressed: () =>
@@ -241,6 +253,9 @@ class TtsPlayerPanel extends StatelessWidget {
   }
 
   Widget _desktop(BuildContext context, TtsService tts) {
+    final bg = _bg(context);
+    final fg = _fg(context);
+    final sec = _sec(context);
     final message = tts.errorMessage ?? tts.notice;
     final engine = (tts.actualEngine ?? tts.engineType) == TtsEngineType.openAi
         ? 'AI 合成语音'
@@ -249,13 +264,13 @@ class TtsPlayerPanel extends StatelessWidget {
         IconButton(
           tooltip: tooltip,
           onPressed: action,
-          icon: Icon(icon, color: textColor),
+          icon: Icon(icon, color: fg),
           constraints: const BoxConstraints.tightFor(width: 40, height: 40),
           padding: const EdgeInsets.all(6),
         );
     return Material(
       key: const ValueKey('desktop-tts-player'),
-      color: backgroundColor,
+      color: bg,
       elevation: 8,
       child: SizedBox(
         height: desktopHeight,
@@ -270,7 +285,7 @@ class TtsPlayerPanel extends StatelessWidget {
                     Expanded(
                       child: Text(
                         '$engine · ${tts.currentBookTitle} · ${tts.currentChapterTitle}',
-                        style: TextStyle(color: textColor, fontSize: 12),
+                        style: TextStyle(color: fg, fontSize: 12),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -333,14 +348,14 @@ class TtsPlayerPanel extends StatelessWidget {
                     Expanded(
                       child: Text(
                         tts.currentText.isEmpty ? '正在准备正文…' : tts.currentText,
-                        style: TextStyle(color: secondaryColor, fontSize: 12),
+                        style: TextStyle(color: sec, fontSize: 12),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
                     Text(
                       '${tts.currentIndex + 1}/${tts.chunks.length}',
-                      style: TextStyle(color: secondaryColor, fontSize: 11),
+                      style: TextStyle(color: sec, fontSize: 11),
                     ),
                   ],
                 ),
@@ -354,7 +369,7 @@ class TtsPlayerPanel extends StatelessWidget {
                     child: Text(
                       message ?? '网络语音会发送当前及后续两段原文；系统语音暂停后重播本段。',
                       style: TextStyle(
-                        color: message == null ? secondaryColor : textColor,
+                        color: message == null ? sec : fg,
                         fontSize: 11,
                       ),
                       maxLines: 1,
@@ -371,20 +386,22 @@ class TtsPlayerPanel extends StatelessWidget {
   }
 
   Widget _themed(BuildContext context, Widget child) {
+    final bg = _bg(context);
+    final fg = _fg(context);
     final scheme = ColorScheme.fromSeed(
       seedColor: AppTheme.primaryColor,
-      brightness: backgroundColor.computeLuminance() < 0.25
+      brightness: bg.computeLuminance() < 0.25
           ? Brightness.dark
           : Brightness.light,
-      surface: backgroundColor,
-      onSurface: textColor,
+      surface: bg,
+      onSurface: fg,
     );
     return Theme(
       data: ThemeData(
         colorScheme: scheme,
         textTheme: Theme.of(
           context,
-        ).textTheme.apply(bodyColor: textColor, displayColor: textColor),
+        ).textTheme.apply(bodyColor: fg, displayColor: fg),
       ),
       child: child,
     );
@@ -484,7 +501,7 @@ class TtsPlayerPanel extends StatelessWidget {
     onModalChanged?.call(true);
     showReaderModal<void>(
       context: context,
-      backgroundColor: backgroundColor,
+      backgroundColor: _bg(context),
       builder: (ctx) {
         return ReaderModalLifetime(
           onDispose: () {
@@ -528,7 +545,7 @@ class TtsPlayerPanel extends StatelessWidget {
                           style: TextStyle(
                             fontSize: 16,
                             fontWeight: FontWeight.bold,
-                            color: textColor,
+                            color: _fg(context),
                           ),
                         ),
                         const SizedBox(height: 16),
@@ -599,7 +616,7 @@ class TtsPlayerPanel extends StatelessWidget {
                               '朗读语速',
                               style: TextStyle(
                                 fontSize: 14,
-                                color: secondaryColor,
+                                color: _sec(context),
                               ),
                             ),
                             const Spacer(),

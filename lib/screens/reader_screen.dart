@@ -67,6 +67,10 @@ import '../widgets/reader_modal.dart';
 import '../widgets/desktop_reader_selection.dart';
 import '../services/desktop_shortcut_preferences.dart';
 import '../services/reader_library_service.dart';
+import '../services/app_theme_service.dart';
+import '../services/text_replace_rule_service.dart';
+import '../widgets/text_replace_rules_dialog.dart';
+import '../widgets/ai_reading_assistant_sheet.dart';
 import '../models/reading_selection.dart';
 import '../widgets/reader_undo.dart';
 
@@ -561,6 +565,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _ttsAttached = true;
     _ttsService.addListener(_onTtsStateChanged);
     _immersiveService.addListener(_onImmersiveStateChanged);
+    TextReplaceRuleService().addListener(_onReplaceRulesChanged);
     if (ReaderPlatform.isDesktop) {
       _desktopAudioBarHeight = _expectedDesktopAudioBarHeight();
     }
@@ -615,6 +620,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
     _ttsService.removeListener(_onTtsStateChanged);
     _immersiveService.removeListener(_onImmersiveStateChanged);
+    TextReplaceRuleService().removeListener(_onReplaceRulesChanged);
     if (_ttsAttached) _ttsService.detachReader(widget.book.bookId);
     _ttsStartGeneration++;
     // The service owns the playlist; leaving this route must not stop audio.
@@ -1137,6 +1143,7 @@ class _ReaderScreenState extends State<ReaderScreen>
       systemDark: _systemDark,
       now: DateTime.now(),
     );
+    AppThemeService().syncReaderSettings(value);
   }
 
   Object _layoutPreferences(ReaderSettings value) => (
@@ -4608,6 +4615,12 @@ class _ReaderScreenState extends State<ReaderScreen>
                     case 'immersiveCharacters':
                       _openImmersiveCharacters();
                       break;
+                    case 'aiAssistant':
+                      _openAiReadingAssistant();
+                      break;
+                    case 'replaceRules':
+                      _openTextReplaceRules();
+                      break;
                     case 'listen':
                       unawaited(_startTtsReading());
                       break;
@@ -4697,6 +4710,41 @@ class _ReaderScreenState extends State<ReaderScreen>
                     ),
                     const PopupMenuDivider(),
                   ],
+                  PopupMenuItem(
+                    value: 'aiAssistant',
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.auto_awesome_outlined,
+                          size: 18,
+                          color: theme.textColor,
+                        ),
+                        const SizedBox(width: 10),
+                        Text(
+                          'AI 前情提要与角色速查',
+                          style: TextStyle(color: theme.textColor),
+                        ),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'replaceRules',
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.cleaning_services_outlined,
+                          size: 18,
+                          color: theme.textColor,
+                        ),
+                        const SizedBox(width: 10),
+                        Text(
+                          '正文净化与替换规则',
+                          style: TextStyle(color: theme.textColor),
+                        ),
+                      ],
+                    ),
+                  ),
+                  const PopupMenuDivider(),
                   if (_ttsService.isAvailable) ...[
                     PopupMenuItem(
                       value: 'listen',
@@ -5544,15 +5592,9 @@ class _ReaderScreenState extends State<ReaderScreen>
       _getChapterParagraphs(chapterIndex),
     );
 
-    final inlineSpans = _withSpokenHighlight(
-      _buildSpansWithUnderline(
-        textToShow,
-        ranges,
-        theme,
-        sourceStart: 0,
-        sourceLength: trimmed.length,
-      ),
+    final inlineSpans = _buildRenderedParagraphSpans(
       textToShow,
+      ranges,
       theme,
       chapter.itemId,
       paraIndex,
@@ -6228,6 +6270,12 @@ class _ReaderScreenState extends State<ReaderScreen>
                     case 'immersiveCharacters':
                       _openImmersiveCharacters();
                       break;
+                    case 'aiAssistant':
+                      _openAiReadingAssistant();
+                      break;
+                    case 'replaceRules':
+                      _openTextReplaceRules();
+                      break;
                   }
                 },
                 itemBuilder: (context) => [
@@ -6271,6 +6319,40 @@ class _ReaderScreenState extends State<ReaderScreen>
                       ),
                     ),
                   ],
+                  PopupMenuItem(
+                    value: 'aiAssistant',
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.auto_awesome_outlined,
+                          size: 18,
+                          color: theme.textColor,
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          'AI 前情提要与角色速查',
+                          style: TextStyle(color: theme.textColor),
+                        ),
+                      ],
+                    ),
+                  ),
+                  PopupMenuItem(
+                    value: 'replaceRules',
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.cleaning_services_outlined,
+                          size: 18,
+                          color: theme.textColor,
+                        ),
+                        const SizedBox(width: 12),
+                        Text(
+                          '正文净化与替换规则',
+                          style: TextStyle(color: theme.textColor),
+                        ),
+                      ],
+                    ),
+                  ),
                   PopupMenuItem(
                     value: 'notes',
                     child: Text(
@@ -6431,6 +6513,70 @@ class _ReaderScreenState extends State<ReaderScreen>
       bookId: widget.book.bookId,
       coordinator: _immersiveService,
       onJumpToSource: (chapterIndex, pos) => unawaited(_navigateTo(pos)),
+    ).whenComplete(_endReaderPanel);
+  }
+
+  /// 正文净化规则变动后清缓存并重绘
+  void _onReplaceRulesChanged() {
+    if (!mounted) return;
+    setState(() {
+      _preparedPages.clear();
+      _paragraphHeights.clear();
+    });
+  }
+
+  /// 按需加载已读章节正文供防剧透 AI 助手使用（绝不改变当前阅读页状态）
+  Future<String?> _loadChapterRawForAssistant(int index) async {
+    if (index < 0 || index >= widget.chapters.length) return null;
+    final cached = _chapterCache[index];
+    if (cached != null && cached.isNotEmpty) return cached;
+    final chapter = widget.chapters[index];
+    if (chapter.content != null && chapter.content!.isNotEmpty) {
+      return chapter.content;
+    }
+    try {
+      if (widget.chapterContentLoader != null) {
+        return await widget.chapterContentLoader!(chapter).timeout(
+          const Duration(seconds: 20),
+        );
+      }
+      if (widget.offlineOnly) {
+        return await _apiService.engine.readerCache.read(
+          widget.book.bookId,
+          chapter.itemId,
+        );
+      }
+      return await _apiService
+          .getChapterContent(chapter.itemId, bookId: widget.book.bookId)
+          .timeout(const Duration(seconds: 20));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  void _openAiReadingAssistant({String? initialTerm}) {
+    _showControls = false;
+    _beginReaderPanel();
+    final pos = _captureReadingPosition();
+    final paraIndex = pos?.paragraphIndex ?? _readingPosition?.paragraphIndex ?? 0;
+    AiReadingAssistantSheet.show(
+      context,
+      bookId: widget.book.bookId,
+      bookName: widget.book.bookName,
+      chapters: widget.chapters,
+      currentChapterIndex: _currentActiveIndex,
+      currentParagraphIndex: paraIndex,
+      chapterLoader: _loadChapterRawForAssistant,
+      initialTerm: initialTerm,
+    ).whenComplete(_endReaderPanel);
+  }
+
+  void _openTextReplaceRules() {
+    _showControls = false;
+    _beginReaderPanel();
+    showDialog<void>(
+      context: context,
+      builder: (_) => TextReplaceRulesDialog(bookId: widget.book.bookId),
     ).whenComplete(_endReaderPanel);
   }
 
@@ -7109,15 +7255,9 @@ class _ReaderScreenState extends State<ReaderScreen>
     final effectiveParaIdx = pIdx;
 
     final ranges = _noteRanges(chapterIndex, pIdx, sourceParagraphs);
-    final spans = _withSpokenHighlight(
-      _buildSpansWithUnderline(
-        textToShow,
-        ranges,
-        theme,
-        sourceStart: startOffset,
-        sourceLength: endOffset - startOffset,
-      ),
+    final spans = _buildRenderedParagraphSpans(
       textToShow,
+      ranges,
       theme,
       chapter.itemId,
       effectiveParaIdx,
@@ -7161,6 +7301,72 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
+  /// 统一构建段落展示 Span：按需应用正文净化规则并维护原文偏移映射，再叠加划线、搜索与朗读高亮
+  List<InlineSpan> _buildRenderedParagraphSpans(
+    String text,
+    List<ResolvedNote> notes,
+    ReaderTheme theme,
+    String chapterId,
+    int paragraphIndex, {
+    required int sourceStart,
+    required int sourceEnd,
+  }) {
+    final sourceLength = math.max(0, sourceEnd - sourceStart);
+    final prefix = math.max(0, text.length - sourceLength);
+    final replaceService = TextReplaceRuleService();
+    MappedTextResult? mapped;
+    var displayText = text;
+    if (replaceService.hasActiveReaderRules(widget.book.bookId) &&
+        prefix <= text.length) {
+      final rawSlice = text.substring(prefix);
+      final res = replaceService.applyForDisplay(
+        rawSlice,
+        bookId: widget.book.bookId,
+      );
+      if (res.modified) {
+        mapped = res;
+        displayText = '${text.substring(0, prefix)}${res.text}';
+      }
+    }
+
+    ({int start, int end}) projectRange(int rawStart, int rawEnd) {
+      if (mapped == null) {
+        final s = (rawStart - sourceStart + prefix).clamp(
+          prefix,
+          displayText.length,
+        );
+        final e = (rawEnd - sourceStart + prefix).clamp(s, displayText.length);
+        return (start: s, end: e);
+      }
+      final relStart = (rawStart - sourceStart).clamp(0, sourceLength);
+      final relEnd = (rawEnd - sourceStart).clamp(relStart, sourceLength);
+      final m = mapped.mapRawRange(relStart, relEnd);
+      final s = (prefix + m.start).clamp(prefix, displayText.length);
+      final e = (prefix + m.end).clamp(s, displayText.length);
+      return (start: s, end: e);
+    }
+
+    final baseSpans = _buildSpansWithUnderline(
+      displayText,
+      notes,
+      theme,
+      sourceStart: sourceStart,
+      sourceLength: sourceLength,
+      rangeProjector: projectRange,
+    );
+    return _withSpokenHighlight(
+      baseSpans,
+      displayText,
+      theme,
+      chapterId,
+      paragraphIndex,
+      sourceStart: sourceStart,
+      sourceEnd: sourceEnd,
+      rangeProjector: projectRange,
+      textModified: mapped != null,
+    );
+  }
+
   List<InlineSpan> _withSpokenHighlight(
     List<InlineSpan> spans,
     String text,
@@ -7169,6 +7375,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     int paragraphIndex, {
     required int sourceStart,
     required int sourceEnd,
+    ({int start, int end}) Function(int rawStart, int rawEnd)? rangeProjector,
+    bool textModified = false,
   }) {
     final spoken =
         _ttsService.spokenRange(
@@ -7183,15 +7391,22 @@ class _ReaderScreenState extends State<ReaderScreen>
         );
     var result = spans;
     final prefix = math.max(0, text.length - (sourceEnd - sourceStart));
+    ({int start, int end}) project(int rawStart, int rawEnd) {
+      if (rangeProjector != null) return rangeProjector(rawStart, rawEnd);
+      final s = (rawStart - sourceStart + prefix).clamp(prefix, text.length);
+      final e = (rawEnd - sourceStart + prefix).clamp(s, text.length);
+      return (start: s, end: e);
+    }
+
     for (final match
         in _searchMarks[(chapterId, paragraphIndex)] ?? <ReaderSearchHit>[]) {
       final start = math.max(sourceStart, match.position.characterOffset);
       final end = math.min(sourceEnd, match.endOffset);
-      if (start >= end ||
-          text.substring(
-                start - sourceStart + prefix,
-                end - sourceStart + prefix,
-              ) !=
+      if (start >= end) continue;
+      final projected = project(start, end);
+      if (projected.start >= projected.end) continue;
+      if (!textModified &&
+          text.substring(projected.start, projected.end) !=
               match.quote.substring(
                 start - match.position.characterOffset,
                 end - match.position.characterOffset,
@@ -7200,8 +7415,8 @@ class _ReaderScreenState extends State<ReaderScreen>
       }
       result = _paintSpanRange(
         result,
-        start - sourceStart + prefix,
-        end - sourceStart + prefix,
+        projected.start,
+        projected.end,
         TextStyle(
           backgroundColor: Color.lerp(
             theme.backgroundColor,
@@ -7212,10 +7427,11 @@ class _ReaderScreenState extends State<ReaderScreen>
       );
     }
     if (spoken != null) {
+      final projected = project(spoken.start, spoken.end);
       result = _paintSpanRange(
         result,
-        (spoken.start - sourceStart + prefix).clamp(prefix, text.length),
-        (spoken.end - sourceStart + prefix).clamp(prefix, text.length),
+        projected.start,
+        projected.end,
         TextStyle(backgroundColor: theme.highlightColor),
       );
     }
@@ -7223,13 +7439,11 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (hit != null &&
         hit.position.chapterId == chapterId &&
         hit.position.paragraphIndex == paragraphIndex) {
+      final projected = project(hit.position.characterOffset, hit.endOffset);
       result = _paintSpanRange(
         result,
-        (hit.position.characterOffset - sourceStart + prefix).clamp(
-          prefix,
-          text.length,
-        ),
-        (hit.endOffset - sourceStart + prefix).clamp(prefix, text.length),
+        projected.start,
+        projected.end,
         TextStyle(
           backgroundColor: theme.highlightColor,
           decoration: TextDecoration.underline,
@@ -7290,16 +7504,23 @@ class _ReaderScreenState extends State<ReaderScreen>
     ReaderTheme theme, {
     required int sourceStart,
     required int sourceLength,
+    ({int start, int end}) Function(int rawStart, int rawEnd)? rangeProjector,
   }) {
     final prefix = math.max(0, text.length - sourceLength);
     final ranges = <(int, int, ReadingNote)>[];
     final points = <int>{0, text.length};
     for (final note in notes) {
-      final start = (note.start - sourceStart + prefix).clamp(
-        prefix,
-        text.length,
-      );
-      final end = (note.end - sourceStart + prefix).clamp(prefix, text.length);
+      final projected = rangeProjector != null
+          ? rangeProjector(note.start, note.end)
+          : (
+              start: (note.start - sourceStart + prefix).clamp(
+                prefix,
+                text.length,
+              ),
+              end: (note.end - sourceStart + prefix).clamp(prefix, text.length),
+            );
+      final start = projected.start;
+      final end = projected.end;
       if (start >= end) continue;
       ranges.add((start, end, note.note));
       points
@@ -7572,6 +7793,34 @@ class _ReaderScreenState extends State<ReaderScreen>
                     ),
                   ),
                 ),
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  visualDensity: VisualDensity.standard,
+                  minimumSize: const Size(48, 48),
+                ),
+                onPressed: () {
+                  onDismiss();
+                  _openAiReadingAssistant(initialTerm: cleanSelected);
+                },
+                icon: const Icon(
+                  Icons.auto_awesome_outlined,
+                  size: 15,
+                  color: Colors.white,
+                ),
+                label: const Text(
+                  'AI 速查',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
             ],
           ),
         ),

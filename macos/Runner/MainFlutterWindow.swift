@@ -223,6 +223,19 @@ final class ReaderNativePlatform: NSObject, NSMenuItemValidation {
       result(ReaderPlayback.nativeSpeechAvailable)
     case "getNativeTtsVoices":
       result(ReaderPlayback.voices())
+    case "synthesizeNativeTtsToFile":
+      let text = args["text"] as? String ?? ""
+      let rate = (args["rate"] as? NSNumber)?.doubleValue ?? 1.0
+      let voiceId = args["voiceId"] as? String ?? ""
+      let outputPath = args["outputPath"] as? String ?? ""
+      ReaderPlayback.synthesizeNativeTtsToFile(
+        text: text,
+        rate: rate,
+        voiceID: voiceId,
+        outputPath: outputPath
+      ) { payload in
+        result(payload)
+      }
     case "speakNativeTts":
       result(playback.speak(id: args["id"] as? String ?? "", text: args["text"] as? String ?? "",
         rate: (args["rate"] as? NSNumber)?.doubleValue ?? 1, voiceID: args["voice"] as? String ?? ""))

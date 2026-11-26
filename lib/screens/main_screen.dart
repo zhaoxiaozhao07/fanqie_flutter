@@ -221,10 +221,12 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
           onGoToDiscover: () {
             setState(() => _currentIndex = 0);
           },
+          onGoToNotes: () {
+            setState(() => _currentIndex = 3);
+          },
         ),
         HistoryScreen(key: _historyKey),
-        if (ReaderPlatform.isDesktop)
-          NotesWorkspaceScreen(key: _notesKey, isActive: _currentIndex == 3),
+        NotesWorkspaceScreen(key: _notesKey, isActive: _currentIndex == 3),
       ],
     );
     if (ReaderPlatform.isDesktop) {
@@ -339,6 +341,11 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
                 icon: Icon(Icons.history_outlined),
                 selectedIcon: Icon(Icons.history_rounded),
                 label: '历史',
+              ),
+              NavigationDestination(
+                icon: Icon(Icons.edit_note_outlined),
+                selectedIcon: Icon(Icons.edit_note_rounded),
+                label: '笔记',
               ),
             ],
           ),

@@ -65,7 +65,7 @@ class _DownloadActionButtonState extends State<DownloadActionButton>
         } else {
           iconWidget = Icon(
             Icons.download_rounded,
-            color: widget.color ?? AppTheme.textPrimary,
+            color: widget.color ?? AppTheme.textPrimaryOf(context),
             size: 22,
           );
         }

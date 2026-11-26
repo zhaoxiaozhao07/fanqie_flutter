@@ -20,6 +20,7 @@ import 'reader_text.dart';
 import 'reading_history_service.dart';
 import 'compatible_tts_client.dart';
 import 'reader_library_service.dart';
+import 'text_replace_rule_service.dart';
 import '../immersive/services/immersive_playback_coordinator.dart';
 
 enum TtsEngineType { native, openAi }
@@ -687,10 +688,16 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
       _actualEngine = audio == null
           ? TtsEngineType.native
           : TtsEngineType.openAi;
+      final sanitized = TextReplaceRuleService().applyForTts(
+        chunk.text,
+        bookId: _book?.bookId,
+      );
+      final spokenChunkText =
+          sanitized.trim().isNotEmpty ? sanitized : chunk.text;
       final accepted =
           await _invoke(audio == null ? 'speakNativeTts' : 'playAudioFile', {
             'id': token,
-            'text': chunk.text,
+            'text': spokenChunkText,
             'filePath': audio,
             'rate': audio == null ? _speechRate : 1.0,
             if (ReaderPlatform.isDesktop) 'voice': _nativeVoice,
@@ -760,12 +767,18 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
           _openAiApiKey.isEmpty) {
         throw const TtsRequestFailure('请先保存接口密钥');
       }
+      final sanitized = TextReplaceRuleService().applyForTts(
+        chunk.text,
+        bookId: _book?.bookId,
+      );
+      final spokenChunkText =
+          sanitized.trim().isNotEmpty ? sanitized : chunk.text;
       final audio = await _speechClient.synthesize(
         baseUrl: _openAiBaseUrl,
         apiKey: _openAiApiKey,
         model: _openAiModel,
         voice: _openAiVoice,
-        text: chunk.text,
+        text: spokenChunkText,
         speed: _speechRate,
         isCancelled: cancelled,
       );

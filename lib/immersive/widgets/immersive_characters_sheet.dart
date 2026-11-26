@@ -37,7 +37,7 @@ class ImmersiveCharactersSheet extends StatefulWidget {
     if (ReaderPlatform.isDesktop) {
       return showReaderModal<void>(
         context: context,
-        backgroundColor: Colors.white,
+        backgroundColor: AppTheme.surfaceOf(context),
         heightFactor: 0.84,
         desktopWidth: 700,
         builder: (_) => sheet,
@@ -47,7 +47,7 @@ class ImmersiveCharactersSheet extends StatefulWidget {
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      backgroundColor: Colors.white,
+      backgroundColor: AppTheme.surfaceOf(context),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),

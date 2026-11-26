@@ -604,6 +604,23 @@ void ReaderPlatformBridge::HandleMethodCall(
     result->Success(flutter::EncodableValue(ReaderPlayback::Voices()));
     return;
   }
+  if (method == "synthesizeNativeTtsToFile") {
+    const std::string text = StringArg(args, "text");
+    const double rate = DoubleArg(args, "rate", 1.0);
+    const std::string voice_id = StringArg(args, "voiceId");
+    const std::string output_path = StringArg(args, "outputPath");
+    const std::shared_ptr<flutter::MethodResult<flutter::EncodableValue>> owned(
+        result.release());
+    const auto post_main = post_main_;
+    std::thread([text, rate, voice_id, output_path, owned, post_main] {
+      flutter::EncodableMap synth = ReaderPlayback::SynthesizeNativeTtsToFile(
+          text, rate, voice_id, output_path);
+      post_main([owned, synth = std::move(synth)] {
+        owned->Success(flutter::EncodableValue(synth));
+      });
+    }).detach();
+    return;
+  }
   if (method == "speakNativeTts") {
     result->Success(flutter::EncodableValue(playback_->Speak(
         StringArg(args, "id"), StringArg(args, "text"),

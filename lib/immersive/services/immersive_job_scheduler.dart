@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math' as math;
 
+import '../../services/text_replace_rule_service.dart';
 import '../models/immersive_config.dart';
 import '../models/immersive_entities.dart';
 import 'audio_cache_manager.dart';
@@ -190,6 +191,7 @@ class SchedulerDemandSnapshot {
   final bool paused;
   final List<AudioSegment> currentManifestSegments;
   final int currentSegmentIndex;
+  final bool limitPrefetchToCurrentChapter;
   final String Function(TtsProviderConfig provider) resolveTtsApiKey;
   final String Function() resolveTextApiKey;
   final String Function(TextAnalysisConfig model)? resolveTextModelApiKey;
@@ -205,6 +207,7 @@ class SchedulerDemandSnapshot {
     required this.paused,
     required this.currentManifestSegments,
     required this.currentSegmentIndex,
+    this.limitPrefetchToCurrentChapter = false,
     required this.resolveTtsApiKey,
     required this.resolveTextApiKey,
     this.resolveTextModelApiKey,
@@ -477,8 +480,9 @@ class ImmersiveJobScheduler {
     );
     final needsPrefix = nextCommitOrder < targetChunk.chunkOrder;
 
-    final maxChapterAllowed =
-        demand.currentChapterIndex + _config.analysisPipeline.aheadChapters;
+    final maxChapterAllowed = demand.limitPrefetchToCurrentChapter
+        ? demand.currentChapterIndex
+        : demand.currentChapterIndex + _config.analysisPipeline.aheadChapters;
     final maxAheadCount = _config.analysisPipeline.maxAheadChunks;
 
     final validDrafts = await _store.getValidDrafts(
@@ -1172,11 +1176,19 @@ class ImmersiveJobScheduler {
         status: AudioSegmentStatus.synthesizing,
       );
 
+      final sanitizedText = TextReplaceRuleService().applyForTts(
+        spokenText,
+        bookId: demand.bookId,
+      );
+      final effectiveSpokenText =
+          sanitizedText.trim().isNotEmpty ? sanitizedText : spokenText;
       final spec = RenderSpec.fromResolution(
         resolution: resolution,
-        inputText: spokenText,
+        inputText: effectiveSpokenText,
       );
-      final apiKey = demand.resolveTtsApiKey(resolution.provider);
+      final apiKey = resolution.provider.adapter == 'native_tts'
+          ? ''
+          : demand.resolveTtsApiKey(resolution.provider);
 
       final audio = await _ttsAdapter.synthesize(
         spec: spec,

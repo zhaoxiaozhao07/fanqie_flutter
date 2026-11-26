@@ -5,6 +5,7 @@ import 'dart:typed_data';
 
 import 'package:crypto/crypto.dart';
 import 'package:http/http.dart' as http;
+import 'package:path_provider/path_provider.dart';
 
 import '../../services/compatible_tts_client.dart';
 import '../../services/reader_platform.dart';
@@ -397,8 +398,12 @@ class OpenAiSpeechTtsAdapter implements TtsProviderAdapter {
 
   final http.Client _client;
   final Set<Completer<void>> _active = {};
+  final Future<Uint8List> Function(RenderSpec spec)? _nativeSynthesizerOverride;
 
-  OpenAiSpeechTtsAdapter(this._client);
+  OpenAiSpeechTtsAdapter(
+    this._client, {
+    Future<Uint8List> Function(RenderSpec spec)? nativeSynthesizerOverride,
+  }) : _nativeSynthesizerOverride = nativeSynthesizerOverride;
 
   @override
   void cancelAll() {
@@ -462,6 +467,13 @@ class OpenAiSpeechTtsAdapter implements TtsProviderAdapter {
       throw const TtsAdapterException(
         kind: TtsAdapterErrorKind.cancelled,
         message: 'TTS 请求已取消',
+      );
+    }
+    if (spec.adapterVersion.startsWith('native_tts:')) {
+      return _synthesizeNativeTts(
+        spec: spec,
+        timeoutMs: timeoutMs,
+        isCancelled: isCancelled,
       );
     }
     if (isExampleReservedEndpoint(spec.endpointUrl) ||
@@ -663,6 +675,95 @@ class OpenAiSpeechTtsAdapter implements TtsProviderAdapter {
     }
   }
 
+  /// 通过本机原生系统朗读引擎离线合成 WAV 音频，供沉浸式听书旁白或角色无缝复用
+  Future<SynthesizedAudioPayload> _synthesizeNativeTts({
+    required RenderSpec spec,
+    required int timeoutMs,
+    bool Function()? isCancelled,
+  }) async {
+    final sw = Stopwatch()..start();
+    if (_nativeSynthesizerOverride != null) {
+      final bytes = await _nativeSynthesizerOverride(spec);
+      final inspected = AudioFormatInspector.inspectBytes(bytes);
+      sw.stop();
+      return SynthesizedAudioPayload(
+        bytes: bytes,
+        detectedFormat: inspected.format,
+        durationMs: inspected.durationMs,
+        latencyMs: sw.elapsedMilliseconds,
+      );
+    }
+    if (!ReaderPlatform.capabilities.tts) {
+      throw const TtsAdapterException(
+        kind: TtsAdapterErrorKind.invalidConfiguration,
+        message: '当前平台不支持系统朗读离线合成',
+      );
+    }
+    final tempRoot = await getTemporaryDirectory();
+    final synthDir = Directory('${tempRoot.path}/immersive_native_tts');
+    if (!await synthDir.exists()) {
+      await synthDir.create(recursive: true);
+    }
+    final outFile = File(
+      '${synthDir.path}/native_${DateTime.now().microsecondsSinceEpoch}_${spec.requestKey.substring(0, 8)}.wav',
+    );
+    try {
+      final res = await ReaderPlatform.invoke<Map<dynamic, dynamic>>(
+        'synthesizeNativeTtsToFile',
+        {
+          'text': spec.inputText,
+          'rate': spec.speed,
+          'voiceId': spec.exactVoiceId,
+          'outputPath': outFile.path,
+        },
+      ).timeout(Duration(milliseconds: timeoutMs.clamp(10000, 60000)));
+      if (isCancelled?.call() == true) {
+        throw const TtsAdapterException(
+          kind: TtsAdapterErrorKind.cancelled,
+          message: '系统朗读合成已取消',
+        );
+      }
+      if (res == null || res['ok'] != true) {
+        final msg = res?['error']?.toString() ?? '系统语音引擎未能生成音频，请检查系统是否安装中文 TTS';
+        throw TtsAdapterException(
+          kind: TtsAdapterErrorKind.invalidAudioPayload,
+          message: msg,
+        );
+      }
+      if (!await outFile.exists()) {
+        throw const TtsAdapterException(
+          kind: TtsAdapterErrorKind.invalidAudioPayload,
+          message: '系统语音输出文件不存在',
+        );
+      }
+      final bytes = await outFile.readAsBytes();
+      final inspected = AudioFormatInspector.inspectBytes(bytes);
+      sw.stop();
+      return SynthesizedAudioPayload(
+        bytes: bytes,
+        detectedFormat: inspected.format,
+        durationMs: inspected.durationMs,
+        latencyMs: sw.elapsedMilliseconds,
+      );
+    } on TtsAdapterException {
+      rethrow;
+    } on TimeoutException {
+      throw const TtsAdapterException(
+        kind: TtsAdapterErrorKind.transientNetwork,
+        message: '系统语音离线合成超时',
+      );
+    } catch (e) {
+      throw TtsAdapterException(
+        kind: TtsAdapterErrorKind.invalidAudioPayload,
+        message: '系统语音离线合成失败：$e',
+      );
+    } finally {
+      try {
+        if (await outFile.exists()) await outFile.delete();
+      } catch (_) {}
+    }
+  }
+
   @override
   Future<VoiceProfileTestResult> testVoiceProfile({
     required VoiceProfileResolution resolution,
@@ -681,10 +782,13 @@ class OpenAiSpeechTtsAdapter implements TtsProviderAdapter {
         timeoutMs: resolution.provider.requestTimeoutMs.clamp(10000, 60000),
       );
       sw.stop();
+      final prefix = resolution.provider.adapter == 'native_tts'
+          ? '系统朗读本地合成通过'
+          : '音色在线合成通过';
       return VoiceProfileTestResult(
         success: true,
         message:
-            '音色在线合成通过（model=${spec.exactModelId}, voice=${spec.exactVoiceId}, ${audio.detectedFormat.toUpperCase()} ${(audio.durationMs / 1000).toStringAsFixed(1)}s, ${sw.elapsedMilliseconds}ms）',
+            '$prefix（model=${spec.exactModelId}, voice=${spec.exactVoiceId}, ${audio.detectedFormat.toUpperCase()} ${(audio.durationMs / 1000).toStringAsFixed(1)}s, ${sw.elapsedMilliseconds}ms）',
         audioFormat: audio.detectedFormat,
         durationMs: audio.durationMs,
         byteLength: audio.bytes.length,

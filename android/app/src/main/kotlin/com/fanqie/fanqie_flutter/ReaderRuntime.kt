@@ -14,6 +14,9 @@ import android.os.Handler
 import android.os.Looper
 import android.os.StatFs
 import android.provider.MediaStore
+import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
+import android.os.Bundle
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -25,7 +28,11 @@ import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.lang.ref.WeakReference
 import java.security.KeyStore
+import java.util.Locale
+import java.util.UUID
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -39,6 +46,10 @@ object ReaderRuntime {
     private var originalBrightness: Float? = null
     private val main = Handler(Looper.getMainLooper())
     private val files = Executors.newSingleThreadExecutor()
+    private val nativeSynthExecutor = Executors.newSingleThreadExecutor()
+    private var nativeSynthTts: TextToSpeech? = null
+    private var nativeSynthReady = false
+    private val nativeSynthLock = Any()
     var volumeKeyScrollEnabled = false
 
     fun attach(value: MainActivity) { activity = WeakReference(value) }
@@ -180,6 +191,16 @@ object ReaderRuntime {
                         }
                     }
                     "getAndroidSdkInt" -> result.success(Build.VERSION.SDK_INT)
+                    "synthesizeNativeTtsToFile" -> {
+                        val text = call.argument<String>("text") ?: ""
+                        val rate = (call.argument<Number>("rate")?.toFloat() ?: 1.0f).coerceIn(0.5f, 2.0f)
+                        val voiceId = call.argument<String>("voiceId") ?: ""
+                        val outputPath = call.argument<String>("outputPath") ?: ""
+                        nativeSynthExecutor.execute {
+                            val res = synthesizeNativeTtsToFile(app, text, rate, voiceId, outputPath)
+                            main.post { result.success(res) }
+                        }
+                    }
                     "initNativeTts", "speakNativeTts", "playAudioFile", "preloadNextAudio", "clearPreloadedAudio", "pauseAudio", "resumeAudio",
                     "stopNativeTts", "stopAudio", "stopPlayback", "setAudioVolume", "setSleepDeadline",
                     "updateMediaPlaybackState", "releasePlaybackService", "getPlaybackState",
@@ -195,6 +216,104 @@ object ReaderRuntime {
         }
         engine.dartExecutor.executeDartEntrypoint(DartExecutor.DartEntrypoint.createDefault())
         return engine
+    }
+
+    /// 将文本通过 Android 系统 TextToSpeech 离线合成为 WAV 音频文件，供沉浸式多角色听书旁白/角色无缝复用
+    private fun synthesizeNativeTtsToFile(
+        context: Context,
+        text: String,
+        rate: Float,
+        voiceId: String,
+        outputPath: String
+    ): Map<String, Any?> {
+        if (text.isBlank() || outputPath.isBlank()) {
+            return mapOf("ok" to false, "error" to "待合成文本或输出路径为空")
+        }
+        val outFile = File(outputPath)
+        outFile.parentFile?.mkdirs()
+        if (outFile.exists()) outFile.delete()
+
+        synchronized(nativeSynthLock) {
+            if (!nativeSynthReady || nativeSynthTts == null) {
+                val initLatch = CountDownLatch(1)
+                var initStatus = TextToSpeech.ERROR
+                var engine: TextToSpeech? = null
+                main.post {
+                    engine = TextToSpeech(context) { status ->
+                        initStatus = status
+                        initLatch.countDown()
+                    }
+                }
+                if (!initLatch.await(12, TimeUnit.SECONDS) || initStatus != TextToSpeech.SUCCESS || engine == null) {
+                    try { engine?.shutdown() } catch (_: Exception) {}
+                    return mapOf("ok" to false, "error" to "系统语音引擎初始化失败，请检查设备已安装中文 TTS 语音包")
+                }
+                val ttsInstance = engine!!
+                val langResult = ttsInstance.setLanguage(Locale.SIMPLIFIED_CHINESE)
+                if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    ttsInstance.setLanguage(Locale.getDefault())
+                }
+                nativeSynthTts = ttsInstance
+                nativeSynthReady = true
+            }
+
+            val tts = nativeSynthTts
+                ?: return mapOf("ok" to false, "error" to "系统语音引擎不可用")
+
+            try {
+                if (voiceId.isNotBlank() && voiceId != "default") {
+                    val matched = tts.voices?.firstOrNull { it.name == voiceId }
+                    if (matched != null) {
+                        tts.voice = matched
+                    }
+                } else {
+                    tts.setLanguage(Locale.SIMPLIFIED_CHINESE)
+                }
+                tts.setSpeechRate(rate.coerceIn(0.5f, 2.0f))
+
+                val utteranceId = "immersive_native_${UUID.randomUUID()}"
+                val doneLatch = CountDownLatch(1)
+                var succeeded = false
+                var failureReason: String? = null
+                tts.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                    override fun onStart(id: String?) {}
+                    override fun onDone(id: String?) {
+                        if (id == utteranceId) {
+                            succeeded = true
+                            doneLatch.countDown()
+                        }
+                    }
+                    @Deprecated("Android legacy callback")
+                    override fun onError(id: String?) {
+                        if (id == utteranceId) {
+                            failureReason = "系统语音合成失败"
+                            doneLatch.countDown()
+                        }
+                    }
+                    override fun onError(id: String?, errorCode: Int) {
+                        if (id == utteranceId) {
+                            failureReason = "系统语音合成失败（错误码 $errorCode）"
+                            doneLatch.countDown()
+                        }
+                    }
+                })
+
+                val accepted = tts.synthesizeToFile(text, Bundle(), outFile, utteranceId)
+                if (accepted != TextToSpeech.SUCCESS) {
+                    return mapOf("ok" to false, "error" to "系统语音引擎拒绝合成请求")
+                }
+                if (!doneLatch.await(25, TimeUnit.SECONDS)) {
+                    tts.stop()
+                    return mapOf("ok" to false, "error" to "系统语音合成超时")
+                }
+                if (!succeeded || !outFile.isFile || outFile.length() <= 44L) {
+                    return mapOf("ok" to false, "error" to (failureReason ?: "系统语音输出音频为空"))
+                }
+                return mapOf("ok" to true, "filePath" to outFile.absolutePath)
+            } catch (e: Exception) {
+                return mapOf("ok" to false, "error" to "系统语音合成异常：${e.message ?: "未知错误"}")
+            }
+        }
     }
 
     /// 保存文件到 Android 公共下载目录 Download/fanqie，并返回真实路径、URI 与大小

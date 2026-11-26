@@ -63,10 +63,11 @@ class ImmersiveSettingsSheet extends StatefulWidget {
       offlineOnly: offlineOnly,
       coordinator: coordinator,
     );
+    final bg = AppTheme.surfaceOf(context);
     if (ReaderPlatform.isDesktop) {
       return showReaderModal<void>(
         context: context,
-        backgroundColor: Colors.white,
+        backgroundColor: bg,
         heightFactor: 0.88,
         desktopWidth: 760,
         builder: (_) => sheet,
@@ -76,7 +77,7 @@ class ImmersiveSettingsSheet extends StatefulWidget {
       context: context,
       isScrollControlled: true,
       useSafeArea: true,
-      backgroundColor: Colors.white,
+      backgroundColor: bg,
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
       ),
@@ -265,7 +266,11 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
               _statusMessage!,
               style: TextStyle(
                 fontSize: 12,
-                color: _statusIsError ? Colors.red.shade800 : Colors.black87,
+                color: _statusIsError
+                    ? (AppTheme.isDark(context)
+                          ? Colors.redAccent.shade100
+                          : Colors.red.shade800)
+                    : AppTheme.textPrimaryOf(context),
               ),
             ),
           ),
@@ -333,7 +338,10 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
         Text(
           '支持同时配置多个 OpenAI 兼容模型并选择性启用；设 1 个主模型与 1 个兜底模型，'
           '主模型连续失败 ${cfg.textFailoverThreshold} 次自动切换至兜底模型。',
-          style: const TextStyle(fontSize: 11, color: Colors.black54),
+          style: TextStyle(
+            fontSize: 11,
+            color: AppTheme.textSecondaryOf(context),
+          ),
         ),
         const SizedBox(height: 8),
         for (final tm in cfg.textAnalysisModels)
@@ -360,10 +368,59 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
             ),
           ],
         ),
-        const Text(
+        Wrap(
+          spacing: 8,
+          runSpacing: 6,
+          children: [
+            if (!cfg.tts.providers.any((p) => p.adapter == 'native_tts'))
+              ActionChip(
+                key: const ValueKey('immersive-add-native-tts-btn'),
+                avatar: const Icon(Icons.record_voice_over_outlined, size: 16),
+                label: const Text('添加系统朗读（免费离线旁白）', style: TextStyle(fontSize: 12)),
+                onPressed: () async {
+                  final next = ImmersivePresetConfig.ensureNativeSystemTts(cfg);
+                  await _applyAndSaveConfig(
+                    next,
+                    successMessage: '已添加本地系统朗读供应商，可在「本书配音」或下方设为固定旁白',
+                  );
+                },
+              ),
+            ActionChip(
+              key: const ValueKey('immersive-set-global-native-narrator-btn'),
+              avatar: const Icon(Icons.campaign_outlined, size: 16),
+              label: Text(
+                cfg.bookDefaults.narratorVoiceProfileId ==
+                        ImmersivePresetConfig.nativeSystemVoiceProfileId
+                    ? '全局默认旁白：系统朗读'
+                    : '将系统朗读设为全局默认旁白',
+                style: const TextStyle(fontSize: 12),
+              ),
+              onPressed: () async {
+                final withNative = ImmersivePresetConfig.ensureNativeSystemTts(
+                  cfg,
+                );
+                final updated = withNative.copyWith(
+                  bookDefaults: withNative.bookDefaults.copyWith(
+                    narratorVoiceProfileId:
+                        ImmersivePresetConfig.nativeSystemVoiceProfileId,
+                  ),
+                );
+                await _applyAndSaveConfig(
+                  updated,
+                  successMessage: '已将「系统默认朗读 (本地离线)」设为全局默认旁白',
+                );
+              },
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(
           '可选择性启用模型与音色并逐个试听；若已编排数据使用的 TTS 模型被禁用、删除或失效，'
           '系统自动按男对男、女对女寻找可用音色兜底。',
-          style: TextStyle(fontSize: 11, color: Colors.black54),
+          style: TextStyle(
+            fontSize: 11,
+            color: AppTheme.textSecondaryOf(context),
+          ),
         ),
         const SizedBox(height: 8),
         for (final provider in cfg.tts.providers)
@@ -391,7 +448,7 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
               ? AppTheme.primaryColor.withValues(alpha: 0.6)
               : isFallback
               ? Colors.orange.withValues(alpha: 0.6)
-              : Colors.grey.shade200,
+              : AppTheme.dividerOf(context),
         ),
       ),
       child: Padding(
@@ -412,7 +469,9 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                         style: TextStyle(
                           fontWeight: FontWeight.w700,
                           fontSize: 13,
-                          color: tm.enabled ? Colors.black87 : Colors.black38,
+                          color: tm.enabled
+                              ? AppTheme.textPrimaryOf(context)
+                              : AppTheme.textHintOf(context),
                         ),
                       ),
                       if (isPrimary)
@@ -466,11 +525,17 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
             ),
             Text(
               '模型 ID: ${tm.modelId} · 并发: ${tm.maxConcurrency} · 思考: ${_thinkingLabel(tm.thinkingLevel)}',
-              style: const TextStyle(fontSize: 11, color: Colors.black87),
+              style: TextStyle(
+                fontSize: 11,
+                color: AppTheme.textPrimaryOf(context),
+              ),
             ),
             Text(
               '接口: ${tm.baseUrl}${tm.endpoint}',
-              style: const TextStyle(fontSize: 10, color: Colors.black54),
+              style: TextStyle(
+                fontSize: 10,
+                color: AppTheme.textSecondaryOf(context),
+              ),
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
@@ -629,14 +694,20 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                     style: TextStyle(
                       fontWeight: FontWeight.w600,
                       fontSize: 13,
-                      color: provider.enabled ? Colors.black87 : Colors.black38,
+                      color: provider.enabled
+                          ? AppTheme.textPrimaryOf(context)
+                          : AppTheme.textHintOf(context),
                     ),
                   ),
-                  if (isInsecureRemoteHttpUrl(provider.baseUrl))
-                    _badge('明文 HTTP', Colors.deepOrange),
-                  if ((provider.apiKey ?? '').trim().isEmpty &&
-                      (provider.apiKeyEnv ?? '').trim().isEmpty)
-                    _badge('未填密钥', Colors.red.shade700),
+                  if (provider.adapter == 'native_tts')
+                    _badge('本地离线免费', Colors.green.shade700)
+                  else ...[
+                    if (isInsecureRemoteHttpUrl(provider.baseUrl))
+                      _badge('明文 HTTP', Colors.deepOrange),
+                    if ((provider.apiKey ?? '').trim().isEmpty &&
+                        (provider.apiKeyEnv ?? '').trim().isEmpty)
+                      _badge('未填密钥', Colors.red.shade700),
+                  ],
                 ],
               ),
             ),
@@ -717,13 +788,18 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
     TtsProviderConfig provider,
     TtsModelConfig model,
   ) {
+    final isDark = AppTheme.isDark(context);
     return Container(
       margin: const EdgeInsets.fromLTRB(12, 4, 12, 8),
       padding: const EdgeInsets.all(10),
       decoration: BoxDecoration(
-        color: model.enabled ? Colors.grey.shade50 : Colors.grey.shade100,
+        color: model.enabled
+            ? AppTheme.inputFillOf(context)
+            : (isDark
+                  ? AppTheme.darkBackgroundColor
+                  : Colors.grey.shade100),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.grey.shade200),
+        border: Border.all(color: AppTheme.dividerOf(context)),
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -739,14 +815,16 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                       style: TextStyle(
                         fontWeight: FontWeight.w600,
                         fontSize: 12,
-                        color: model.enabled ? Colors.black87 : Colors.black38,
+                        color: model.enabled
+                            ? AppTheme.textPrimaryOf(context)
+                            : AppTheme.textHintOf(context),
                       ),
                     ),
                     Text(
                       '子并发 ${model.maxConcurrency} · ${model.enabled ? '已启用' : '已停用'}',
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 10,
-                        color: Colors.black54,
+                        color: AppTheme.textSecondaryOf(context),
                       ),
                     ),
                   ],
@@ -874,23 +952,23 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                             color: (provider.enabled &&
                                     model.enabled &&
                                     voice.enabled)
-                                ? Colors.black87
-                                : Colors.black38,
+                                ? AppTheme.textPrimaryOf(context)
+                                : AppTheme.textHintOf(context),
                           ),
                         ),
                         Text(
                           'voice_id: ${voice.voiceId}',
-                          style: const TextStyle(
+                          style: TextStyle(
                             fontSize: 10,
-                            color: Colors.black54,
+                            color: AppTheme.textSecondaryOf(context),
                           ),
                         ),
                         if (voice.notes.isNotEmpty)
                           Text(
                             voice.notes,
-                            style: const TextStyle(
+                            style: TextStyle(
                               fontSize: 11,
-                              color: Colors.black54,
+                              color: AppTheme.textSecondaryOf(context),
                             ),
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
@@ -916,14 +994,21 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                       ),
                     ),
                   IconButton(
-                    tooltip: '在线合成试听',
+                    tooltip: provider.adapter == 'native_tts'
+                        ? '本地系统朗读试听'
+                        : '在线合成试听',
                     icon: _testingVoiceId == voice.voiceProfileId
                         ? const SizedBox(
                             width: 16,
                             height: 16,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Icon(Icons.cloud_done_outlined, size: 19),
+                        : Icon(
+                            provider.adapter == 'native_tts'
+                                ? Icons.play_circle_outline
+                                : Icons.cloud_done_outlined,
+                            size: 19,
+                          ),
                     onPressed: _testingVoiceId != null
                         ? null
                         : () => _testVoiceOnline(voice.voiceProfileId),
@@ -984,6 +1069,7 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                 ),
               const SizedBox(height: 8),
               DropdownButtonFormField<String>(
+                key: ValueKey('immersive-narrator-$dropdownNarrator-${enabledVoices.length}'),
                 initialValue: dropdownNarrator,
                 isExpanded: true,
                 decoration: const InputDecoration(
@@ -1006,6 +1092,52 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                     _bookConfig = bookCfg.copyWith(narratorVoiceProfileId: v);
                   });
                 },
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  ActionChip(
+                    key: const ValueKey('immersive-use-native-narrator-btn'),
+                    avatar: const Icon(Icons.record_voice_over_outlined, size: 16),
+                    label: Text(
+                      dropdownNarrator ==
+                              ImmersivePresetConfig.nativeSystemVoiceProfileId
+                          ? '当前已设为系统朗读旁白'
+                          : '一键设为系统朗读旁白（本地离线免费）',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                    onPressed: () async {
+                      final withNative =
+                          ImmersivePresetConfig.ensureNativeSystemTts(cfg);
+                      if (!identical(withNative, cfg)) {
+                        final saved = await _applyAndSaveConfig(
+                          withNative,
+                          successMessage: '已添加系统朗读供应商并切换为本书固定旁白',
+                        );
+                        if (!saved || !mounted) return;
+                      }
+                      final nextBookCfg = bookCfg.copyWith(
+                        narratorVoiceProfileId:
+                            ImmersivePresetConfig.nativeSystemVoiceProfileId,
+                      );
+                      await _coord.updateBookVoicePool(
+                        bookId: nextBookCfg.bookId,
+                        selectedVoiceProfileIds:
+                            nextBookCfg.selectedVoiceProfileIds,
+                        narratorVoiceProfileId:
+                            nextBookCfg.narratorVoiceProfileId,
+                      );
+                      if (!mounted) return;
+                      setState(() {
+                        _bookConfig = nextBookCfg;
+                        _statusMessage = '已将本书固定旁白设为「系统默认朗读 (本地离线)」';
+                        _statusIsError = false;
+                      });
+                    },
+                  ),
+                ],
               ),
               const SizedBox(height: 16),
               Text(

@@ -26,7 +26,7 @@ class DownloadManagerSheet extends StatefulWidget {
   static Future<void> show(BuildContext context) async {
     await showReaderModal<void>(
       context: context,
-      backgroundColor: Colors.white,
+      backgroundColor: AppTheme.surfaceOf(context),
       builder: (ctx) => const DownloadManagerSheet(),
     );
   }
@@ -59,9 +59,9 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
 
     return Container(
       height: ReaderPlatform.isDesktop ? null : screenHeight * 0.75,
-      decoration: const BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      decoration: BoxDecoration(
+        color: AppTheme.surfaceOf(context),
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
       ),
       child: Column(
         children: [
@@ -161,21 +161,21 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
                 size: 22,
               ),
               const SizedBox(width: 8),
-              const Expanded(
+              Expanded(
                 child: Text(
                   '下载任务管理',
                   style: TextStyle(
                     fontSize: 17,
                     fontWeight: FontWeight.bold,
-                    color: AppTheme.textPrimary,
+                    color: AppTheme.textPrimaryOf(context),
                   ),
                 ),
               ),
               IconButton(
-                icon: const Icon(
+                icon: Icon(
                   Icons.close,
                   size: 20,
-                  color: AppTheme.textSecondary,
+                  color: AppTheme.textSecondaryOf(context),
                 ),
                 onPressed: () => Navigator.pop(context),
               ),
@@ -215,10 +215,10 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
   Widget _buildSectionTitle(String title) {
     return Text(
       title,
-      style: const TextStyle(
+      style: TextStyle(
         fontSize: 13,
         fontWeight: FontWeight.w600,
-        color: AppTheme.textSecondary,
+        color: AppTheme.textSecondaryOf(context),
       ),
     );
   }
@@ -229,7 +229,7 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: Colors.white,
+        color: AppTheme.surfaceOf(context),
         borderRadius: BorderRadius.circular(12),
         border: Border.all(color: AppTheme.primaryColor.withValues(alpha: 0.3)),
         boxShadow: [
@@ -254,10 +254,10 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
                   children: [
                     Text(
                       task.book.bookName,
-                      style: const TextStyle(
+                      style: TextStyle(
                         fontSize: 14,
                         fontWeight: FontWeight.bold,
-                        color: AppTheme.textPrimary,
+                        color: AppTheme.textPrimaryOf(context),
                       ),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
@@ -380,9 +380,9 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
     return Container(
       padding: const EdgeInsets.all(12),
       decoration: BoxDecoration(
-        color: const Color(0xFFF9FAFB),
+        color: AppTheme.inputFillOf(context),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: Colors.grey.shade200),
+        border: Border.all(color: AppTheme.dividerOf(context)),
       ),
       child: Row(
         children: [
@@ -394,10 +394,10 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
               children: [
                 Text(
                   task.book.bookName,
-                  style: const TextStyle(
+                  style: TextStyle(
                     fontSize: 14,
                     fontWeight: FontWeight.w600,
-                    color: AppTheme.textPrimary,
+                    color: AppTheme.textPrimaryOf(context),
                   ),
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,

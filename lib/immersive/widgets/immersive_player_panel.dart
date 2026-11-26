@@ -15,9 +15,9 @@ class ImmersivePlayerPanel extends StatefulWidget {
   static const desktopHeight = 132.0;
 
   final VoidCallback onClose;
-  final Color backgroundColor;
-  final Color textColor;
-  final Color secondaryColor;
+  final Color? backgroundColor;
+  final Color? textColor;
+  final Color? secondaryColor;
   final ValueChanged<bool>? onModalChanged;
   final void Function(int chapterIndex, ReadingPosition position)? onJumpToSource;
   final ImmersivePlaybackCoordinator? coordinator;
@@ -25,9 +25,9 @@ class ImmersivePlayerPanel extends StatefulWidget {
   const ImmersivePlayerPanel({
     super.key,
     required this.onClose,
-    this.backgroundColor = Colors.white,
-    this.textColor = AppTheme.textPrimary,
-    this.secondaryColor = AppTheme.textSecondary,
+    this.backgroundColor,
+    this.textColor,
+    this.secondaryColor,
     this.onModalChanged,
     this.onJumpToSource,
     this.coordinator,
@@ -82,6 +82,11 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
     final coord = _coord;
     if (!coord.isActive) return const SizedBox.shrink();
 
+    final effectiveBg = widget.backgroundColor ?? AppTheme.surfaceOf(context);
+    final effectiveText = widget.textColor ?? AppTheme.textPrimaryOf(context);
+    final effectiveSecondary =
+        widget.secondaryColor ?? AppTheme.textSecondaryOf(context);
+
     final seg = coord.currentSegment;
     final speakerLabel = seg?.speakerDisplayName ?? '准备中';
     final spokenText = seg?.spokenText ?? _status.phaseLabel;
@@ -101,13 +106,16 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
         isBuffering: isBuffering,
         isBlocked: isBlocked,
         issueText: issueText,
+        backgroundColor: effectiveBg,
+        textColor: effectiveText,
+        secondaryColor: effectiveSecondary,
       );
     }
 
     return Container(
       key: const ValueKey('immersive-player-panel'),
       decoration: BoxDecoration(
-        color: widget.backgroundColor,
+        color: effectiveBg,
         borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
         boxShadow: [
           BoxShadow(
@@ -151,7 +159,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                     spokenText,
                     style: TextStyle(
                       fontSize: 12,
-                      color: widget.textColor,
+                      color: effectiveText,
                       fontWeight: FontWeight.w500,
                     ),
                     maxLines: 1,
@@ -162,7 +170,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                   icon: Icon(
                     Icons.close,
                     size: 18,
-                    color: widget.secondaryColor,
+                    color: effectiveSecondary,
                   ),
                   tooltip: '停止沉浸式听书',
                   visualDensity: VisualDensity.compact,
@@ -205,7 +213,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                       '前文档案 ${_status.prefixCompletedChunks}/${_status.prefixTotalChunks}',
                       style: TextStyle(
                         fontSize: 11,
-                        color: widget.secondaryColor,
+                        color: effectiveSecondary,
                       ),
                     )
                   else ...[
@@ -213,24 +221,35 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                       '已确认 ${_status.confirmedChunks}/${_status.totalPlannedChunks} 块',
                       style: TextStyle(
                         fontSize: 11,
-                        color: widget.secondaryColor,
+                        color: effectiveSecondary,
                       ),
                     ),
                     Text(
                       '已生成 ${_status.readyAudioSegments}/${_status.totalManifestSegments} 段',
                       style: TextStyle(
                         fontSize: 11,
-                        color: widget.secondaryColor,
+                        color: effectiveSecondary,
                       ),
                     ),
                     Text(
                       '可播 ${_status.continuousReadySeconds.toStringAsFixed(0)}s',
                       style: TextStyle(
                         fontSize: 11,
-                        color: widget.secondaryColor,
+                        color: effectiveSecondary,
                       ),
                     ),
                   ],
+                  if (coord.hasSleepSchedule)
+                    Text(
+                      coord.stopAfterCurrentChapter
+                          ? '定时:播完本章'
+                          : '定时:${coord.timerRemainingMinutes}分',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        color: AppTheme.primaryColor,
+                        fontWeight: FontWeight.w600,
+                      ),
+                    ),
                 ],
               ),
             ),
@@ -257,7 +276,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                     Expanded(
                       child: Text(
                         issueText,
-                        style: TextStyle(fontSize: 11, color: widget.textColor),
+                        style: TextStyle(fontSize: 11, color: effectiveText),
                         maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                       ),
@@ -281,23 +300,45 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                 TextButton(
                   onPressed: () => _showRateDialog(context, coord),
                   style: TextButton.styleFrom(
-                    minimumSize: const Size(44, 36),
-                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                    minimumSize: const Size(40, 36),
+                    padding: const EdgeInsets.symmetric(horizontal: 4),
                   ),
                   child: Text(
                     '${coord.playbackRate.toStringAsFixed(2).replaceAll(RegExp(r'\.?0+$'), '')}x',
                     style: TextStyle(
                       fontSize: 12,
                       fontWeight: FontWeight.bold,
-                      color: widget.textColor,
+                      color: effectiveText,
                     ),
                   ),
+                ),
+                // 睡眠定时（定时停 / 播完本章停）
+                IconButton(
+                  key: const ValueKey('immersive-sleep-timer-btn'),
+                  icon: Badge(
+                    isLabelVisible: coord.hasSleepSchedule,
+                    label: Text(
+                      coord.stopAfterCurrentChapter
+                          ? '章'
+                          : '${coord.timerRemainingMinutes}',
+                      style: const TextStyle(fontSize: 9),
+                    ),
+                    child: Icon(
+                      Icons.bedtime_outlined,
+                      size: 20,
+                      color: coord.hasSleepSchedule
+                          ? AppTheme.primaryColor
+                          : effectiveSecondary,
+                    ),
+                  ),
+                  tooltip: '睡眠定时',
+                  onPressed: () => _showSleepTimerDialog(context, coord),
                 ),
                 IconButton(
                   icon: Icon(
                     Icons.skip_previous_rounded,
                     size: 26,
-                    color: widget.textColor,
+                    color: effectiveText,
                   ),
                   tooltip: '上一段',
                   onPressed: coord.currentSegmentIndex > 0
@@ -338,7 +379,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                   icon: Icon(
                     Icons.skip_next_rounded,
                     size: 26,
-                    color: widget.textColor,
+                    color: effectiveText,
                   ),
                   tooltip: '下一段',
                   onPressed:
@@ -359,8 +400,8 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                     ),
                     child: Icon(
                       Icons.people_alt_outlined,
-                      size: 21,
-                      color: widget.secondaryColor,
+                      size: 20,
+                      color: effectiveSecondary,
                     ),
                   ),
                   tooltip: '本书角色与音色',
@@ -372,8 +413,8 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                 IconButton(
                   icon: Icon(
                     Icons.tune_rounded,
-                    size: 21,
-                    color: widget.secondaryColor,
+                    size: 20,
+                    color: effectiveSecondary,
                   ),
                   tooltip: '沉浸式听书设置',
                   onPressed: () => _openSettings(context, coord.currentBookId),
@@ -395,6 +436,9 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
     required bool isBuffering,
     required bool isBlocked,
     required String? issueText,
+    required Color backgroundColor,
+    required Color textColor,
+    required Color secondaryColor,
   }) {
     final rateLabel =
         '${coord.playbackRate.toStringAsFixed(2).replaceAll(RegExp(r'\.?0+$'), '')}x';
@@ -410,7 +454,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
 
     return Material(
       key: const ValueKey('immersive-player-panel'),
-      color: widget.backgroundColor,
+      color: backgroundColor,
       elevation: 8,
       child: SizedBox(
         height: ImmersivePlayerPanel.desktopHeight,
@@ -419,7 +463,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // 第一行：沉浸式说话角色 + 书章信息 + 倍速 / 角色 / 设置 / 关闭
+              // 第一行：沉浸式说话角色 + 书章信息 + 倍速 / 定时 / 角色 / 设置 / 关闭
               SizedBox(
                 height: 36,
                 child: Row(
@@ -448,7 +492,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                         bookMeta.isEmpty ? spokenText : '$bookMeta · $spokenText',
                         style: TextStyle(
                           fontSize: 12,
-                          color: widget.textColor,
+                          color: textColor,
                           fontWeight: FontWeight.w500,
                         ),
                         maxLines: 1,
@@ -466,9 +510,35 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                         style: TextStyle(
                           fontSize: 12,
                           fontWeight: FontWeight.bold,
-                          color: widget.textColor,
+                          color: textColor,
                         ),
                       ),
+                    ),
+                    IconButton(
+                      key: const ValueKey('immersive-sleep-timer-btn'),
+                      icon: Badge(
+                        isLabelVisible: coord.hasSleepSchedule,
+                        label: Text(
+                          coord.stopAfterCurrentChapter
+                              ? '章'
+                              : '${coord.timerRemainingMinutes}',
+                          style: const TextStyle(fontSize: 9),
+                        ),
+                        child: Icon(
+                          Icons.bedtime_outlined,
+                          size: 19,
+                          color: coord.hasSleepSchedule
+                              ? AppTheme.primaryColor
+                              : secondaryColor,
+                        ),
+                      ),
+                      tooltip: '睡眠定时',
+                      constraints: const BoxConstraints.tightFor(
+                        width: 36,
+                        height: 36,
+                      ),
+                      padding: const EdgeInsets.all(6),
+                      onPressed: () => _showSleepTimerDialog(context, coord),
                     ),
                     IconButton(
                       icon: Badge(
@@ -482,7 +552,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                         child: Icon(
                           Icons.people_alt_outlined,
                           size: 19,
-                          color: widget.secondaryColor,
+                          color: secondaryColor,
                         ),
                       ),
                       tooltip: '本书角色与音色',
@@ -499,7 +569,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                       icon: Icon(
                         Icons.tune_rounded,
                         size: 19,
-                        color: widget.secondaryColor,
+                        color: secondaryColor,
                       ),
                       tooltip: '沉浸式听书设置',
                       constraints: const BoxConstraints.tightFor(
@@ -513,7 +583,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                       icon: Icon(
                         Icons.close,
                         size: 18,
-                        color: widget.secondaryColor,
+                        color: secondaryColor,
                       ),
                       tooltip: '停止沉浸式听书',
                       constraints: const BoxConstraints.tightFor(
@@ -538,7 +608,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                       icon: Icon(
                         Icons.skip_previous_rounded,
                         size: 22,
-                        color: widget.textColor,
+                        color: textColor,
                       ),
                       tooltip: '上一段',
                       constraints: const BoxConstraints.tightFor(
@@ -588,7 +658,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                       icon: Icon(
                         Icons.skip_next_rounded,
                         size: 22,
-                        color: widget.textColor,
+                        color: textColor,
                       ),
                       tooltip: '下一段',
                       constraints: const BoxConstraints.tightFor(
@@ -624,13 +694,26 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                         ),
                       ),
                     ],
+                    if (coord.hasSleepSchedule) ...[
+                      const SizedBox(width: 8),
+                      Text(
+                        coord.stopAfterCurrentChapter
+                            ? '播完本章停'
+                            : '定时${coord.timerRemainingMinutes}分',
+                        style: const TextStyle(
+                          fontSize: 11,
+                          color: AppTheme.primaryColor,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
                     const SizedBox(width: 10),
                     Expanded(
                       child: Text(
                         statusMetrics,
                         style: TextStyle(
                           fontSize: 11,
-                          color: widget.secondaryColor,
+                          color: secondaryColor,
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -658,7 +741,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                               issueText,
                               style: TextStyle(
                                 fontSize: 11,
-                                color: widget.textColor,
+                                color: textColor,
                               ),
                               maxLines: 1,
                               overflow: TextOverflow.ellipsis,
@@ -686,7 +769,7 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                           spokenText,
                           style: TextStyle(
                             fontSize: 11,
-                            color: widget.secondaryColor,
+                            color: secondaryColor,
                           ),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
@@ -698,6 +781,70 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
         ),
       ),
     );
+  }
+
+  void _showSleepTimerDialog(
+    BuildContext context,
+    ImmersivePlaybackCoordinator coord,
+  ) {
+    widget.onModalChanged?.call(true);
+    showDialog<void>(
+      context: context,
+      builder: (ctx) => SimpleDialog(
+        title: const Text('沉浸式听书定时关闭'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () {
+              coord.setSleepTimer(0);
+              Navigator.pop(ctx);
+            },
+            child: Row(
+              children: [
+                const Text('关闭定时'),
+                if (!coord.hasSleepSchedule) ...[
+                  const Spacer(),
+                  const Icon(Icons.check, color: AppTheme.primaryColor),
+                ],
+              ],
+            ),
+          ),
+          SimpleDialogOption(
+            onPressed: () {
+              coord.setStopAfterCurrentChapter(true);
+              Navigator.pop(ctx);
+            },
+            child: Row(
+              children: [
+                const Text('播完本章后停止（不预取下一章）'),
+                if (coord.stopAfterCurrentChapter) ...[
+                  const Spacer(),
+                  const Icon(Icons.check, color: AppTheme.primaryColor),
+                ],
+              ],
+            ),
+          ),
+          for (final minutes in const [15, 30, 45, 60, 90])
+            SimpleDialogOption(
+              onPressed: () {
+                coord.setSleepTimer(minutes);
+                Navigator.pop(ctx);
+              },
+              child: Row(
+                children: [
+                  Text('$minutes 分钟后停止'),
+                  if (!coord.stopAfterCurrentChapter &&
+                      coord.sleepDeadline != null &&
+                      coord.timerRemainingMinutes <= minutes &&
+                      coord.timerRemainingMinutes > minutes - 15) ...[
+                    const Spacer(),
+                    const Icon(Icons.check, color: AppTheme.primaryColor),
+                  ],
+                ],
+              ),
+            ),
+        ],
+      ),
+    ).whenComplete(() => widget.onModalChanged?.call(false));
   }
 
   void _showRateDialog(
