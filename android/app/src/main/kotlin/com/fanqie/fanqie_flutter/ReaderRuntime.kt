@@ -1,8 +1,10 @@
 package com.fanqie.fanqie_flutter
 
+import android.content.ClipData
 import android.content.ContentUris
 import android.content.ContentValues
 import android.content.Context
+import android.content.Intent
 import android.media.MediaMetadataRetriever
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
@@ -12,8 +14,11 @@ import android.os.Build
 import android.os.Environment
 import android.os.Handler
 import android.os.Looper
+import android.os.PowerManager
 import android.os.StatFs
 import android.provider.MediaStore
+import android.provider.OpenableColumns
+import android.provider.Settings
 import android.speech.tts.TextToSpeech
 import android.speech.tts.UtteranceProgressListener
 import android.os.Bundle
@@ -22,6 +27,7 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import android.view.WindowManager
 import android.view.Window
+import androidx.core.content.FileProvider
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.dart.DartExecutor
 import io.flutter.plugin.common.MethodChannel
@@ -50,7 +56,125 @@ object ReaderRuntime {
     private var nativeSynthTts: TextToSpeech? = null
     private var nativeSynthReady = false
     private val nativeSynthLock = Any()
+    private val externalImportLock = Any()
+    private val externalImportInbox = mutableListOf<Map<String, Any?>>()
+    private val externalImportFiles = mutableMapOf<String, File>()
+    private var externalImportsInFlight = 0
+    private val shortcutLock = Any()
+    private val pendingShortcuts = mutableListOf<Map<String, Any?>>()
+    const val ACTION_READER_SHORTCUT = "com.fanqie.fanqie_flutter.action.SHORTCUT"
+    const val EXTRA_SHORTCUT_ACTION = "shortcut_action"
+    const val EXTRA_BOOK_ID = "book_id"
     var volumeKeyScrollEnabled = false
+
+    /// 接收图标长按快捷方式或桌面小组件点击事件并通知 Flutter 层直达目标功能
+    fun handleShortcutIntent(action: String, bookId: String?) {
+        val payload = mapOf("action" to action, "bookId" to bookId)
+        synchronized(shortcutLock) {
+            pendingShortcuts.add(payload)
+        }
+        emit("onShortcutAction", payload)
+    }
+
+    /// 处理外部文件管理器/微信/QQ 通过 ACTION_VIEW 打开的 TXT 或 EPUB 文件
+    fun handleExternalIntent(context: Context, intent: Intent?) {
+        if (intent == null || intent.action != Intent.ACTION_VIEW) return
+        val uri = intent.data ?: return
+        val app = context.applicationContext
+        synchronized(externalImportLock) { externalImportsInFlight++ }
+        files.execute {
+            val id = "android_ext_${UUID.randomUUID()}"
+            try {
+                val displayName = resolveIntentDisplayName(app, uri, intent.type)
+                val lower = displayName.lowercase(Locale.ROOT)
+                val ext = when {
+                    lower.endsWith(".epub") -> ".epub"
+                    lower.endsWith(".txt") -> ".txt"
+                    intent.type == "application/epub+zip" -> ".epub"
+                    intent.type?.startsWith("text/") == true -> ".txt"
+                    else -> ""
+                }
+                if (ext.isEmpty()) {
+                    enqueueExternalImport(mapOf(
+                        "id" to id,
+                        "name" to displayName,
+                        "path" to null,
+                        "error" to "暂仅支持打开 TXT 或 EPUB 小说文件"
+                    ), null)
+                    return@execute
+                }
+                val safeName = if (lower.endsWith(ext)) displayName else "$displayName$ext"
+                val dir = File(app.cacheDir, "external_imports").apply { mkdirs() }
+                val target = File(dir, "${id}_${safeName.replace(Regex("[^A-Za-z0-9._\\-\\u4e00-\\u9fa5]"), "_")}")
+                val maxBytes = 128L * 1024L * 1024L
+                var total = 0L
+                val input = app.contentResolver.openInputStream(uri)
+                    ?: throw IllegalStateException("无法读取外部文件内容")
+                input.use { src ->
+                    target.outputStream().use { dst ->
+                        val buffer = ByteArray(16384)
+                        while (true) {
+                            val read = src.read(buffer)
+                            if (read <= 0) break
+                            total += read
+                            if (total > maxBytes) {
+                                throw IllegalStateException("文件超过 128 MB 限制")
+                            }
+                            dst.write(buffer, 0, read)
+                        }
+                    }
+                }
+                if (total <= 0L) {
+                    target.delete()
+                    throw IllegalStateException("外部文件内容为空")
+                }
+                enqueueExternalImport(mapOf(
+                    "id" to id,
+                    "name" to safeName,
+                    "path" to target.absolutePath,
+                    "error" to null
+                ), target)
+            } catch (e: Exception) {
+                enqueueExternalImport(mapOf(
+                    "id" to id,
+                    "name" to "外部小说",
+                    "path" to null,
+                    "error" to (e.message ?: "无法读取外部文件")
+                ), null)
+            } finally {
+                synchronized(externalImportLock) {
+                    externalImportsInFlight = (externalImportsInFlight - 1).coerceAtLeast(0)
+                }
+                emit("onExternalImportsAvailable")
+            }
+        }
+    }
+
+    private fun resolveIntentDisplayName(context: Context, uri: Uri, mimeType: String?): String {
+        if (uri.scheme == "content") {
+            try {
+                context.contentResolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c ->
+                    if (c.moveToFirst()) {
+                        val name = c.getString(0)
+                        if (!name.isNullOrBlank()) return File(name).name
+                    }
+                }
+            } catch (_: Exception) {}
+        }
+        val segment = uri.lastPathSegment?.let { File(it).name }
+        if (!segment.isNullOrBlank()) return segment
+        return if (mimeType == "application/epub+zip") "import.epub" else "import.txt"
+    }
+
+    private fun enqueueExternalImport(entry: Map<String, Any?>, file: File?) {
+        synchronized(externalImportLock) {
+            externalImportInbox.add(entry)
+            val id = entry["id"] as? String
+            if (id != null && file != null) {
+                externalImportFiles[id] = file
+            }
+        }
+    }
 
     fun attach(value: MainActivity) { activity = WeakReference(value) }
     fun detach(value: MainActivity) {
@@ -118,7 +242,12 @@ object ReaderRuntime {
                             else -> "unknown"
                         })
                     }
-                    "readTtsSecret" -> result.success(ReaderSecrets.read(app))
+                    "readTtsSecret" -> {
+                        files.execute {
+                            val secret = ReaderSecrets.read(app)
+                            main.post { result.success(secret) }
+                        }
+                    }
                     "normalizeTextFile" -> ReaderTextDecoder.normalize(
                         app, call.argument<String>("path") ?: "",
                         call.argument<String>("encoding") ?: "auto",
@@ -133,6 +262,7 @@ object ReaderRuntime {
                         result.success(mapOf(
                             "mediaPlayback" to true,
                             "secureStorage" to true,
+                            "fileImport" to true,
                             "ttsEngines" to engines.size,
                             "sdk" to Build.VERSION.SDK_INT,
                             "foreground" to (activity?.get()?.hasWindowFocus() == true),
@@ -140,15 +270,63 @@ object ReaderRuntime {
                             "interactive" to (app.getSystemService(Context.POWER_SERVICE) as android.os.PowerManager).isInteractive
                         ))
                     }
-                    "writeTtsSecret" -> result.success(ReaderSecrets.write(app, call.argument<String>("value") ?: ""))
+                    "takeExternalImports" -> {
+                        val items = synchronized(externalImportLock) {
+                            val copy = externalImportInbox.toList()
+                            externalImportInbox.clear()
+                            copy
+                        }
+                        result.success(items)
+                    }
+                    "releaseExternalImport" -> {
+                        val id = call.argument<String>("id") ?: ""
+                        val file = synchronized(externalImportLock) { externalImportFiles.remove(id) }
+                        if (file != null) {
+                            files.execute { try { file.delete() } catch (_: Exception) {} }
+                        }
+                        result.success(true)
+                    }
+                    "externalImportsBusy" -> {
+                        val busy = synchronized(externalImportLock) {
+                            externalImportsInFlight > 0 || externalImportInbox.isNotEmpty()
+                        }
+                        result.success(busy)
+                    }
+                    "getNativeTtsVoices" -> {
+                        nativeSynthExecutor.execute {
+                            val voices = listNativeTtsVoices(app)
+                            main.post { result.success(voices) }
+                        }
+                    }
+                    "writeTtsSecret" -> {
+                        val value = call.argument<String>("value") ?: ""
+                        files.execute {
+                            val ok = ReaderSecrets.write(app, value)
+                            main.post { result.success(ok) }
+                        }
+                    }
                     "readNamedSecret" -> {
                         val keyName = call.argument<String>("key") ?: ""
-                        result.success(if (keyName.isBlank()) null else ReaderSecrets.readNamed(app, keyName))
+                        if (keyName.isBlank()) {
+                            result.success(null)
+                        } else {
+                            files.execute {
+                                val value = ReaderSecrets.readNamed(app, keyName)
+                                main.post { result.success(value) }
+                            }
+                        }
                     }
                     "writeNamedSecret" -> {
                         val keyName = call.argument<String>("key") ?: ""
                         val value = call.argument<String>("value") ?: ""
-                        result.success(if (keyName.isBlank()) false else ReaderSecrets.writeNamed(app, keyName, value))
+                        if (keyName.isBlank()) {
+                            result.success(false)
+                        } else {
+                            files.execute {
+                                val ok = ReaderSecrets.writeNamed(app, keyName, value)
+                                main.post { result.success(ok) }
+                            }
+                        }
                     }
                     "probeAudioDuration" -> {
                         val filePath = call.argument<String>("filePath") ?: ""
@@ -191,6 +369,48 @@ object ReaderRuntime {
                         }
                     }
                     "getAndroidSdkInt" -> result.success(Build.VERSION.SDK_INT)
+                    "isIgnoringBatteryOptimizations" -> {
+                        val ignoring = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            val pm = app.getSystemService(Context.POWER_SERVICE) as PowerManager
+                            pm.isIgnoringBatteryOptimizations(app.packageName)
+                        } else {
+                            true
+                        }
+                        result.success(ignoring)
+                    }
+                    "openBatteryOptimizationSettings" -> {
+                        val opened = openBatteryOptimizationSettings(app)
+                        result.success(opened)
+                    }
+                    "shareImageFile" -> {
+                        val filePath = call.argument<String>("filePath") ?: ""
+                        val text = call.argument<String>("text")
+                        val title = call.argument<String>("title") ?: "分享金句卡片"
+                        val shared = shareImageFile(app, filePath, text, title)
+                        result.success(shared)
+                    }
+                    "takePendingShortcuts" -> {
+                        val list = synchronized(shortcutLock) {
+                            val copy = pendingShortcuts.toList()
+                            pendingShortcuts.clear()
+                            copy
+                        }
+                        result.success(list)
+                    }
+                    "updateHomeWidget" -> {
+                        val bookId = call.argument<String>("bookId") ?: ""
+                        val bookName = call.argument<String>("bookName") ?: ""
+                        val chapterTitle = call.argument<String>("chapterTitle") ?: ""
+                        val progressText = call.argument<String>("progressText") ?: ""
+                        ReaderAppWidgetProvider.saveAndRefresh(
+                            app,
+                            bookId = bookId,
+                            bookName = bookName,
+                            chapterTitle = chapterTitle,
+                            progressText = progressText
+                        )
+                        result.success(true)
+                    }
                     "synthesizeNativeTtsToFile" -> {
                         val text = call.argument<String>("text") ?: ""
                         val rate = (call.argument<Number>("rate")?.toFloat() ?: 1.0f).coerceIn(0.5f, 2.0f)
@@ -202,7 +422,7 @@ object ReaderRuntime {
                         }
                     }
                     "initNativeTts", "speakNativeTts", "playAudioFile", "preloadNextAudio", "clearPreloadedAudio", "pauseAudio", "resumeAudio",
-                    "stopNativeTts", "stopAudio", "stopPlayback", "setAudioVolume", "setSleepDeadline",
+                    "stopNativeTts", "stopAudio", "stopPlayback", "setAudioVolume", "seekAudio", "setSleepDeadline",
                     "updateMediaPlaybackState", "releasePlaybackService", "getPlaybackState",
                     "setPlaybackRate", "getAudioPosition" -> {
                         @Suppress("UNCHECKED_CAST")
@@ -216,6 +436,47 @@ object ReaderRuntime {
         }
         engine.dartExecutor.executeDartEntrypoint(DartExecutor.DartEntrypoint.createDefault())
         return engine
+    }
+
+    /// 枚举设备系统 TextToSpeech 已安装的可用发音人（中文优先排序）
+    private fun listNativeTtsVoices(context: Context): List<Map<String, String>> {
+        synchronized(nativeSynthLock) {
+            if (!nativeSynthReady || nativeSynthTts == null) {
+                val initLatch = CountDownLatch(1)
+                var initStatus = TextToSpeech.ERROR
+                var engine: TextToSpeech? = null
+                main.post {
+                    engine = TextToSpeech(context) { status ->
+                        initStatus = status
+                        initLatch.countDown()
+                    }
+                }
+                if (!initLatch.await(8, TimeUnit.SECONDS) || initStatus != TextToSpeech.SUCCESS || engine == null) {
+                    try { engine?.shutdown() } catch (_: Exception) {}
+                    return emptyList()
+                }
+                val ttsInstance = engine!!
+                val langResult = ttsInstance.setLanguage(Locale.SIMPLIFIED_CHINESE)
+                if (langResult == TextToSpeech.LANG_MISSING_DATA || langResult == TextToSpeech.LANG_NOT_SUPPORTED) {
+                    ttsInstance.setLanguage(Locale.getDefault())
+                }
+                nativeSynthTts = ttsInstance
+                nativeSynthReady = true
+            }
+            val tts = nativeSynthTts ?: return emptyList()
+            val allVoices = try { tts.voices?.toList().orEmpty() } catch (_: Exception) { emptyList() }
+            return allVoices
+                .filter { !it.isNetworkConnectionRequired && (it.locale.language == "zh" || it.locale.language == Locale.getDefault().language) }
+                .sortedWith(compareBy<android.speech.tts.Voice>({ it.locale.language != "zh" }, { it.name }))
+                .take(30)
+                .map { v ->
+                    mapOf(
+                        "id" to v.name,
+                        "name" to v.name,
+                        "language" to v.locale.toLanguageTag()
+                    )
+                }
+        }
     }
 
     /// 将文本通过 Android 系统 TextToSpeech 离线合成为 WAV 音频文件，供沉浸式多角色听书旁白/角色无缝复用
@@ -522,6 +783,75 @@ object ReaderRuntime {
             -1L
         }
     }
+
+    /// 打开系统电池优化设置页（失败时降级至应用详情页，引导用户允许后台高耗电/无限制运行）
+    private fun openBatteryOptimizationSettings(context: Context): Boolean {
+        val host = activity?.get()
+        val intents = buildList {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                add(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS))
+            }
+            add(
+                Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
+                    data = Uri.fromParts("package", context.packageName, null)
+                }
+            )
+        }
+        for (intent in intents) {
+            try {
+                if (host != null) {
+                    host.startActivity(intent)
+                } else {
+                    intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    context.startActivity(intent)
+                }
+                return true
+            } catch (_: Exception) {
+                // 尝试下一候选设置页
+            }
+        }
+        return false
+    }
+
+    /// 通过 FileProvider 将生成的金句海报 PNG 分享至微信/QQ/系统分享面板
+    private fun shareImageFile(
+        context: Context,
+        filePath: String,
+        text: String?,
+        title: String
+    ): Boolean {
+        val file = File(filePath)
+        if (!file.isFile || file.length() <= 0L) return false
+        return try {
+            val uri = FileProvider.getUriForFile(
+                context,
+                "${context.packageName}.fileprovider",
+                file
+            )
+            val sendIntent = Intent(Intent.ACTION_SEND).apply {
+                type = "image/png"
+                putExtra(Intent.EXTRA_STREAM, uri)
+                if (!text.isNullOrBlank()) {
+                    putExtra(Intent.EXTRA_TEXT, text)
+                }
+                clipData = ClipData.newUri(context.contentResolver, title, uri)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val chooser = Intent.createChooser(sendIntent, title).apply {
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            val host = activity?.get()
+            if (host != null) {
+                host.startActivity(chooser)
+            } else {
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                context.startActivity(chooser)
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
 }
 
 /** Only ciphertext is stored in preferences. The AES key never leaves Keystore. */
@@ -548,11 +878,21 @@ private object ReaderSecrets {
         return prefs.edit().putString(slot, "${Base64.encodeToString(cipher.iv, Base64.NO_WRAP)}:${Base64.encodeToString(encrypted, Base64.NO_WRAP)}").commit()
     }
     fun readNamed(context: Context, slot: String): String? {
-        val value = context.getSharedPreferences("reader_secure", Context.MODE_PRIVATE).getString(slot, null) ?: return null
-        val parts = value.split(':')
-        require(parts.size == 2)
-        val cipher = Cipher.getInstance("AES/GCM/NoPadding")
-        cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, Base64.decode(parts[0], Base64.NO_WRAP)))
-        return String(cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)), Charsets.UTF_8)
+        val prefs = context.getSharedPreferences("reader_secure", Context.MODE_PRIVATE)
+        val value = prefs.getString(slot, null) ?: return null
+        return try {
+            val parts = value.split(':')
+            if (parts.size != 2) {
+                prefs.edit().remove(slot).apply()
+                return null
+            }
+            val cipher = Cipher.getInstance("AES/GCM/NoPadding")
+            cipher.init(Cipher.DECRYPT_MODE, key(), GCMParameterSpec(128, Base64.decode(parts[0], Base64.NO_WRAP)))
+            String(cipher.doFinal(Base64.decode(parts[1], Base64.NO_WRAP)), Charsets.UTF_8)
+        } catch (_: Exception) {
+            // 密钥库失效或密文损坏时清理损坏槽位并安全回退，避免持续崩溃
+            prefs.edit().remove(slot).apply()
+            null
+        }
     }
 }

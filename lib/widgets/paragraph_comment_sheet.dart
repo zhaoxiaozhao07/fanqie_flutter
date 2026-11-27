@@ -54,6 +54,7 @@ class ParagraphCommentSheet extends StatefulWidget {
     return showModalBottomSheet(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       backgroundColor: Colors.transparent,
       builder: (ctx) => Theme(
         data: ThemeData(
@@ -91,7 +92,7 @@ class ParagraphCommentSheet extends StatefulWidget {
 
 class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
   late final ApiService _apiService = widget.apiService ?? ApiService();
-  final ScrollController _scrollController = ScrollController();
+  ScrollController? _activeScrollController;
 
   int _currentSort = 1; // 1=最热, 3=最新
   bool _isLoading = true;
@@ -117,21 +118,17 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
   @override
   void initState() {
     super.initState();
-    _scrollController.addListener(_onScroll);
     _loadComments();
   }
 
   @override
   void dispose() {
-    _scrollController.removeListener(_onScroll);
-    _scrollController.dispose();
     if (widget.apiService == null) _apiService.dispose();
     super.dispose();
   }
 
-  void _onScroll() {
-    if (_scrollController.hasClients &&
-        _scrollController.position.extentAfter <= 200 &&
+  void _checkLoadMore(ScrollMetrics metrics) {
+    if (metrics.extentAfter <= 200 &&
         !_isLoading &&
         !_isLoadingMore &&
         _loadMoreError == null &&
@@ -142,11 +139,13 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
 
   void _fillChapterCommentViewport() {
     if (!widget.isChapterComment) return;
-    // A cached preview or a short upstream page may not be tall enough to
-    // scroll. Layout itself does not deliver the scroll event used above.
+    // 缓存预览或较短的首屏分页可能不足以触发滚动，布局完成后主动补拉下一页
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      _onScroll();
+      final ctrl = _activeScrollController;
+      if (ctrl != null && ctrl.hasClients) {
+        _checkLoadMore(ctrl.position);
+      }
     });
   }
 
@@ -506,8 +505,6 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final mediaQuery = MediaQuery.of(context);
-    final sheetHeight = mediaQuery.size.height * 0.78;
     final isDark = widget.backgroundColor.computeLuminance() < 0.2;
     final cardColor = isDark
         ? widget.backgroundColor.withValues(alpha: 0.9)
@@ -516,23 +513,29 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
             widget.backgroundColor,
           );
 
-    return Container(
-      height: sheetHeight,
-      decoration: BoxDecoration(
-        color: widget.backgroundColor,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.2),
-            blurRadius: 20,
-            offset: const Offset(0, -4),
+    return DraggableScrollableSheet(
+      initialChildSize: 0.65,
+      minChildSize: 0.38,
+      maxChildSize: 0.94,
+      expand: false,
+      builder: (context, sheetScrollController) {
+        _activeScrollController = sheetScrollController;
+        return Container(
+          decoration: BoxDecoration(
+            color: widget.backgroundColor,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.2),
+                blurRadius: 20,
+                offset: const Offset(0, -4),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: SafeArea(
-        top: false,
-        child: Column(
-          children: [
+          child: SafeArea(
+            top: false,
+            child: Column(
+              children: [
             // 顶部拖拽手柄
             const SizedBox(height: 10),
             Center(
@@ -705,11 +708,28 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
                 ),
               ),
 
-            // 评论列表主体
-            Expanded(child: _buildListContent(cardColor, isDark)),
+            // 评论列表主体（联动分段拖拽抽屉并触底自动续拉）
+            Expanded(
+              child: NotificationListener<ScrollNotification>(
+                onNotification: (notification) {
+                  if (notification is ScrollUpdateNotification ||
+                      notification is ScrollEndNotification) {
+                    _checkLoadMore(notification.metrics);
+                  }
+                  return false;
+                },
+                child: _buildListContent(
+                  cardColor,
+                  isDark,
+                  sheetScrollController,
+                ),
+              ),
+            ),
           ],
         ),
       ),
+    );
+      },
     );
   }
 
@@ -746,82 +766,110 @@ class _ParagraphCommentSheetState extends State<ParagraphCommentSheet> {
     );
   }
 
-  Widget _buildListContent(Color cardColor, bool isDark) {
+  Widget _buildListContent(
+    Color cardColor,
+    bool isDark,
+    ScrollController scrollController,
+  ) {
     if (_isLoading) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            CircularProgressIndicator(
-              color: Theme.of(context).primaryColor,
-              strokeWidth: 2.5,
+      return ListView(
+        controller: scrollController,
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          const SizedBox(height: 80),
+          Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(
+                  color: Theme.of(context).primaryColor,
+                  strokeWidth: 2.5,
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  widget.isChapterComment ? '正在加载本章评论...' : '正在加载段评...',
+                  style: TextStyle(fontSize: 13, color: widget.secondaryColor),
+                ),
+              ],
             ),
-            const SizedBox(height: 12),
-            Text(
-              widget.isChapterComment ? '正在加载本章评论...' : '正在加载段评...',
-              style: TextStyle(fontSize: 13, color: widget.secondaryColor),
-            ),
-          ],
-        ),
+          ),
+        ],
       );
     }
 
     if (_errorMessage != null && _comments.isEmpty) {
-      return Center(
-        child: Padding(
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                Icons.chat_bubble_outline,
-                size: 48,
-                color: widget.secondaryColor.withValues(alpha: 0.5),
+      return ListView(
+        controller: scrollController,
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          const SizedBox(height: 56),
+          Center(
+            child: Padding(
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.chat_bubble_outline,
+                    size: 48,
+                    color: widget.secondaryColor.withValues(alpha: 0.5),
+                  ),
+                  const SizedBox(height: 12),
+                  Text(
+                    _errorMessage!,
+                    textAlign: TextAlign.center,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: widget.secondaryColor,
+                    ),
+                  ),
+                  const SizedBox(height: 16),
+                  ElevatedButton.icon(
+                    onPressed: _loadComments,
+                    icon: const Icon(Icons.refresh, size: 16),
+                    label: const Text('重试'),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: Theme.of(context).primaryColor,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
+                ],
               ),
-              const SizedBox(height: 12),
-              Text(
-                _errorMessage!,
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 14, color: widget.secondaryColor),
-              ),
-              const SizedBox(height: 16),
-              ElevatedButton.icon(
-                onPressed: _loadComments,
-                icon: const Icon(Icons.refresh, size: 16),
-                label: const Text('重试'),
-                style: ElevatedButton.styleFrom(
-                  backgroundColor: Theme.of(context).primaryColor,
-                  foregroundColor: Colors.white,
-                ),
-              ),
-            ],
+            ),
           ),
-        ),
+        ],
       );
     }
 
     if (_comments.isEmpty && !_hasMore) {
-      return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(
-              Icons.chat_bubble_outline,
-              size: 48,
-              color: widget.secondaryColor.withValues(alpha: 0.4),
+      return ListView(
+        controller: scrollController,
+        physics: const AlwaysScrollableScrollPhysics(),
+        children: [
+          const SizedBox(height: 64),
+          Center(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  Icons.chat_bubble_outline,
+                  size: 48,
+                  color: widget.secondaryColor.withValues(alpha: 0.4),
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  widget.isChapterComment ? '本章暂无评论' : '该段落暂无段评',
+                  style: TextStyle(fontSize: 14, color: widget.secondaryColor),
+                ),
+              ],
             ),
-            const SizedBox(height: 10),
-            Text(
-              widget.isChapterComment ? '本章暂无评论' : '该段落暂无段评',
-              style: TextStyle(fontSize: 14, color: widget.secondaryColor),
-            ),
-          ],
-        ),
+          ),
+        ],
       );
     }
 
     return ListView.separated(
-      controller: _scrollController,
+      controller: scrollController,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       itemCount: _comments.length + (_hasMore ? 1 : 0),
       separatorBuilder: (context, index) => const SizedBox(height: 12),

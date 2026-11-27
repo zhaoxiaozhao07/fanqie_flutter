@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_name">最近在读</string>
+    <string name="shortcut_continue_read_short">继续阅读</string>
+    <string name="shortcut_continue_read_long">继续上次阅读进度</string>
+    <string name="shortcut_continue_listen_short">继续听书</string>
+    <string name="shortcut_continue_listen_long">直接续听最近书籍</string>
+    <string name="shortcut_import_short">导入本地书</string>
+    <string name="shortcut_import_long">导入本地 TXT / EPUB 小说</string>
+    <string name="shortcut_search_short">搜索书城</string>
+    <string name="shortcut_search_long">快速搜索小说或作者</string>
+</resources>

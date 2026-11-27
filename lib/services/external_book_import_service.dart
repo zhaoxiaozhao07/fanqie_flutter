@@ -46,7 +46,9 @@ class ExternalBookImportService extends ChangeNotifier {
   bool get hasActiveRequest => _active != null;
   bool get _enabled =>
       _testing ||
-      (ReaderPlatform.isDesktop && ReaderPlatform.capabilities.fileImport);
+      ((ReaderPlatform.isDesktop ||
+              defaultTargetPlatform == TargetPlatform.android) &&
+          ReaderPlatform.capabilities.fileImport);
 
   Future<void> initialize() async {
     if (_initialized || !_enabled) return;

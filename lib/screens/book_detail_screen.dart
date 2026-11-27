@@ -1,5 +1,6 @@
 import '../widgets/book_page_route.dart';
 import 'dart:async';
+import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import '../widgets/book_cover_widget.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -9,13 +10,13 @@ import '../models/chapter.dart';
 import '../models/comment.dart';
 import '../services/api_service.dart';
 import '../services/bookshelf_service.dart';
-import '../services/reading_history_service.dart';
 import '../services/download_service.dart';
 import '../widgets/download_dialog.dart';
 import '../widgets/loading_widget.dart';
 import '../widgets/paragraph_comment_sheet.dart';
 import 'reader_screen.dart';
 import 'search_results_screen.dart';
+import '../services/reader_platform.dart';
 import '../services/reader_settings_repository.dart';
 
 /// 书籍详情页面
@@ -32,7 +33,6 @@ class BookDetailScreen extends StatefulWidget {
 class _BookDetailScreenState extends State<BookDetailScreen> {
   late final ApiService _apiService = widget.apiService ?? ApiService();
   final BookshelfService _bookshelfService = BookshelfService();
-  final ReadingHistoryService _readingHistoryService = ReadingHistoryService();
   final DownloadService _downloadService = DownloadService();
 
   Book? _bookDetail;
@@ -296,15 +296,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
           _isInBookshelf = inShelf;
         });
       }
-
-      // 只要打开详情页就记录到阅读历史中
-      await _readingHistoryService.recordReading(
-        book: _bookDetail ?? widget.book,
-        chapterIndex: index ?? 0,
-        chapterTitle:
-            title ??
-            (_chapters?.isNotEmpty == true ? _chapters!.first.title : '开始阅读'),
-      );
+      // 仅浏览书籍详情简介时不主动污染“阅读历史”，真正进入阅读器后再记录
     } catch (_) {}
   }
 
@@ -331,7 +323,11 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     }
   }
 
-  Future<void> _openReader(int chapterIndex, {bool resume = false}) async {
+  Future<void> _openReader(
+    int chapterIndex, {
+    bool resume = false,
+    bool autoStartAudio = false,
+  }) async {
     if (!await _ensureDirectory() || !mounted) return;
 
     final targetIndex = chapterIndex.clamp(0, _chapters!.length - 1);
@@ -348,6 +344,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
           initialChapterIndex: targetIndex,
           resumeSavedPosition: resume,
           initialSettings: readerSettings,
+          autoStartAudio: autoStartAudio,
         ),
       ),
     ).then((_) {
@@ -357,16 +354,21 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
     });
   }
 
-  /// 显示完整章节目录弹窗
+  /// 显示完整章节目录弹窗（O(1) 索引、自动滚动定位已读章、支持快速滚动条）
   Future<void> _showAllChaptersModal() async {
     if (!await _ensureDirectory() || !mounted) return;
 
     final searchController = TextEditingController();
     var isReverse = false;
+    var jumpedToCurrent = false;
+    final indexedAll = [
+      for (var i = 0; i < _chapters!.length; i++) (index: i, chapter: _chapters![i]),
+    ];
 
-    showModalBottomSheet(
+    await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
+      useSafeArea: true,
       backgroundColor: AppTheme.surfaceOf(context),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
@@ -375,13 +377,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
         return StatefulBuilder(
           builder: (context, setModalState) {
             final filter = searchController.text.trim();
-            final allChapters = isReverse
-                ? _chapters!.reversed.toList()
-                : _chapters!;
-
+            final ordered = isReverse ? indexedAll.reversed.toList() : indexedAll;
             final displayChapters = filter.isEmpty
-                ? allChapters
-                : allChapters.where((c) => c.title.contains(filter)).toList();
+                ? ordered
+                : ordered.where((e) => e.chapter.title.contains(filter)).toList();
 
             return DraggableScrollableSheet(
               initialChildSize: 0.85,
@@ -389,10 +388,29 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
               maxChildSize: 0.95,
               expand: false,
               builder: (_, scrollController) {
+                if (!jumpedToCurrent &&
+                    _lastReadIndex != null &&
+                    _lastReadIndex! > 0 &&
+                    filter.isEmpty) {
+                  jumpedToCurrent = true;
+                  final targetRow = isReverse
+                      ? (_chapters!.length - 1 - _lastReadIndex!)
+                      : _lastReadIndex!;
+                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                    if (scrollController.hasClients) {
+                      final offset = (targetRow * 48.0 - 120.0).clamp(
+                        0.0,
+                        scrollController.position.maxScrollExtent,
+                      );
+                      scrollController.jumpTo(offset);
+                    }
+                  });
+                }
+
                 return Column(
                   children: [
                     Padding(
-                      padding: const EdgeInsets.fromLTRB(16, 16, 16, 8),
+                      padding: const EdgeInsets.fromLTRB(16, 14, 8, 6),
                       child: Row(
                         children: [
                           Expanded(
@@ -405,6 +423,29 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                               ),
                             ),
                           ),
+                          if (_lastReadIndex != null && filter.isEmpty)
+                            TextButton.icon(
+                              style: TextButton.styleFrom(
+                                visualDensity: VisualDensity.compact,
+                              ),
+                              onPressed: () {
+                                if (!scrollController.hasClients) return;
+                                final row = isReverse
+                                    ? (_chapters!.length - 1 - _lastReadIndex!)
+                                    : _lastReadIndex!;
+                                final offset = (row * 48.0 - 120.0).clamp(
+                                  0.0,
+                                  scrollController.position.maxScrollExtent,
+                                );
+                                scrollController.animateTo(
+                                  offset,
+                                  duration: const Duration(milliseconds: 220),
+                                  curve: Curves.easeOut,
+                                );
+                              },
+                              icon: const Icon(Icons.my_location, size: 15),
+                              label: const Text('定位当前', style: TextStyle(fontSize: 12)),
+                            ),
                           IconButton(
                             icon: Icon(
                               isReverse
@@ -455,58 +496,65 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                     ),
                     const Divider(height: 1),
                     Expanded(
-                      child: ListView.builder(
+                      child: Scrollbar(
                         controller: scrollController,
-                        itemCount: displayChapters.length,
-                        itemBuilder: (context, idx) {
-                          final chapter = displayChapters[idx];
-                          final originalIndex = _chapters!.indexOf(chapter);
-                          final isCurrent = originalIndex == _lastReadIndex;
+                        interactive: true,
+                        thumbVisibility: true,
+                        child: ListView.builder(
+                          controller: scrollController,
+                          itemExtent: 48,
+                          itemCount: displayChapters.length,
+                          itemBuilder: (context, idx) {
+                            final item = displayChapters[idx];
+                            final chapter = item.chapter;
+                            final originalIndex = item.index;
+                            final isCurrent = originalIndex == _lastReadIndex;
 
-                          return ListTile(
-                            dense: true,
-                            title: Text(
-                              chapter.title,
-                              style: TextStyle(
-                                fontSize: 14,
-                                color: isCurrent
-                                    ? AppTheme.primaryColor
-                                    : AppTheme.textPrimaryOf(context),
-                                fontWeight: isCurrent
-                                    ? FontWeight.bold
-                                    : FontWeight.normal,
+                            return ListTile(
+                              dense: true,
+                              title: Text(
+                                chapter.title,
+                                style: TextStyle(
+                                  fontSize: 14,
+                                  color: isCurrent
+                                      ? AppTheme.primaryColor
+                                      : AppTheme.textPrimaryOf(context),
+                                  fontWeight: isCurrent
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
                               ),
-                              maxLines: 1,
-                              overflow: TextOverflow.ellipsis,
-                            ),
-                            trailing: isCurrent
-                                ? Container(
-                                    padding: const EdgeInsets.symmetric(
-                                      horizontal: 8,
-                                      vertical: 2,
-                                    ),
-                                    decoration: BoxDecoration(
-                                      color: AppTheme.primaryColor.withValues(
-                                        alpha: 0.1,
+                              trailing: isCurrent
+                                  ? Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 2,
                                       ),
-                                      borderRadius: BorderRadius.circular(4),
-                                    ),
-                                    child: const Text(
-                                      '已读到',
-                                      style: TextStyle(
-                                        fontSize: 11,
-                                        color: AppTheme.primaryColor,
-                                        fontWeight: FontWeight.bold,
+                                      decoration: BoxDecoration(
+                                        color: AppTheme.primaryColor.withValues(
+                                          alpha: 0.1,
+                                        ),
+                                        borderRadius: BorderRadius.circular(4),
                                       ),
-                                    ),
-                                  )
-                                : null,
-                            onTap: () {
-                              Navigator.pop(ctx);
-                              _openReader(originalIndex);
-                            },
-                          );
-                        },
+                                      child: const Text(
+                                        '已读到',
+                                        style: TextStyle(
+                                          fontSize: 11,
+                                          color: AppTheme.primaryColor,
+                                          fontWeight: FontWeight.bold,
+                                        ),
+                                      ),
+                                    )
+                                  : null,
+                              onTap: () {
+                                Navigator.pop(ctx);
+                                _openReader(originalIndex);
+                              },
+                            );
+                          },
+                        ),
                       ),
                     ),
                   ],
@@ -517,6 +565,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
         );
       },
     );
+    searchController.dispose();
   }
 
   /// 启动后台下载
@@ -727,7 +776,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       ? Colors.green.shade700
                       : AppTheme.primaryColor,
                   padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
+                    horizontal: 14,
                     vertical: 12,
                   ),
                   side: BorderSide(
@@ -740,7 +789,33 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                   ),
                 ),
               ),
-              const SizedBox(width: 12),
+              if (ReaderPlatform.capabilities.tts) ...[
+                const SizedBox(width: 8),
+                OutlinedButton.icon(
+                  key: const ValueKey('book-detail-listen-btn'),
+                  onPressed: () => _openReader(
+                    _lastReadIndex ?? 0,
+                    resume: true,
+                    autoStartAudio: true,
+                  ),
+                  icon: const Icon(Icons.headphones_rounded, size: 19),
+                  label: const Text('听书'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppTheme.primaryColor,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 12,
+                    ),
+                    side: BorderSide(
+                      color: AppTheme.primaryColor.withValues(alpha: 0.7),
+                    ),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(24),
+                    ),
+                  ),
+                ),
+              ],
+              const SizedBox(width: 10),
               // 阅读按钮
               Expanded(
                 child: ElevatedButton.icon(
@@ -838,7 +913,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                   ),
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: AppTheme.primaryLight,
+                    color: AppTheme.primarySoftOf(context),
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
                       color: AppTheme.primaryColor.withValues(alpha: 0.3),
@@ -858,15 +933,18 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                             ),
                           ),
                           const SizedBox(width: 8),
-                          Text(
-                            '后台下载中 (${activeTask.format})：${activeTask.current} / ${activeTask.total} (${(activeTask.progress * 100).toInt()}%)',
-                            style: const TextStyle(
-                              fontWeight: FontWeight.bold,
-                              fontSize: 13,
-                              color: AppTheme.primaryColor,
+                          Expanded(
+                            child: Text(
+                              '后台下载中 (${activeTask.format})：${activeTask.current} / ${activeTask.total} (${(activeTask.progress * 100).toInt()}%)',
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                                color: AppTheme.primaryAccentTextOf(context),
+                              ),
                             ),
                           ),
-                          const Spacer(),
                           TextButton(
                             onPressed: () =>
                                 _downloadService.cancelDownload(book.bookId),
@@ -888,7 +966,7 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                           value: activeTask.progress > 0
                               ? activeTask.progress
                               : null,
-                          backgroundColor: Colors.white,
+                          backgroundColor: AppTheme.inputFillOf(context),
                           color: AppTheme.primaryColor,
                           minHeight: 4,
                         ),
@@ -896,9 +974,9 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                       const SizedBox(height: 4),
                       Text(
                         activeTask.message,
-                        style: const TextStyle(
+                        style: TextStyle(
                           fontSize: 11,
-                          color: AppTheme.textSecondary,
+                          color: AppTheme.textSecondaryOf(context),
                         ),
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
@@ -1127,8 +1205,10 @@ class _BookDetailScreenState extends State<BookDetailScreen> {
                         radius: 11,
                         backgroundColor: AppTheme.inputFillOf(context),
                         backgroundImage: r.avatar.isNotEmpty
-                            ? NetworkImage(r.avatar)
+                            ? CachedNetworkImageProvider(r.avatar)
                             : null,
+                        onBackgroundImageError:
+                            r.avatar.isNotEmpty ? (_, _) {} : null,
                         child: r.avatar.isEmpty
                             ? Text(
                                 r.userName.isNotEmpty ? r.userName[0] : '友',

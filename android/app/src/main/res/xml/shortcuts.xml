@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="continue_reading"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_continue_read_short"
+        android:shortcutLongLabel="@string/shortcut_continue_read_long">
+        <intent
+            android:action="com.fanqie.fanqie_flutter.action.SHORTCUT"
+            android:targetPackage="com.fanqie.fanqie_flutter"
+            android:targetClass="com.fanqie.fanqie_flutter.MainActivity">
+            <extra android:name="shortcut_action" android:value="continue_reading" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="continue_listening"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_continue_listen_short"
+        android:shortcutLongLabel="@string/shortcut_continue_listen_long">
+        <intent
+            android:action="com.fanqie.fanqie_flutter.action.SHORTCUT"
+            android:targetPackage="com.fanqie.fanqie_flutter"
+            android:targetClass="com.fanqie.fanqie_flutter.MainActivity">
+            <extra android:name="shortcut_action" android:value="continue_listening" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="import_local"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_import_short"
+        android:shortcutLongLabel="@string/shortcut_import_long">
+        <intent
+            android:action="com.fanqie.fanqie_flutter.action.SHORTCUT"
+            android:targetPackage="com.fanqie.fanqie_flutter"
+            android:targetClass="com.fanqie.fanqie_flutter.MainActivity">
+            <extra android:name="shortcut_action" android:value="import_local" />
+        </intent>
+    </shortcut>
+    <shortcut
+        android:shortcutId="search_books"
+        android:enabled="true"
+        android:icon="@mipmap/ic_launcher"
+        android:shortcutShortLabel="@string/shortcut_search_short"
+        android:shortcutLongLabel="@string/shortcut_search_long">
+        <intent
+            android:action="com.fanqie.fanqie_flutter.action.SHORTCUT"
+            android:targetPackage="com.fanqie.fanqie_flutter"
+            android:targetClass="com.fanqie.fanqie_flutter.MainActivity">
+            <extra android:name="shortcut_action" android:value="search_books" />
+        </intent>
+    </shortcut>
+</shortcuts>

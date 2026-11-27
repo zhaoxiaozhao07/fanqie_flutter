@@ -299,14 +299,20 @@ class _ImmersiveCharactersSheetState extends State<ImmersiveCharactersSheet>
             if (charAliases.isNotEmpty)
               Text(
                 '别名：${charAliases.join('、')}',
-                style: const TextStyle(fontSize: 11, color: Colors.black54),
+                style: TextStyle(
+                  fontSize: 11,
+                  color: AppTheme.textSecondaryOf(context),
+                ),
               ),
             if (firstUnit != null)
               Text(
                 '首次出现：${firstUnit.text}',
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: const TextStyle(fontSize: 11, color: Colors.black54),
+                style: TextStyle(
+                  fontSize: 11,
+                  color: AppTheme.textSecondaryOf(context),
+                ),
               ),
             const SizedBox(height: 8),
             Row(

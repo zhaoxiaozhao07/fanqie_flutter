@@ -1,11 +1,93 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+import 'app_theme_service.dart';
 import 'reader_platform.dart';
 import 'reader_scroll_input.dart';
 
-/// 阅读器系统级辅助服务（屏幕常亮、电量获取）
+/// 蓝牙耳机 / 车载媒体控制「上一曲 / 下一曲」按键行为映射
+enum MediaButtonBehavior {
+  /// 切换上一段 / 下一段（默认）
+  segment,
+
+  /// 当前音频快退 / 快进 15 秒
+  seek15s,
+
+  /// 切换上一章 / 下一章
+  chapter,
+}
+
+extension MediaButtonBehaviorX on MediaButtonBehavior {
+  String get storageValue {
+    switch (this) {
+      case MediaButtonBehavior.segment:
+        return 'segment';
+      case MediaButtonBehavior.seek15s:
+        return 'seek15s';
+      case MediaButtonBehavior.chapter:
+        return 'chapter';
+    }
+  }
+
+  String get label {
+    switch (this) {
+      case MediaButtonBehavior.segment:
+        return '切换上/下一句';
+      case MediaButtonBehavior.seek15s:
+        return '快进/快退 15 秒';
+      case MediaButtonBehavior.chapter:
+        return '切换上/下一章';
+    }
+  }
+
+  static MediaButtonBehavior parse(String? raw) {
+    switch (raw) {
+      case 'seek15s':
+        return MediaButtonBehavior.seek15s;
+      case 'chapter':
+        return MediaButtonBehavior.chapter;
+      default:
+        return MediaButtonBehavior.segment;
+    }
+  }
+}
+
+/// 阅读器系统级辅助服务（屏幕常亮、电量、媒体键定制、保活引导、图片分享与桌面小组件）
 class ReaderSystemService {
   static const MethodChannel _channel = ReaderPlatform.channel;
+  static const String _mediaButtonPrefKey = 'android_media_button_behavior_v1';
+
+  static final ValueNotifier<MediaButtonBehavior> mediaButtonBehaviorNotifier =
+      ValueNotifier<MediaButtonBehavior>(MediaButtonBehavior.segment);
+  static bool _mediaButtonLoaded = false;
+
+  static MediaButtonBehavior get mediaButtonBehavior =>
+      mediaButtonBehaviorNotifier.value;
+
+  static Future<MediaButtonBehavior> loadMediaButtonBehavior() async {
+    if (_mediaButtonLoaded) return mediaButtonBehaviorNotifier.value;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final parsed = MediaButtonBehaviorX.parse(
+        prefs.getString(_mediaButtonPrefKey),
+      );
+      mediaButtonBehaviorNotifier.value = parsed;
+      _mediaButtonLoaded = true;
+    } catch (_) {}
+    return mediaButtonBehaviorNotifier.value;
+  }
+
+  static Future<void> setMediaButtonBehavior(
+    MediaButtonBehavior behavior,
+  ) async {
+    mediaButtonBehaviorNotifier.value = behavior;
+    _mediaButtonLoaded = true;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_mediaButtonPrefKey, behavior.storageValue);
+    } catch (_) {}
+  }
 
   static void Function(String direction)? _volumeKeyCallback;
   static Object? _volumeOwner;
@@ -22,6 +104,8 @@ class ReaderSystemService {
   static bool Function(String)? _desktopCommandHandler;
   static Object? _externalImportOwner;
   static Future<void> Function()? _externalImportsAvailable;
+  static Object? _shortcutOwner;
+  static void Function(String action, String? bookId)? _shortcutHandler;
   static final Map<Object, Future<void> Function()> _saveParticipants = {};
 
   static void registerQuitHandler(Future<bool> Function() handler) {
@@ -47,6 +131,42 @@ class ReaderSystemService {
     _externalImportOwner = handler == null ? null : owner;
     _externalImportsAvailable = handler;
     _ensureGlobalHandler();
+  }
+
+  /// 注册 Android 桌面小组件与图标长按快捷方式回调
+  static void registerShortcutListener(
+    Object owner,
+    void Function(String action, String? bookId)? handler,
+  ) {
+    if (handler == null && !identical(owner, _shortcutOwner)) return;
+    _shortcutOwner = handler == null ? null : owner;
+    _shortcutHandler = handler;
+    _ensureGlobalHandler();
+  }
+
+  /// 提取冷启动阶段挂起的快捷方式或小组件指令
+  static Future<List<({String action, String? bookId})>>
+  takePendingShortcuts() async {
+    if (!ReaderPlatform.isAndroid) return const [];
+    try {
+      final raw = await _channel.invokeMethod<List<dynamic>>(
+        'takePendingShortcuts',
+      );
+      if (raw == null || raw.isEmpty) return const [];
+      final list = <({String action, String? bookId})>[];
+      for (final item in raw) {
+        if (item is Map) {
+          final act = item['action']?.toString() ?? '';
+          if (act.isNotEmpty) {
+            final bid = item['bookId']?.toString();
+            list.add((action: act, bookId: bid?.isEmpty == true ? null : bid));
+          }
+        }
+      }
+      return list;
+    } catch (_) {
+      return const [];
+    }
   }
 
   static void registerSaveParticipant(
@@ -81,8 +201,18 @@ class ReaderSystemService {
   static Future<void> restoreWindowBrightness(Object owner) async {
     if (!identical(_brightnessOwner, owner)) return;
     _brightnessOwner = null;
-    // Non-reader routes currently use the application's light theme.
-    SystemChrome.setSystemUIOverlayStyle(SystemUiOverlayStyle.dark);
+    // 退出阅读页后根据当前外围亮暗主题恢复系统状态栏文字与图标色
+    final platformBrightness =
+        WidgetsBinding.instance.platformDispatcher.platformBrightness;
+    final resolvedMode = AppThemeService().resolveThemeMode(
+      platformBrightness: platformBrightness,
+    );
+    final isDark = resolvedMode == ThemeMode.dark ||
+        (resolvedMode == ThemeMode.system &&
+            platformBrightness == Brightness.dark);
+    SystemChrome.setSystemUIOverlayStyle(
+      isDark ? SystemUiOverlayStyle.light : SystemUiOverlayStyle.dark,
+    );
     if (!ReaderPlatform.capabilities.windowBrightness) return;
     try {
       await _channel.invokeMethod('restoreReaderBrightness');
@@ -113,6 +243,19 @@ class ReaderSystemService {
             false;
       } else if (call.method == 'onExternalImportsAvailable') {
         await _externalImportsAvailable?.call();
+        return true;
+      } else if (call.method == 'onShortcutAction') {
+        if (call.arguments is Map) {
+          final map = Map<String, dynamic>.from(call.arguments as Map);
+          final action = map['action']?.toString() ?? '';
+          final bookId = map['bookId']?.toString();
+          if (action.isNotEmpty) {
+            _shortcutHandler?.call(
+              action,
+              bookId?.isEmpty == true ? null : bookId,
+            );
+          }
+        }
         return true;
       } else if (call.method == 'onWindowHidden') {
         try {
@@ -234,12 +377,15 @@ class ReaderSystemService {
     }
   }
 
-  /// 更新系统锁屏媒体中心播控信息与状态通知
+  /// 更新系统锁屏媒体中心播控信息、封面大图与进度
   static Future<void> updateMediaPlaybackState({
     required String title,
     required String subtitle,
     required bool isPlaying,
     bool isActive = true,
+    String? coverPath,
+    int? durationMs,
+    int? positionMs,
   }) async {
     if (!ReaderPlatform.capabilities.mediaPlayback) return;
     try {
@@ -248,6 +394,87 @@ class ReaderSystemService {
         'subtitle': subtitle,
         'isPlaying': isPlaying,
         'isActive': isActive,
+        if (coverPath != null) 'coverPath': coverPath,
+        if (durationMs != null) 'durationMs': durationMs,
+        if (positionMs != null) 'positionMs': positionMs,
+      });
+    } catch (_) {}
+  }
+
+  /// 控制当前播放中的原生音频按毫秒绝对跳转或相对快进/快退
+  static Future<bool> seekAudio({int? positionMs, int? deltaMs}) async {
+    if (!ReaderPlatform.capabilities.mediaPlayback) return false;
+    try {
+      final res = await _channel.invokeMethod('seekAudio', {
+        if (positionMs != null) 'positionMs': positionMs,
+        if (deltaMs != null) 'deltaMs': deltaMs,
+      });
+      if (res is Map) return res['ok'] == true;
+      return res == true;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 查询当前应用是否已加入 Android 电池优化白名单（后台防杀）
+  static Future<bool> isIgnoringBatteryOptimizations() async {
+    if (!ReaderPlatform.isAndroid) return true;
+    try {
+      final res = await _channel.invokeMethod<bool>(
+        'isIgnoringBatteryOptimizations',
+      );
+      return res ?? true;
+    } catch (_) {
+      return true;
+    }
+  }
+
+  /// 跳转系统电池优化设置页，引导用户放行后台听书保活
+  static Future<bool> openBatteryOptimizationSettings() async {
+    if (!ReaderPlatform.isAndroid) return false;
+    try {
+      final res = await _channel.invokeMethod<bool>(
+        'openBatteryOptimizationSettings',
+      );
+      return res ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 调用 Android 原生系统分享面板分享本地图片文件（如金句海报卡片）
+  static Future<bool> shareImageFile({
+    required String filePath,
+    String? text,
+    String title = '分享金句卡片',
+  }) async {
+    if (!ReaderPlatform.isAndroid) return false;
+    try {
+      final res = await _channel.invokeMethod<bool>('shareImageFile', {
+        'filePath': filePath,
+        if (text != null) 'text': text,
+        'title': title,
+      });
+      return res ?? false;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// 将最近在读信息同步刷新至 Android 桌面小组件
+  static Future<void> updateHomeWidget({
+    required String bookId,
+    required String bookName,
+    required String chapterTitle,
+    String progressText = '',
+  }) async {
+    if (!ReaderPlatform.isAndroid) return;
+    try {
+      await _channel.invokeMethod('updateHomeWidget', {
+        'bookId': bookId,
+        'bookName': bookName,
+        'chapterTitle': chapterTitle,
+        'progressText': progressText,
       });
     } catch (_) {}
   }

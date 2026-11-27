@@ -6,6 +6,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:http/http.dart' as http;
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/book.dart';
@@ -13,6 +14,7 @@ import '../models/chapter.dart';
 import '../models/reading_position.dart';
 import 'api_service.dart';
 import 'bookshelf_service.dart';
+import 'cover_cache_service.dart';
 import 'reader_position_service.dart';
 import 'reader_system_service.dart';
 import 'reader_platform.dart';
@@ -257,10 +259,10 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
           unawaited(pause());
           break;
         case 'onMediaNext':
-          unawaited(nextChunk());
+          unawaited(_handleMediaSkip(forward: true));
           break;
         case 'onMediaPrev':
-          unawaited(previousChunk());
+          unawaited(_handleMediaSkip(forward: false));
           break;
         case 'onMediaStop':
           unawaited(stop());
@@ -291,11 +293,26 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<List<Map<String, dynamic>>> nativeVoices() async {
-    if (!ReaderPlatform.isDesktop || !nativeSpeechAvailable) return [];
+    if (!nativeSpeechAvailable) return [];
     final raw = await _safe('getNativeTtsVoices');
     return raw is List
         ? raw.whereType<Map>().map((e) => Map<String, dynamic>.from(e)).toList()
         : [];
+  }
+
+  /// 在 Android 13+ 启动听书前尝试申请通知权限，避免媒体播控通知被系统静默拦截
+  static bool _notificationPermissionRequested = false;
+  static Future<void> ensureAndroidNotificationPermission() async {
+    if (!Platform.isAndroid || _notificationPermissionRequested) return;
+    _notificationPermissionRequested = true;
+    try {
+      final status = await Permission.notification.status;
+      if (status.isDenied) {
+        await Permission.notification.request();
+      }
+    } catch (_) {
+      // 权限查询异常不阻塞听书播放
+    }
   }
 
   Future<void> loadSettings() async {
@@ -529,8 +546,11 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
       return;
     }
     final intent = ++_startIntent;
-    if (!_testInvoker && ImmersivePlaybackCoordinator().isActive) {
-      await ImmersivePlaybackCoordinator().stop();
+    if (!_testInvoker) {
+      unawaited(ensureAndroidNotificationPermission());
+      if (ImmersivePlaybackCoordinator().isActive) {
+        await ImmersivePlaybackCoordinator().stop();
+      }
     }
     await _ensureReady();
     if (intent != _startIntent) return;
@@ -602,8 +622,11 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     int startChunk = 0,
   }) async {
     final intent = ++_startIntent;
-    if (!_testInvoker && ImmersivePlaybackCoordinator().isActive) {
-      await ImmersivePlaybackCoordinator().stop();
+    if (!_testInvoker) {
+      unawaited(ensureAndroidNotificationPermission());
+      if (ImmersivePlaybackCoordinator().isActive) {
+        await ImmersivePlaybackCoordinator().stop();
+      }
     }
     await _ensureReady();
     if (intent != _startIntent) return;
@@ -700,7 +723,7 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
             'text': spokenChunkText,
             'filePath': audio,
             'rate': audio == null ? _speechRate : 1.0,
-            if (ReaderPlatform.isDesktop) 'voice': _nativeVoice,
+            if (_nativeVoice.isNotEmpty) 'voice': _nativeVoice,
           }).timeout(const Duration(seconds: 30));
       if (!_current(session, token)) return;
       if (accepted != true) {
@@ -819,6 +842,19 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   void handlePlatformEvent(String method, dynamic args) {
     if (_closed) return;
     final id = args is Map ? args['id']?.toString() : args?.toString();
+    if (method == 'onAudioTransientPause') {
+      if (id != null && id != _playToken) return;
+      // 来电或语音消息短暂打断时暂停看门狗，避免误判播放超时
+      _watchdog?.cancel();
+      return;
+    }
+    if (method == 'onAudioTransientResume') {
+      if (id != null && id != _playToken) return;
+      if (isPlaying && _currentIndex < _chunks.length && _playToken != null) {
+        _armWatchdog(_chunks[_currentIndex], _playToken!);
+      }
+      return;
+    }
     if (method == 'onAudioFocusLost' || method == 'onAudioBecomingNoisy') {
       if (id != null && id != _playToken) {
         return;
@@ -947,6 +983,48 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
     await _playCurrentChunk();
   }
 
+  Future<void> nextChapter() async {
+    if (_book == null || _chapterIndex + 1 >= _chapters.length) return;
+    await _openBookChapter(_chapterIndex + 1);
+  }
+
+  Future<void> previousChapter() async {
+    if (_book == null || _chapterIndex <= 0) return;
+    await _openBookChapter(_chapterIndex - 1);
+  }
+
+  Future<void> _handleMediaSkip({required bool forward}) async {
+    await ReaderSystemService.loadMediaButtonBehavior();
+    switch (ReaderSystemService.mediaButtonBehavior) {
+      case MediaButtonBehavior.segment:
+        if (forward) {
+          await nextChunk();
+        } else {
+          await previousChunk();
+        }
+        break;
+      case MediaButtonBehavior.seek15s:
+        final ok = await ReaderSystemService.seekAudio(
+          deltaMs: forward ? 15000 : -15000,
+        );
+        if (!ok) {
+          if (forward) {
+            await nextChunk();
+          } else {
+            await previousChunk();
+          }
+        }
+        break;
+      case MediaButtonBehavior.chapter:
+        if (forward) {
+          await nextChapter();
+        } else {
+          await previousChapter();
+        }
+        break;
+    }
+  }
+
   Future<void> _stopPlayers() async {
     await _safe('stopPlayback');
   }
@@ -1053,12 +1131,37 @@ class TtsService extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   void _syncMediaState() {
+    final bookId = _book?.bookId;
+    final cachedCoverPath = bookId == null
+        ? null
+        : CoverCacheService().peekCover(bookId)?.path;
+    if (bookId != null && cachedCoverPath == null) {
+      unawaited(
+        CoverCacheService().hasLocalCover(bookId).then((has) {
+          if (has && !_closed && isActive && _book?.bookId == bookId) {
+            final path = CoverCacheService().peekCover(bookId)?.path;
+            if (path != null) {
+              unawaited(
+                _safe('updateMediaPlaybackState', {
+                  'title': currentBookTitle,
+                  'subtitle': _currentChapterTitle,
+                  'isPlaying': isPlaying,
+                  'isActive': isActive,
+                  'coverPath': path,
+                }),
+              );
+            }
+          }
+        }),
+      );
+    }
     unawaited(
       _safe('updateMediaPlaybackState', {
         'title': currentBookTitle,
         'subtitle': _currentChapterTitle,
         'isPlaying': isPlaying,
         'isActive': isActive,
+        if (cachedCoverPath != null) 'coverPath': cachedCoverPath,
       }),
     );
   }

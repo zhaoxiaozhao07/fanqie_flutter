@@ -3,6 +3,7 @@ import 'package:fanqie_flutter/models/chapter.dart';
 import 'package:fanqie_flutter/services/bookmark_service.dart';
 import 'package:fanqie_flutter/services/note_anchor_resolver.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -85,21 +86,28 @@ void main() {
       (widget) =>
           widget is RichText && widget.text.toPlainText().contains(text),
     );
-    await tester.longPress(paragraph);
-    await fixture.settleReader(tester);
-    final state = tester.state<EditableTextState>(find.byType(EditableText));
-    final value = state.widget.controller.value;
-    final prefix = value.text.indexOf(text);
-    state.userUpdateTextEditingValue(
-      value.copyWith(
-        selection: TextSelection(
-          baseOffset: prefix + 3,
-          extentOffset: prefix + 5,
-        ),
-      ),
-      SelectionChangedCause.longPress,
-    );
-    state.showToolbar();
+    final render = tester.renderObject<RenderParagraph>(paragraph);
+    final plain = render.text.toPlainText();
+    final prefix = plain.indexOf(text);
+    final firstCharBox = render
+        .getBoxesForSelection(
+          TextSelection(baseOffset: prefix + 3, extentOffset: prefix + 4),
+        )
+        .first
+        .toRect()
+        .shift(render.localToGlobal(Offset.zero));
+    final secondCharBox = render
+        .getBoxesForSelection(
+          TextSelection(baseOffset: prefix + 4, extentOffset: prefix + 5),
+        )
+        .first
+        .toRect()
+        .shift(render.localToGlobal(Offset.zero));
+    final gesture = await tester.startGesture(firstCharBox.center);
+    await tester.pump(const Duration(milliseconds: 600));
+    await gesture.moveTo(secondCharBox.center);
+    await tester.pump(const Duration(milliseconds: 100));
+    await gesture.up();
     await fixture.settleReader(tester);
     await tester.tap(find.text('笔记'));
     await fixture.settleReader(tester);

@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_cache_manager/flutter_cache_manager.dart';
 import 'app_theme.dart';
 import 'screens/main_screen.dart';
@@ -89,17 +90,30 @@ Future<void> main() async {
     );
     return;
   }
+  // 移动端启用全面屏 Edge-to-Edge 透明系统栏适配
+  if (!ReaderPlatform.isDesktop) {
+    SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+    SystemChrome.setSystemUIOverlayStyle(
+      const SystemUiOverlayStyle(
+        statusBarColor: Colors.transparent,
+        systemNavigationBarColor: Colors.transparent,
+      ),
+    );
+  }
   // 配置全局图片缓存
   _configureImageCache();
   runApp(const FanqieApp());
 }
 
-/// 配置图片缓存策略
+/// 配置图片缓存策略（按桌面端与移动端差异化收敛内存占用，避免中低端机 OOM）
 void _configureImageCache() {
-  // 增大内存缓存容量（默认约 100MB）
-  PaintingBinding.instance.imageCache.maximumSize = 500; // 最多缓存 500 张图片
-  PaintingBinding.instance.imageCache.maximumSizeBytes =
-      200 * 1024 * 1024; // 200MB 内存
+  if (ReaderPlatform.isDesktop) {
+    PaintingBinding.instance.imageCache.maximumSize = 500;
+    PaintingBinding.instance.imageCache.maximumSizeBytes = 200 * 1024 * 1024;
+  } else {
+    PaintingBinding.instance.imageCache.maximumSize = 200;
+    PaintingBinding.instance.imageCache.maximumSizeBytes = 80 * 1024 * 1024;
+  }
 }
 
 /// 自定义缓存管理器 - 30 天磁盘缓存

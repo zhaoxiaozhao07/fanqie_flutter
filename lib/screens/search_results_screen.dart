@@ -88,8 +88,8 @@ class _SearchResultsScreenState extends State<SearchResultsScreen> {
     _loadBooks();
   }
 
-  /// 加载书籍列表
-  Future<void> _loadBooks() async {
+  /// 加载书籍列表（作者模式下若单页过滤后不足一屏，自动连续补拉最多 4 页）
+  Future<void> _loadBooks({int autoPagesLeft = 3}) async {
     if (_isLoading) return;
 
     setState(() {
@@ -104,6 +104,7 @@ class _SearchResultsScreenState extends State<SearchResultsScreen> {
       );
 
       if (!mounted) return;
+      var shouldAutoFetchNext = false;
       setState(() {
         final seen = _books.map((b) => b.bookId).toSet();
         var added = books.where((b) => seen.add(b.bookId)).toList();
@@ -126,7 +127,15 @@ class _SearchResultsScreenState extends State<SearchResultsScreen> {
         _hasMore = books.length >= _pageSize && books.isNotEmpty;
         _offset += books.length;
         _isLoading = false;
+        shouldAutoFetchNext =
+            _authorOnly != null &&
+            _hasMore &&
+            _books.length < 6 &&
+            autoPagesLeft > 0;
       });
+      if (shouldAutoFetchNext && mounted) {
+        await _loadBooks(autoPagesLeft: autoPagesLeft - 1);
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() {
@@ -220,9 +229,16 @@ class _SearchResultsScreenState extends State<SearchResultsScreen> {
         itemCount: _books.length + (_hasMore ? 1 : 0),
         itemBuilder: (context, index) {
           if (index == _books.length) {
-            return const Padding(
-              padding: EdgeInsets.all(16),
-              child: Center(child: CircularProgressIndicator()),
+            return Padding(
+              padding: const EdgeInsets.all(16),
+              child: Center(
+                child: _isLoading
+                    ? const CircularProgressIndicator()
+                    : OutlinedButton(
+                        onPressed: _loadMoreBooks,
+                        child: const Text('加载更多结果'),
+                      ),
+              ),
             );
           }
 

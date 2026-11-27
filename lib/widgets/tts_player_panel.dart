@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 import '../app_theme.dart';
+import '../immersive/services/immersive_playback_coordinator.dart';
+import '../services/reader_system_service.dart';
 import '../services/tts_service.dart';
 import '../services/reader_platform.dart';
 import 'reader_modal.dart';
@@ -578,8 +580,9 @@ class TtsPlayerPanel extends StatelessWidget {
                         ),
                         if (!tts.nativeSpeechAvailable)
                           const Text('未检测到可用系统声音；请使用兼容接口或在系统设置中下载声音。'),
-                        if (ReaderPlatform.isDesktop &&
-                            selectedEngine == TtsEngineType.native)
+                        if (selectedEngine == TtsEngineType.native &&
+                            (ReaderPlatform.isDesktop ||
+                                nativeVoices.isNotEmpty))
                           DropdownButton<String>(
                             isExpanded: true,
                             value:
@@ -636,14 +639,131 @@ class TtsPlayerPanel extends StatelessWidget {
                             setModalState(() => speechRate = v);
                           },
                         ),
-                        if (selectedEngine == TtsEngineType.openAi) ...[
-                          const Divider(height: 24),
+                        if (ReaderPlatform.isAndroid) ...[
+                          const SizedBox(height: 8),
                           Text(
-                            'OpenAI 兼容接口配置',
+                            '蓝牙 / 线控「上/下一曲」键行为',
                             style: TextStyle(
                               fontSize: 13,
                               fontWeight: FontWeight.bold,
                             ),
+                          ),
+                          const SizedBox(height: 6),
+                          ValueListenableBuilder<MediaButtonBehavior>(
+                            valueListenable:
+                                ReaderSystemService.mediaButtonBehaviorNotifier,
+                            builder: (ctx, behavior, _) => Wrap(
+                              spacing: 8,
+                              runSpacing: 6,
+                              children: [
+                                for (final option
+                                    in MediaButtonBehavior.values)
+                                  ChoiceChip(
+                                    label: Text(
+                                      option.label,
+                                      style: const TextStyle(fontSize: 12),
+                                    ),
+                                    selected: behavior == option,
+                                    visualDensity: VisualDensity.compact,
+                                    onSelected: (_) => unawaited(
+                                      ReaderSystemService
+                                          .setMediaButtonBehavior(option),
+                                    ),
+                                  ),
+                              ],
+                            ),
+                          ),
+                          const SizedBox(height: 6),
+                        ],
+                        if (selectedEngine == TtsEngineType.openAi) ...[
+                          const Divider(height: 24),
+                          Builder(
+                            builder: (ctx) {
+                              final immersiveCfg =
+                                  ImmersivePlaybackCoordinator().config;
+                              final remoteProviders =
+                                  immersiveCfg?.tts.providers
+                                      .where(
+                                        (p) =>
+                                            p.adapter != 'native_tts' &&
+                                            p.baseUrl.trim().isNotEmpty,
+                                      )
+                                      .toList() ??
+                                  const [];
+                              final fallbackTextModel =
+                                  immersiveCfg?.primaryTextModel;
+                              final canReuse =
+                                  remoteProviders.isNotEmpty ||
+                                  (fallbackTextModel != null &&
+                                      fallbackTextModel.baseUrl
+                                          .trim()
+                                          .isNotEmpty);
+                              return Row(
+                                children: [
+                                  const Expanded(
+                                    child: Text(
+                                      'OpenAI 兼容接口配置',
+                                      style: TextStyle(
+                                        fontSize: 13,
+                                        fontWeight: FontWeight.bold,
+                                      ),
+                                    ),
+                                  ),
+                                  if (canReuse)
+                                    TextButton.icon(
+                                      key: const ValueKey(
+                                        'tts-reuse-immersive-btn',
+                                      ),
+                                      onPressed: () {
+                                        final pickedProvider =
+                                            remoteProviders.isNotEmpty
+                                            ? remoteProviders.first
+                                            : null;
+                                        final reuseUrl =
+                                            pickedProvider?.baseUrl.trim() ??
+                                            fallbackTextModel!.baseUrl.trim();
+                                        final reuseKey =
+                                            (pickedProvider?.apiKey ??
+                                                    fallbackTextModel?.apiKey ??
+                                                    '')
+                                                .trim();
+                                        final reuseModel =
+                                            pickedProvider != null &&
+                                                pickedProvider.models.isNotEmpty
+                                            ? pickedProvider
+                                                  .models
+                                                  .first
+                                                  .modelId
+                                            : null;
+                                        setModalState(() {
+                                          urlCtrl.text = reuseUrl;
+                                          if (reuseKey.isNotEmpty) {
+                                            keyCtrl.text = reuseKey;
+                                          }
+                                          if (reuseModel != null &&
+                                              reuseModel.trim().isNotEmpty) {
+                                            modelCtrl.text = reuseModel.trim();
+                                          }
+                                        });
+                                      },
+                                      icon: const Icon(
+                                        Icons.copy_all_rounded,
+                                        size: 15,
+                                      ),
+                                      label: const Text(
+                                        '复用沉浸式凭据',
+                                        style: TextStyle(fontSize: 12),
+                                      ),
+                                      style: TextButton.styleFrom(
+                                        visualDensity: VisualDensity.compact,
+                                        padding: const EdgeInsets.symmetric(
+                                          horizontal: 6,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              );
+                            },
                           ),
                           const SizedBox(height: 10),
                           TextField(

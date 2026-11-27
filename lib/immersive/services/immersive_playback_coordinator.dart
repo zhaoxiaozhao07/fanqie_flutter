@@ -14,6 +14,7 @@ import '../../models/reading_position.dart';
 import '../../services/api_service.dart';
 import '../../services/app_storage.dart';
 import '../../services/bookshelf_service.dart';
+import '../../services/cover_cache_service.dart';
 import '../../services/reader_library_service.dart';
 import '../../services/reader_platform.dart';
 import '../../services/reader_position_service.dart';
@@ -183,6 +184,13 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
   String? _notice;
   String? _errorMessage;
 
+  // 通勤离线预合成任务状态
+  bool _isPreSynthesizing = false;
+  bool _preSynthCancelled = false;
+  int _preSynthCompletedChapters = 0;
+  int _preSynthTotalChapters = 0;
+  String _preSynthProgressText = '';
+
   // 只读 getter
   bool get isInitialized => _initialized;
   ImmersiveConfig? get config => _configService.currentConfig;
@@ -213,6 +221,10 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
           : null;
   String? get notice => _notice;
   String? get errorMessage => _errorMessage;
+  bool get isPreSynthesizing => _isPreSynthesizing;
+  int get preSynthCompletedChapters => _preSynthCompletedChapters;
+  int get preSynthTotalChapters => _preSynthTotalChapters;
+  String get preSynthProgressText => _preSynthProgressText;
   String? get previewingVoiceProfileId => _previewingVoiceProfileId;
   ImmersiveStateStore? get stateStore => _store;
   AudioCacheManager? get cacheManager => _cacheManager;
@@ -868,6 +880,7 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
     bool offlineOnly = false,
   }) async {
     if (!_isTestInstance) {
+      unawaited(TtsService.ensureAndroidNotificationPermission());
       // 互斥：停掉普通单声听书，确保只有一个音频所有者
       if (TtsService().isActive) {
         await TtsService().stop();
@@ -1111,6 +1124,183 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
         characterOffset: prev.startCharOffset,
       ),
     );
+  }
+
+  /// 切换到下一章开头继续沉浸式播放
+  Future<void> nextChapter() async {
+    if (_book == null || _currentChapterIndex + 1 >= _chapters.length) return;
+    final targetIdx = _currentChapterIndex + 1;
+    await seekToSource(
+      chapterIndex: targetIdx,
+      position: ReadingPosition(chapterId: _chapters[targetIdx].itemId),
+    );
+  }
+
+  /// 切换到上一章开头继续沉浸式播放
+  Future<void> previousChapter() async {
+    if (_book == null || _currentChapterIndex <= 0) return;
+    final targetIdx = _currentChapterIndex - 1;
+    await seekToSource(
+      chapterIndex: targetIdx,
+      position: ReadingPosition(chapterId: _chapters[targetIdx].itemId),
+    );
+  }
+
+  /// 取消正在进行的通勤离线预合成任务
+  void cancelPreSynthesis() {
+    if (!_isPreSynthesizing) return;
+    _preSynthCancelled = true;
+    _preSynthProgressText = '正在停止预合成任务…';
+    _notify();
+  }
+
+  /// 通勤离线预合成：批量对后续 N 章执行角色分析与语音合成并写入本地缓存，地铁/无网可直接秒播
+  Future<void> preSynthesizeUpcomingChapters({
+    required Book book,
+    required List<Chapter> chapters,
+    required int startChapterIndex,
+    required int chapterCount,
+    Future<String?> Function(Chapter)? contentLoader,
+    bool offlineOnly = false,
+  }) async {
+    if (_isPreSynthesizing || chapters.isEmpty) return;
+    final safeStart = startChapterIndex.clamp(0, chapters.length - 1);
+    final safeCount = chapterCount.clamp(1, 15);
+    final endIndex = math.min(chapters.length - 1, safeStart + safeCount - 1);
+    final total = endIndex - safeStart + 1;
+
+    _isPreSynthesizing = true;
+    _preSynthCancelled = false;
+    _preSynthCompletedChapters = 0;
+    _preSynthTotalChapters = total;
+    _preSynthProgressText = '正在初始化书籍编排状态（共 $total 章）…';
+    _notify();
+
+    final wasActive = isActive;
+    try {
+      await prepareBook(
+        book: book,
+        chapters: chapters,
+        anchorChapterIndex: safeStart,
+        contentLoader: contentLoader,
+        offlineOnly: offlineOnly,
+      );
+      final cfg = _configService.currentConfig;
+      final rev = _currentRevision;
+      final store = _store;
+      if (cfg == null || rev == null || store == null) {
+        throw StateError('沉浸式听书配置未就绪');
+      }
+
+      for (var chIdx = safeStart; chIdx <= endIndex; chIdx++) {
+        if (_preSynthCancelled || _closed) break;
+        final chapter = chapters[chIdx];
+        final step = chIdx - safeStart + 1;
+        _preSynthProgressText =
+            '预合成第 $step/$total 章：${chapter.title}（载入正文与分析）';
+        _notify();
+
+        await _ensureWindowChaptersLoaded(chIdx);
+        final chapterUnits = _units
+            .where((u) => u.chapterIndex == chIdx)
+            .toList();
+        if (chapterUnits.isEmpty) {
+          _preSynthCompletedChapters = step;
+          _notify();
+          continue;
+        }
+        final chapterChunks = _chunks
+            .where((c) => c.chapterIndex == chIdx)
+            .toList();
+        final firstOrder = chapterUnits.first.globalOrder;
+        final minChunkOrder = chapterChunks.isEmpty
+            ? 0
+            : chapterChunks
+                  .map((c) => c.chunkOrder)
+                  .reduce((a, b) => a < b ? a : b);
+
+        // 驱动调度器为目标章节执行文本分析与并发语音合成
+        final scheduler = _scheduler;
+        if (scheduler != null) {
+          final deadline = _now().add(const Duration(seconds: 120));
+          while (!_preSynthCancelled && !_closed && _now().isBefore(deadline)) {
+            await _rebuildManifestFromAllocations(
+              preservePlayingBoundary: true,
+            );
+            final chSegs = _manifestSegments
+                .where((s) => s.chapterIndex == chIdx)
+                .toList();
+            final readySegs = <AudioSegment>[];
+            for (final seg in chSegs) {
+              final asset = await _cacheManager?.peekValidAssetMetadata(
+                seg.requestKey,
+              );
+              if (asset != null) readySegs.add(seg);
+            }
+            final latestCp = await store.getLatestCheckpoint(
+              book.bookId,
+              rev.revisionId,
+            );
+            final allAnalyzed =
+                latestCp != null &&
+                latestCp.confirmedThroughGlobalOrder >=
+                    chapterUnits.last.globalOrder;
+            if (allAnalyzed &&
+                chSegs.isNotEmpty &&
+                readySegs.length >= chSegs.length) {
+              break;
+            }
+            _preSynthProgressText = chSegs.isEmpty
+                ? '预合成第 $step/$total 章：${chapter.title}（角色脚本分析中）'
+                : '预合成第 $step/$total 章：${chapter.title}（语音 ${readySegs.length}/${chSegs.length}）';
+            _notify();
+
+            final firstSegIdx = _manifestSegments.indexWhere(
+              (s) => s.chapterIndex == chIdx,
+            );
+            await scheduler.updateDemand(
+              SchedulerDemandSnapshot(
+                bookId: book.bookId,
+                bookRevisionId: rev.revisionId,
+                currentChapterIndex: chIdx,
+                targetGlobalOrder: firstOrder,
+                minWindowChunkOrder: minChunkOrder,
+                playbackRate: _playbackRate,
+                continuousReadySeconds: 0,
+                paused: false,
+                currentManifestSegments: List.unmodifiable(_manifestSegments),
+                currentSegmentIndex: firstSegIdx >= 0 ? firstSegIdx : 0,
+                limitPrefetchToCurrentChapter: true,
+                resolveTtsApiKey: (provider) =>
+                    _configService.resolveTtsApiKey(provider),
+                resolveTextApiKey: () => _configService.resolveTextApiKey(cfg),
+                resolveTextModelApiKey: (model) =>
+                    _configService.resolveTextModelApiKey(model),
+              ),
+            );
+            await Future<void>.delayed(const Duration(milliseconds: 900));
+          }
+        }
+        _preSynthCompletedChapters = step;
+        _notify();
+      }
+
+      await _refreshCacheBytes();
+      _preSynthProgressText = _preSynthCancelled
+          ? '已停止预合成（已完成 $_preSynthCompletedChapters/$total 章）'
+          : '通勤预合成完成：已离线就绪 $_preSynthCompletedChapters/$total 章';
+    } catch (e) {
+      _preSynthProgressText = '预合成中断：$e';
+    } finally {
+      _isPreSynthesizing = false;
+      _preSynthCancelled = false;
+      if (wasActive && isActive) {
+        unawaited(_pushDemandToScheduler());
+      } else {
+        unawaited(_scheduler?.updateDemand(null));
+      }
+      _notify();
+    }
   }
 
   /// 调整本地播放器倍速（绝不重新合成音频，只重算连续可播秒数 A06）
@@ -1572,6 +1762,21 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
       return;
     }
 
+    if (method == 'onAudioTransientPause') {
+      if (isPlaying) {
+        _notice = '系统短暂中断，结束后自动续播';
+        _notify();
+      }
+      return;
+    }
+    if (method == 'onAudioTransientResume') {
+      if (_notice == '系统短暂中断，结束后自动续播') {
+        _notice = null;
+        _notify();
+      }
+      return;
+    }
+
     if (method == 'onAudioFocusLost' || method == 'onAudioBecomingNoisy') {
       if (!isActive || isPaused) return;
       _notice = method == 'onAudioFocusLost' ? '音频焦点被占用，已暂停听书' : '音频输出设备变化，已暂停听书';
@@ -1669,13 +1874,45 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
         unawaited(pause());
         break;
       case 'onMediaNext':
-        unawaited(nextSegment());
+        unawaited(_handleMediaSkip(forward: true));
         break;
       case 'onMediaPrev':
-        unawaited(previousSegment());
+        unawaited(_handleMediaSkip(forward: false));
         break;
       case 'onMediaStop':
         unawaited(stop());
+        break;
+    }
+  }
+
+  Future<void> _handleMediaSkip({required bool forward}) async {
+    await ReaderSystemService.loadMediaButtonBehavior();
+    switch (ReaderSystemService.mediaButtonBehavior) {
+      case MediaButtonBehavior.segment:
+        if (forward) {
+          await nextSegment();
+        } else {
+          await previousSegment();
+        }
+        break;
+      case MediaButtonBehavior.seek15s:
+        final ok = await ReaderSystemService.seekAudio(
+          deltaMs: forward ? 15000 : -15000,
+        );
+        if (!ok) {
+          if (forward) {
+            await nextSegment();
+          } else {
+            await previousSegment();
+          }
+        }
+        break;
+      case MediaButtonBehavior.chapter:
+        if (forward) {
+          await nextChapter();
+        } else {
+          await previousChapter();
+        }
         break;
     }
   }
@@ -2355,12 +2592,43 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
     final subtitle = seg != null
         ? '${seg.speakerDisplayName} · $currentChapterTitle'
         : currentChapterTitle;
+    final bookId = _book?.bookId;
+    final cachedCoverPath = bookId == null
+        ? null
+        : CoverCacheService().peekCover(bookId)?.path;
+    final durationMs = seg != null
+        ? (seg.spokenText.length * 220).clamp(1000, 60000)
+        : null;
+    if (bookId != null && cachedCoverPath == null) {
+      unawaited(
+        CoverCacheService().hasLocalCover(bookId).then((has) {
+          if (has && !_closed && isActive && _book?.bookId == bookId) {
+            final path = CoverCacheService().peekCover(bookId)?.path;
+            if (path != null) {
+              unawaited(
+                _safeInvoke('updateMediaPlaybackState', {
+                  'title': currentBookTitle.isEmpty ? '沉浸式听书' : currentBookTitle,
+                  'subtitle': subtitle,
+                  'isPlaying': isPlaying,
+                  'isActive': isActive,
+                  'coverPath': path,
+                  if (durationMs != null && durationMs > 0)
+                    'durationMs': durationMs,
+                }),
+              );
+            }
+          }
+        }),
+      );
+    }
     unawaited(
       _safeInvoke('updateMediaPlaybackState', {
         'title': currentBookTitle.isEmpty ? '沉浸式听书' : currentBookTitle,
         'subtitle': subtitle,
         'isPlaying': isPlaying,
         'isActive': isActive,
+        if (cachedCoverPath != null) 'coverPath': cachedCoverPath,
+        if (durationMs != null && durationMs > 0) 'durationMs': durationMs,
       }),
     );
   }

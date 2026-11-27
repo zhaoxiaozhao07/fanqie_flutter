@@ -230,10 +230,14 @@ class _TextReplaceRulesDialogState extends State<TextReplaceRulesDialog> {
               ),
             ],
           ),
-          content: SizedBox(
-            width: 520,
-            height: 460,
-            child: Column(
+          content: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxWidth: 520,
+              maxHeight: MediaQuery.sizeOf(context).height * 0.65,
+            ),
+            child: SizedBox(
+              width: double.maxFinite,
+              child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
@@ -380,16 +384,29 @@ class _TextReplaceRulesDialogState extends State<TextReplaceRulesDialog> {
                                     onChanged: (v) =>
                                         unawaited(_service.toggleRule(rule.id, v)),
                                   ),
-                                  IconButton(
-                                    tooltip: '编辑',
-                                    icon: const Icon(Icons.edit_outlined, size: 18),
-                                    onPressed: () => _editRule(existing: rule),
-                                  ),
-                                  IconButton(
-                                    tooltip: '删除',
-                                    icon: const Icon(Icons.delete_outline, size: 18),
-                                    onPressed: () =>
-                                        unawaited(_service.deleteRule(rule.id)),
+                                  PopupMenuButton<String>(
+                                    tooltip: '规则操作',
+                                    icon: const Icon(Icons.more_vert, size: 18),
+                                    onSelected: (action) {
+                                      if (action == 'edit') {
+                                        unawaited(_editRule(existing: rule));
+                                      } else if (action == 'delete') {
+                                        unawaited(_service.deleteRule(rule.id));
+                                      }
+                                    },
+                                    itemBuilder: (_) => const [
+                                      PopupMenuItem(
+                                        value: 'edit',
+                                        child: Text('编辑规则'),
+                                      ),
+                                      PopupMenuItem(
+                                        value: 'delete',
+                                        child: Text(
+                                          '删除',
+                                          style: TextStyle(color: Colors.red),
+                                        ),
+                                      ),
+                                    ],
                                   ),
                                 ],
                               ),
@@ -398,6 +415,7 @@ class _TextReplaceRulesDialogState extends State<TextReplaceRulesDialog> {
                         ),
                 ),
               ],
+            ),
             ),
           ),
           actions: [

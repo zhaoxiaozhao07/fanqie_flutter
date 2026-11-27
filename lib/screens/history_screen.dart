@@ -38,6 +38,7 @@ class HistoryScreenState extends State<HistoryScreen>
   bool _isLoadingReading = true;
   bool _isReadingSelectionMode = false;
   final Set<String> _selectedReadingIds = {};
+  String? _openingBookId;
 
   // 下载历史状态
   List<DownloadHistory> _downloadList = [];
@@ -194,12 +195,35 @@ class HistoryScreenState extends State<HistoryScreen>
 
     if (confirmed == true && mounted) {
       if (_tabController.index == 0) {
+        final removed = _readingList
+            .where((r) => _selectedReadingIds.contains(r.bookId))
+            .toList();
         await _readingHistoryService.deleteHistories(
           _selectedReadingIds.toList(),
         );
         _isReadingSelectionMode = false;
         _selectedReadingIds.clear();
-        _loadReadingHistory();
+        await _loadReadingHistory(silent: true);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('已删除 ${removed.length} 条阅读历史'),
+              action: SnackBarAction(
+                label: '撤销',
+                onPressed: () async {
+                  for (final item in removed.reversed) {
+                    await _readingHistoryService.recordReading(
+                      book: item.toBook(),
+                      chapterIndex: item.lastReadChapterIndex,
+                      chapterTitle: item.lastReadChapterTitle,
+                    );
+                  }
+                  if (mounted) await _loadReadingHistory(silent: true);
+                },
+              ),
+            ),
+          );
+        }
       } else {
         await _downloadHistoryService.deleteHistories(
           _selectedDownloadIds.toList(),
@@ -207,12 +231,11 @@ class HistoryScreenState extends State<HistoryScreen>
         _isDownloadSelectionMode = false;
         _selectedDownloadIds.clear();
         _loadDownloadHistory();
-      }
-
-      if (mounted) {
-        ScaffoldMessenger.of(
-          context,
-        ).showSnackBar(const SnackBar(content: Text('已删除选中的记录')));
+        if (mounted) {
+          ScaffoldMessenger.of(
+            context,
+          ).showSnackBar(const SnackBar(content: Text('已删除选中的记录')));
+        }
       }
     }
   }
@@ -257,49 +280,49 @@ class HistoryScreenState extends State<HistoryScreen>
     }
   }
 
-  /// 直接从阅读历史中快速续读
+  /// 直接从阅读历史中非阻塞快速续读（避免弱网全屏转圈卡死返回）
   Future<void> _continueReading(ReadingHistory item) async {
+    if (_openingBookId != null) return;
     final book = item.toBook();
-
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (_) => const Center(child: CircularProgressIndicator()),
-    );
-
-    List<Chapter> chapters = [];
+    setState(() => _openingBookId = book.bookId);
     try {
-      chapters = await _apiService.getBookChapters(book.bookId);
-    } catch (_) {}
+      List<Chapter> chapters = [];
+      try {
+        chapters = await _apiService.getBookChapters(book.bookId);
+      } catch (_) {}
 
-    if (mounted) {
-      Navigator.pop(context);
-    }
+      if (!mounted) return;
 
-    if (!mounted) return;
+      if (chapters.isEmpty) {
+        Navigator.push(
+          context,
+          BookPageRoute(builder: (_) => BookDetailScreen(book: book)),
+        );
+        return;
+      }
 
-    if (chapters.isEmpty) {
+      final targetIndex = item.lastReadChapterIndex.clamp(
+        0,
+        chapters.length - 1,
+      );
+      final readerSettings = await ReaderSettingsRepository().load(book.bookId);
+      if (!mounted) return;
       Navigator.push(
         context,
-        BookPageRoute(builder: (_) => BookDetailScreen(book: book)),
-      );
-      return;
-    }
-
-    final targetIndex = item.lastReadChapterIndex.clamp(0, chapters.length - 1);
-    final readerSettings = await ReaderSettingsRepository().load(book.bookId);
-    if (!mounted) return;
-    Navigator.push(
-      context,
-      BookPageRoute(
-        builder: (_) => ReaderScreen(
-          book: book,
-          chapters: chapters,
-          initialChapterIndex: targetIndex,
-          initialSettings: readerSettings,
+        BookPageRoute(
+          builder: (_) => ReaderScreen(
+            book: book,
+            chapters: chapters,
+            initialChapterIndex: targetIndex,
+            initialSettings: readerSettings,
+          ),
         ),
-      ),
-    ).then((_) => _loadReadingHistory(silent: true));
+      ).then((_) {
+        if (mounted) _loadReadingHistory(silent: true);
+      });
+    } finally {
+      if (mounted) setState(() => _openingBookId = null);
+    }
   }
 
   String _formatTime(DateTime time) {
@@ -376,9 +399,21 @@ class HistoryScreenState extends State<HistoryScreen>
           ],
         ),
       ),
-      body: TabBarView(
-        controller: _tabController,
-        children: [_buildReadingHistoryList(), _buildDownloadHistoryList()],
+      body: Column(
+        children: [
+          SizedBox(
+            height: 2,
+            child: _openingBookId == null
+                ? null
+                : const LinearProgressIndicator(),
+          ),
+          Expanded(
+            child: TabBarView(
+              controller: _tabController,
+              children: [_buildReadingHistoryList(), _buildDownloadHistoryList()],
+            ),
+          ),
+        ],
       ),
       bottomNavigationBar: _isCurrentSelectionMode
           ? _buildBatchBottomBar()

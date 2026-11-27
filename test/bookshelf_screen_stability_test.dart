@@ -235,7 +235,9 @@ void main() {
           ),
         );
         await tester.pumpAndSettle();
-        await tester.tap(find.byTooltip('切换为三列视图'));
+        await tester.tap(find.byTooltip('更多操作'));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('切换为三列宫格'));
         await tester.pumpAndSettle();
         expect(
           find.byKey(const PageStorageKey('favorites-grid')),

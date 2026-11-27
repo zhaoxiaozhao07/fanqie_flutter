@@ -49,6 +49,7 @@ class ReaderCapabilities {
       networkType: android || desktop,
       textDecoder: android || desktop,
       fileExport: android || desktop,
+      fileImport: android || desktop,
     );
   }
 
@@ -85,6 +86,9 @@ class ReaderPlatform {
   static const channel = MethodChannel('com.fanqie.fanqie_flutter/download');
   static ReaderCapabilities? _capabilities;
   static TargetPlatform? _initializedPlatform;
+
+  static bool get isAndroid =>
+      !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 
   static bool get isMacOS =>
       !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;

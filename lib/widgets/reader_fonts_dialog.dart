@@ -117,10 +117,14 @@ class _ReaderFontsDialogState extends State<ReaderFontsDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: const Text('本地字体库'),
-    content: SizedBox(
-      width: 540,
-      height: 390,
-      child: Column(
+    content: ConstrainedBox(
+      constraints: BoxConstraints(
+        maxWidth: 540,
+        maxHeight: MediaQuery.sizeOf(context).height * 0.6,
+      ),
+      child: SizedBox(
+        width: double.maxFinite,
+        child: Column(
         children: [
           const Text('仅支持独立 TTF / OTF；单个最多 20 MB。字体只在本应用使用，请确认拥有使用授权。'),
           if (_error != null)
@@ -168,6 +172,7 @@ class _ReaderFontsDialogState extends State<ReaderFontsDialog> {
             ),
           ),
         ],
+      ),
       ),
     ),
     actions: [

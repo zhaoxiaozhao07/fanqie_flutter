@@ -1,8 +1,10 @@
+import 'dart:async';
 import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/book.dart';
 import '../models/reading_history.dart';
+import 'reader_system_service.dart';
 
 /// 阅读历史服务 - 记录所有打开浏览/阅读过的书籍
 class ReadingHistoryService {
@@ -90,6 +92,14 @@ class ReadingHistoryService {
     }
 
     await _save();
+    unawaited(
+      ReaderSystemService.updateHomeWidget(
+        bookId: book.bookId,
+        bookName: book.bookName,
+        chapterTitle: chapterTitle,
+        progressText: '第 ${chapterIndex + 1} 章',
+      ),
+    );
   }
 
   /// 获取阅读历史列表
@@ -104,6 +114,7 @@ class ReadingHistoryService {
     final idSet = bookIds.toSet();
     _historyList.removeWhere((h) => idSet.contains(h.bookId));
     await _save();
+    _syncTopHistoryToWidget();
   }
 
   /// 清空阅读历史
@@ -111,5 +122,29 @@ class ReadingHistoryService {
     await initialize();
     _historyList.clear();
     await _save();
+    _syncTopHistoryToWidget();
+  }
+
+  void _syncTopHistoryToWidget() {
+    if (_historyList.isEmpty) {
+      unawaited(
+        ReaderSystemService.updateHomeWidget(
+          bookId: '',
+          bookName: '',
+          chapterTitle: '',
+          progressText: '',
+        ),
+      );
+    } else {
+      final top = _historyList.first;
+      unawaited(
+        ReaderSystemService.updateHomeWidget(
+          bookId: top.bookId,
+          bookName: top.bookName,
+          chapterTitle: top.lastReadChapterTitle,
+          progressText: '第 ${top.lastReadChapterIndex + 1} 章',
+        ),
+      );
+    }
   }
 }

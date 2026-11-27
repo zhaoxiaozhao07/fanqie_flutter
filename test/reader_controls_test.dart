@@ -72,6 +72,7 @@ void main() {
       await fixture.settleReader(tester);
       await tester.tap(find.text('排版设置'));
       await fixture.settleReader(tester);
+      await choose(tester, '排版字体');
       await choose(tester, '宋体');
       final preview = tester.widget<Text>(find.text('春风轻拂书页，故事从这里继续。'));
       expect(preview.style?.fontFamily, 'ReaderSongTi');
@@ -79,6 +80,7 @@ void main() {
         fixture.address(tester).layout.pageFor(original),
         fixture.address(tester).pageIndex,
       );
+      await choose(tester, '常用');
       await choose(tester, '暗夜');
       final darkPreview = tester.widget<Text>(find.text('春风轻拂书页，故事从这里继续。'));
       expect(darkPreview.style?.color, const Color(0xFFB8B8B8));

@@ -1,8 +1,253 @@
 import 'package:flutter/material.dart';
 
 import '../../app_theme.dart';
+import '../../services/reader_platform.dart';
+import '../../services/tts_service.dart';
 import '../models/immersive_config.dart';
 import '../services/text_model_adapter.dart';
+
+/// 可一键复用的已有 API 凭据条目
+class _ReusableCredential {
+  final String label;
+  final String baseUrl;
+  final String apiKey;
+
+  const _ReusableCredential({
+    required this.label,
+    required this.baseUrl,
+    required this.apiKey,
+  });
+}
+
+/// 收集普通 TTS 与沉浸式配置中已填写的 API 凭据（按 URL+Key 去重）
+List<_ReusableCredential> _collectReusableCredentials(ImmersiveConfig? cfg) {
+  final results = <_ReusableCredential>[];
+  final seen = <String>{};
+
+  void addCandidate(String label, String? url, String? key) {
+    final cleanUrl = (url ?? '').trim();
+    final cleanKey = (key ?? '').trim();
+    if (cleanUrl.isEmpty) return;
+    final dedup = '$cleanUrl|$cleanKey';
+    if (!seen.add(dedup)) return;
+    results.add(
+      _ReusableCredential(label: label, baseUrl: cleanUrl, apiKey: cleanKey),
+    );
+  }
+
+  final tts = TtsService();
+  if (tts.openAiBaseUrl.trim().isNotEmpty) {
+    addCandidate('普通听书 OpenAI', tts.openAiBaseUrl, tts.openAiApiKey);
+  }
+
+  if (cfg != null) {
+    for (final m in cfg.textAnalysisModels) {
+      addCandidate('文本:${m.displayName}', m.baseUrl, m.apiKey);
+    }
+    for (final p in cfg.tts.providers) {
+      if (p.adapter == 'native_tts') continue;
+      addCandidate('语音:${p.displayName}', p.baseUrl, p.apiKey);
+    }
+  }
+  return results;
+}
+
+/// 构建“一键复用已有凭据”横排快捷条
+Widget _buildCredentialReuseBar(
+  BuildContext context, {
+  required List<_ReusableCredential> credentials,
+  required void Function(_ReusableCredential picked) onPick,
+}) {
+  if (credentials.isEmpty) return const SizedBox.shrink();
+  return Padding(
+    padding: const EdgeInsets.only(bottom: 10),
+    child: Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          '一键复用已有凭据：',
+          style: TextStyle(
+            fontSize: 11,
+            color: AppTheme.textSecondaryOf(context),
+          ),
+        ),
+        const SizedBox(height: 6),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: [
+              for (final cred in credentials) ...[
+                Padding(
+                  padding: const EdgeInsets.only(right: 6),
+                  child: ActionChip(
+                    avatar: const Icon(Icons.key_rounded, size: 14),
+                    label: Text(
+                      cred.label,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(fontSize: 11.5),
+                    ),
+                    visualDensity: VisualDensity.compact,
+                    onPressed: () => onPick(cred),
+                  ),
+                ),
+              ],
+            ],
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+/// 表单类输入框统一样式（圆角矩形 + 紧凑内边距，避免被全局搜索栏胶囊样式污染）
+InputDecoration _compactFormDecoration(
+  BuildContext context, {
+  required String labelText,
+  String? hintText,
+  String? helperText,
+  int? helperMaxLines,
+  Widget? prefixIcon,
+  Widget? suffixIcon,
+}) {
+  final divider = AppTheme.dividerOf(context);
+  return InputDecoration(
+    labelText: labelText,
+    hintText: hintText,
+    helperText: helperText,
+    helperMaxLines: helperMaxLines,
+    prefixIcon: prefixIcon,
+    suffixIcon: suffixIcon,
+    isDense: true,
+    filled: true,
+    fillColor: AppTheme.inputFillOf(context),
+    contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+    border: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(10),
+      borderSide: BorderSide(color: divider),
+    ),
+    enabledBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(10),
+      borderSide: BorderSide(color: divider),
+    ),
+    focusedBorder: OutlineInputBorder(
+      borderRadius: BorderRadius.circular(10),
+      borderSide: const BorderSide(color: AppTheme.primaryColor, width: 1.4),
+    ),
+  );
+}
+
+/// 表单分组标题
+Widget _formSectionHeader(BuildContext context, String title) {
+  return Padding(
+    padding: const EdgeInsets.only(top: 4, bottom: 8),
+    child: Text(
+      title,
+      style: TextStyle(
+        fontSize: 12.5,
+        fontWeight: FontWeight.w700,
+        color: AppTheme.textSecondaryOf(context),
+      ),
+    ),
+  );
+}
+
+/// 移动端使用高占比底部抽屉（适配软键盘），桌面端保持居中对话框
+Future<T?> _showAdaptiveFormModal<T>({
+  required BuildContext context,
+  required WidgetBuilder builder,
+}) {
+  if (ReaderPlatform.isDesktop) {
+    return showDialog<T>(context: context, builder: builder);
+  }
+  return showModalBottomSheet<T>(
+    context: context,
+    isScrollControlled: true,
+    useSafeArea: true,
+    backgroundColor: AppTheme.surfaceOf(context),
+    shape: const RoundedRectangleBorder(
+      borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+    ),
+    builder: (ctx) => Padding(
+      padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(ctx).bottom),
+      child: ConstrainedBox(
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.sizeOf(ctx).height * 0.88,
+        ),
+        child: builder(ctx),
+      ),
+    ),
+  );
+}
+
+/// 统一的自适应表单外壳：桌面端呈现 AlertDialog，移动端呈现固定顶底栏的可滚抽屉
+Widget _buildAdaptiveFormFrame({
+  required BuildContext context,
+  required String title,
+  required Widget body,
+  required List<Widget> actions,
+}) {
+  if (ReaderPlatform.isDesktop) {
+    return AlertDialog(
+      title: Text(title),
+      content: SingleChildScrollView(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 440),
+          child: body,
+        ),
+      ),
+      actions: actions,
+    );
+  }
+  return Column(
+    mainAxisSize: MainAxisSize.min,
+    children: [
+      Padding(
+        padding: const EdgeInsets.fromLTRB(16, 12, 8, 6),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                title,
+                style: const TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                ),
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.close, size: 20),
+              onPressed: () => Navigator.pop(context),
+            ),
+          ],
+        ),
+      ),
+      const Divider(height: 1),
+      Flexible(
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.fromLTRB(16, 12, 16, 12),
+          child: body,
+        ),
+      ),
+      const Divider(height: 1),
+      SafeArea(
+        top: false,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(16, 8, 16, 10),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              for (var i = 0; i < actions.length; i++) ...[
+                if (i > 0) const SizedBox(width: 10),
+                actions[i],
+              ],
+            ],
+          ),
+        ),
+      ),
+    ],
+  );
+}
 
 /// 远端 `/v1/models` 列表拉取回调类型（支持单测注入桩实现）
 typedef RemoteModelsFetcher = Future<List<String>> Function({
@@ -85,7 +330,7 @@ Future<TextAnalysisConfig?> showTextModelEditorDialog(
   TextAnalysisConfig? editing,
   RemoteModelsFetcher? modelsFetcher,
 }) {
-  return showDialog<TextAnalysisConfig>(
+  return _showAdaptiveFormModal<TextAnalysisConfig>(
     context: context,
     builder: (_) => _TextModelEditorDialog(
       cfg: cfg,
@@ -320,327 +565,334 @@ class _TextModelEditorDialogState extends State<_TextModelEditorDialog> {
         filteredModels.contains(currentId) ? currentId : null;
     final hasMaxOutput = _maxOutputCtrl.text.trim().isNotEmpty;
 
-    return AlertDialog(
-      title: Text(widget.editing == null ? '新增文本提取模型' : '编辑文本提取模型'),
-      content: SingleChildScrollView(
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 420),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
+    return _buildAdaptiveFormFrame(
+      context: context,
+      title: widget.editing == null ? '新增文本提取模型' : '编辑文本提取模型',
+      body: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          _formSectionHeader(context, '基础连接配置'),
+          _buildCredentialReuseBar(
+            context,
+            credentials: _collectReusableCredentials(widget.cfg),
+            onPick: (cred) {
+              setState(() {
+                _urlCtrl.text = cred.baseUrl;
+                if (cred.apiKey.isNotEmpty) {
+                  _keyCtrl.text = cred.apiKey;
+                }
+                _formError = null;
+              });
+            },
+          ),
+          TextField(
+            controller: _nameCtrl,
+            decoration: _compactFormDecoration(
+              context,
+              labelText: '显示名称（留空默认取模型 ID）',
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _urlCtrl,
+            decoration: _compactFormDecoration(
+              context,
+              labelText: 'Base URL（推荐 https://.../v1）',
+            ),
+            onChanged: (_) => setState(() => _formError = null),
+          ),
+          if (insecureHttp) buildInsecureHttpWarningBanner(),
+          const SizedBox(height: 10),
+          TextField(
+            controller: _keyCtrl,
+            obscureText: true,
+            decoration: _compactFormDecoration(
+              context,
+              labelText: 'API Key（加密保存至系统密钥库）',
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
             children: [
-              TextField(
-                controller: _nameCtrl,
-                decoration: const InputDecoration(
-                  labelText: '显示名称（留空默认取模型 ID）',
-                  isDense: true,
+              Expanded(
+                child: TextField(
+                  key: const ValueKey('text-model-id-field'),
+                  controller: _modelIdCtrl,
+                  decoration: _compactFormDecoration(
+                    context,
+                    labelText: '模型 ID（可手输或右侧拉取）',
+                  ),
+                  onChanged: (_) => setState(() => _formError = null),
                 ),
               ),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _urlCtrl,
-                decoration: const InputDecoration(
-                  labelText: 'Base URL（推荐 https://.../v1）',
-                  isDense: true,
-                ),
-                onChanged: (_) => setState(() => _formError = null),
-              ),
-              if (insecureHttp) buildInsecureHttpWarningBanner(),
-              const SizedBox(height: 8),
-              TextField(
-                controller: _keyCtrl,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'API Key（加密保存至系统密钥库）',
-                  isDense: true,
-                ),
-              ),
-              const SizedBox(height: 10),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  Expanded(
-                    child: TextField(
-                      key: const ValueKey('text-model-id-field'),
-                      controller: _modelIdCtrl,
-                      decoration: const InputDecoration(
-                        labelText: '模型 ID（可手输或右侧拉取下拉）',
-                        isDense: true,
-                      ),
-                      onChanged: (_) => setState(() => _formError = null),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  OutlinedButton.icon(
-                    key: const ValueKey('fetch-text-models-btn'),
-                    onPressed: _fetchingModels ? null : _doFetchModels,
-                    style: OutlinedButton.styleFrom(
-                      visualDensity: VisualDensity.compact,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 10,
-                        vertical: 10,
-                      ),
-                    ),
-                    icon: _fetchingModels
-                        ? const SizedBox(
-                            width: 14,
-                            height: 14,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.cloud_download_outlined, size: 16),
-                    label: Text(
-                      _fetchingModels ? '获取中' : '获取模型',
-                      style: const TextStyle(fontSize: 12),
-                    ),
-                  ),
-                ],
-              ),
-              if (_fetchError != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Text(
-                    _fetchError!,
-                    style: TextStyle(fontSize: 11, color: Colors.red.shade700),
+              const SizedBox(width: 8),
+              OutlinedButton.icon(
+                key: const ValueKey('fetch-text-models-btn'),
+                onPressed: _fetchingModels ? null : _doFetchModels,
+                style: OutlinedButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 10,
+                    vertical: 12,
                   ),
                 ),
-              if (_fetchedModels.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                if (_fetchedModels.length > 10)
-                  Padding(
-                    padding: const EdgeInsets.only(bottom: 6),
-                    child: TextField(
-                      controller: _modelFilterCtrl,
-                      decoration: InputDecoration(
-                        labelText: '筛选远端模型（共 ${_fetchedModels.length} 个）',
-                        prefixIcon: const Icon(Icons.search, size: 16),
-                        isDense: true,
-                      ),
-                      onChanged: (_) => setState(() {}),
-                    ),
-                  ),
-                DropdownButtonFormField<String>(
-                  key: ValueKey(
-                    'text-models-dropdown-${filteredModels.length}-$selectedDropdownModel',
-                  ),
-                  initialValue: selectedDropdownModel,
-                  isExpanded: true,
-                  decoration: InputDecoration(
-                    labelText: '从 /v1/models 下拉选择（${filteredModels.length} 个可用）',
-                    border: const OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  hint: const Text('请选择远端模型'),
-                  items: [
-                    for (final id in filteredModels)
-                      DropdownMenuItem(
-                        value: id,
-                        child: Text(id, overflow: TextOverflow.ellipsis),
-                      ),
-                  ],
-                  onChanged: (v) {
-                    if (v == null) return;
-                    setState(() {
-                      final prevId = _modelIdCtrl.text.trim();
-                      _modelIdCtrl.text = v;
-                      if (_nameCtrl.text.trim().isEmpty ||
-                          _nameCtrl.text.trim() == prevId) {
-                        _nameCtrl.text = v;
-                      }
-                      _formError = null;
-                    });
-                  },
+                icon: _fetchingModels
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.cloud_download_outlined, size: 16),
+                label: Text(
+                  _fetchingModels ? '获取中' : '拉取',
+                  style: const TextStyle(fontSize: 12),
                 ),
-              ],
-              const SizedBox(height: 10),
-              DropdownButtonFormField<String>(
-                key: const ValueKey('text-model-thinking-dropdown'),
-                initialValue: _thinking,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  labelText: '思考程度（支持 none 与 max）',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-                items: const [
-                  DropdownMenuItem(
-                    value: TextThinkingLevel.auto,
-                    child: Text(
-                      '自动 (auto，标准接口)',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  DropdownMenuItem(
-                    value: TextThinkingLevel.none,
-                    child: Text(
-                      '关闭思考 (none)',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  DropdownMenuItem(
-                    value: TextThinkingLevel.minimal,
-                    child: Text(
-                      '最低 (minimal)',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  DropdownMenuItem(
-                    value: TextThinkingLevel.low,
-                    child: Text('低 (low)', overflow: TextOverflow.ellipsis),
-                  ),
-                  DropdownMenuItem(
-                    value: TextThinkingLevel.medium,
-                    child: Text('中 (medium)', overflow: TextOverflow.ellipsis),
-                  ),
-                  DropdownMenuItem(
-                    value: TextThinkingLevel.high,
-                    child: Text('高 (high)', overflow: TextOverflow.ellipsis),
-                  ),
-                  DropdownMenuItem(
-                    value: TextThinkingLevel.max,
-                    child: Text('最高 (max)', overflow: TextOverflow.ellipsis),
-                  ),
-                ],
-                onChanged: (v) {
-                  if (v != null) setState(() => _thinking = v);
-                },
               ),
-              const SizedBox(height: 10),
-              Row(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Expanded(
-                    child: TextField(
-                      key: const ValueKey('text-model-context-field'),
-                      controller: _contextWindowCtrl,
-                      decoration: const InputDecoration(
-                        labelText: '上下文窗口 Token',
-                        helperText: '默认 1M，可填 1M/128K',
-                        helperMaxLines: 2,
-                        isDense: true,
-                      ),
-                      onChanged: (_) => setState(() => _formError = null),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: TextField(
-                      key: const ValueKey('text-model-max-output-field'),
-                      controller: _maxOutputCtrl,
-                      decoration: const InputDecoration(
-                        labelText: '最大输出 Token',
-                        helperText: '默认 12800，留空不传该字段',
-                        helperMaxLines: 2,
-                        isDense: true,
-                      ),
-                      onChanged: (_) => setState(() => _formError = null),
-                    ),
-                  ),
-                ],
-              ),
-              if (hasMaxOutput) ...[
-                const SizedBox(height: 8),
-                DropdownButtonFormField<String>(
-                  initialValue: _outputLimitParam,
-                  isExpanded: true,
-                  decoration: const InputDecoration(
-                    labelText: '最大输出请求字段名',
-                    border: OutlineInputBorder(),
-                    isDense: true,
-                  ),
-                  items: const [
-                    DropdownMenuItem(
-                      value: 'max_completion_tokens',
-                      child: Text(
-                        'max_completion_tokens（OpenAI 新标准）',
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    DropdownMenuItem(
-                      value: 'max_tokens',
-                      child: Text(
-                        'max_tokens（传统兼容）',
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                  ],
-                  onChanged: (v) {
-                    if (v != null) setState(() => _outputLimitParam = v);
-                  },
-                ),
-              ],
-              const SizedBox(height: 10),
-              DropdownButtonFormField<String>(
-                initialValue: _structuredMode,
-                isExpanded: true,
-                decoration: const InputDecoration(
-                  labelText: '结构化输出模式',
-                  border: OutlineInputBorder(),
-                  isDense: true,
-                ),
-                items: const [
-                  DropdownMenuItem(
-                    value: 'vendor_native',
-                    child: Text(
-                      'ToolCall 严格 Schema（推荐）',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                  DropdownMenuItem(
-                    value: 'json_schema',
-                    child: Text(
-                      'response_format JSON Schema',
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ],
-                onChanged: (v) {
-                  if (v != null) setState(() => _structuredMode = v);
-                },
-              ),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Text('独立并发数：$_conc'),
-                  const Spacer(),
-                  Text(
-                    '复核保留席：${_conc <= 1 ? 0 : 1}',
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: AppTheme.textSecondaryOf(context),
-                    ),
-                  ),
-                ],
-              ),
-              Slider(
-                value: _conc.toDouble(),
-                min: 1,
-                max: 8,
-                divisions: 7,
-                label: '$_conc',
-                onChanged: (v) => setState(() => _conc = v.round()),
-              ),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                dense: true,
-                title: const Text('启用该模型'),
-                value: _enabled,
-                onChanged: (v) => setState(() => _enabled = v),
-              ),
-              if (_formError != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 6),
-                  child: Text(
-                    _formError!,
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Colors.red.shade700,
-                      fontWeight: FontWeight.w500,
-                    ),
-                  ),
-                ),
             ],
           ),
-        ),
+          if (_fetchError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                _fetchError!,
+                style: TextStyle(fontSize: 11, color: Colors.red.shade700),
+              ),
+            ),
+          if (_fetchedModels.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            if (_fetchedModels.length > 10)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8),
+                child: TextField(
+                  controller: _modelFilterCtrl,
+                  decoration: _compactFormDecoration(
+                    context,
+                    labelText: '筛选远端模型（共 ${_fetchedModels.length} 个）',
+                    prefixIcon: const Icon(Icons.search, size: 16),
+                  ),
+                  onChanged: (_) => setState(() {}),
+                ),
+              ),
+            DropdownButtonFormField<String>(
+              key: ValueKey(
+                'text-models-dropdown-${filteredModels.length}-$selectedDropdownModel',
+              ),
+              initialValue: selectedDropdownModel,
+              isExpanded: true,
+              decoration: _compactFormDecoration(
+                context,
+                labelText: '从 /v1/models 下拉选择（${filteredModels.length} 个可用）',
+              ),
+              hint: const Text('请选择远端模型'),
+              items: [
+                for (final id in filteredModels)
+                  DropdownMenuItem(
+                    value: id,
+                    child: Text(id, overflow: TextOverflow.ellipsis),
+                  ),
+              ],
+              onChanged: (v) {
+                if (v == null) return;
+                setState(() {
+                  final prevId = _modelIdCtrl.text.trim();
+                  _modelIdCtrl.text = v;
+                  if (_nameCtrl.text.trim().isEmpty ||
+                      _nameCtrl.text.trim() == prevId) {
+                    _nameCtrl.text = v;
+                  }
+                  _formError = null;
+                });
+              },
+            ),
+          ],
+          const Divider(height: 24),
+          _formSectionHeader(context, '推理与并发参数'),
+          DropdownButtonFormField<String>(
+            key: const ValueKey('text-model-thinking-dropdown'),
+            initialValue: _thinking,
+            isExpanded: true,
+            decoration: _compactFormDecoration(
+              context,
+              labelText: '思考程度（支持 none 与 max）',
+            ),
+            items: const [
+              DropdownMenuItem(
+                value: TextThinkingLevel.auto,
+                child: Text(
+                  '自动 (auto，标准接口)',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              DropdownMenuItem(
+                value: TextThinkingLevel.none,
+                child: Text(
+                  '关闭思考 (none)',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              DropdownMenuItem(
+                value: TextThinkingLevel.minimal,
+                child: Text(
+                  '最低 (minimal)',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              DropdownMenuItem(
+                value: TextThinkingLevel.low,
+                child: Text('低 (low)', overflow: TextOverflow.ellipsis),
+              ),
+              DropdownMenuItem(
+                value: TextThinkingLevel.medium,
+                child: Text('中 (medium)', overflow: TextOverflow.ellipsis),
+              ),
+              DropdownMenuItem(
+                value: TextThinkingLevel.high,
+                child: Text('高 (high)', overflow: TextOverflow.ellipsis),
+              ),
+              DropdownMenuItem(
+                value: TextThinkingLevel.max,
+                child: Text('最高 (max)', overflow: TextOverflow.ellipsis),
+              ),
+            ],
+            onChanged: (v) {
+              if (v != null) setState(() => _thinking = v);
+            },
+          ),
+          const SizedBox(height: 10),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: TextField(
+                  key: const ValueKey('text-model-context-field'),
+                  controller: _contextWindowCtrl,
+                  decoration: _compactFormDecoration(
+                    context,
+                    labelText: '上下文 Token',
+                    helperText: '默认 1M，可填 128K',
+                    helperMaxLines: 2,
+                  ),
+                  onChanged: (_) => setState(() => _formError = null),
+                ),
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: TextField(
+                  key: const ValueKey('text-model-max-output-field'),
+                  controller: _maxOutputCtrl,
+                  decoration: _compactFormDecoration(
+                    context,
+                    labelText: '最大输出 Token',
+                    helperText: '默认 12800，留空不传',
+                    helperMaxLines: 2,
+                  ),
+                  onChanged: (_) => setState(() => _formError = null),
+                ),
+              ),
+            ],
+          ),
+          if (hasMaxOutput) ...[
+            const SizedBox(height: 10),
+            DropdownButtonFormField<String>(
+              initialValue: _outputLimitParam,
+              isExpanded: true,
+              decoration: _compactFormDecoration(
+                context,
+                labelText: '最大输出请求字段名',
+              ),
+              items: const [
+                DropdownMenuItem(
+                  value: 'max_completion_tokens',
+                  child: Text(
+                    'max_completion_tokens（OpenAI 新标准）',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+                DropdownMenuItem(
+                  value: 'max_tokens',
+                  child: Text(
+                    'max_tokens（传统兼容）',
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              ],
+              onChanged: (v) {
+                if (v != null) setState(() => _outputLimitParam = v);
+              },
+            ),
+          ],
+          const SizedBox(height: 10),
+          DropdownButtonFormField<String>(
+            initialValue: _structuredMode,
+            isExpanded: true,
+            decoration: _compactFormDecoration(
+              context,
+              labelText: '结构化输出模式',
+            ),
+            items: const [
+              DropdownMenuItem(
+                value: 'vendor_native',
+                child: Text(
+                  'ToolCall 严格 Schema（推荐）',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+              DropdownMenuItem(
+                value: 'json_schema',
+                child: Text(
+                  'response_format JSON Schema',
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+            onChanged: (v) {
+              if (v != null) setState(() => _structuredMode = v);
+            },
+          ),
+          const SizedBox(height: 10),
+          Row(
+            children: [
+              Text('独立并发数：$_conc', style: const TextStyle(fontSize: 13)),
+              const Spacer(),
+              Text(
+                '复核保留席：${_conc <= 1 ? 0 : 1}',
+                style: TextStyle(
+                  fontSize: 11,
+                  color: AppTheme.textSecondaryOf(context),
+                ),
+              ),
+            ],
+          ),
+          Slider(
+            value: _conc.toDouble(),
+            min: 1,
+            max: 8,
+            divisions: 7,
+            label: '$_conc',
+            onChanged: (v) => setState(() => _conc = v.round()),
+          ),
+          SwitchListTile(
+            contentPadding: EdgeInsets.zero,
+            dense: true,
+            title: const Text('启用该模型'),
+            value: _enabled,
+            onChanged: (v) => setState(() => _enabled = v),
+          ),
+          if (_formError != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                _formError!,
+                style: TextStyle(
+                  fontSize: 12,
+                  color: Colors.red.shade700,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ),
+        ],
       ),
       actions: [
         TextButton(
@@ -661,6 +913,7 @@ class _TextModelEditorDialogState extends State<_TextModelEditorDialog> {
 Future<TtsProviderConfig?> showTtsProviderEditorDialog(
   BuildContext context, {
   TtsProviderConfig? editing,
+  ImmersiveConfig? cfg,
 }) async {
   final nameCtrl = TextEditingController(text: editing?.displayName ?? '');
   final urlCtrl = TextEditingController(
@@ -671,65 +924,78 @@ Future<TtsProviderConfig?> showTtsProviderEditorDialog(
   );
   final keyCtrl = TextEditingController(text: editing?.apiKey ?? '');
   var conc = editing?.maxConcurrency ?? 3;
+  final reusableCredentials = _collectReusableCredentials(cfg);
 
   try {
-    final saved = await showDialog<bool>(
+    final saved = await _showAdaptiveFormModal<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setD) {
           final insecureHttp = isInsecureRemoteHttpUrl(urlCtrl.text);
-          return AlertDialog(
-            title: Text(editing == null ? '新增 TTS 供应商' : '编辑 TTS 供应商'),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    controller: nameCtrl,
-                    decoration: const InputDecoration(
-                      labelText: '供应商名称',
-                      isDense: true,
-                    ),
+          return _buildAdaptiveFormFrame(
+            context: ctx,
+            title: editing == null ? '新增 TTS 供应商' : '编辑 TTS 供应商',
+            body: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _buildCredentialReuseBar(
+                  ctx,
+                  credentials: reusableCredentials,
+                  onPick: (cred) {
+                    setD(() {
+                      urlCtrl.text = cred.baseUrl;
+                      if (cred.apiKey.isNotEmpty) {
+                        keyCtrl.text = cred.apiKey;
+                      }
+                    });
+                  },
+                ),
+                TextField(
+                  controller: nameCtrl,
+                  decoration: _compactFormDecoration(
+                    ctx,
+                    labelText: '供应商名称',
                   ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: urlCtrl,
-                    decoration: const InputDecoration(
-                      labelText: 'Base URL（推荐 https://...）',
-                      isDense: true,
-                    ),
-                    onChanged: (_) => setD(() {}),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: urlCtrl,
+                  decoration: _compactFormDecoration(
+                    ctx,
+                    labelText: 'Base URL（推荐 https://...）',
                   ),
-                  if (insecureHttp) buildInsecureHttpWarningBanner(),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: endpointCtrl,
-                    decoration: const InputDecoration(
-                      labelText: '接口路径（默认 /audio/speech）',
-                      isDense: true,
-                    ),
+                  onChanged: (_) => setD(() {}),
+                ),
+                if (insecureHttp) buildInsecureHttpWarningBanner(),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: endpointCtrl,
+                  decoration: _compactFormDecoration(
+                    ctx,
+                    labelText: '接口路径（默认 /audio/speech）',
                   ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: keyCtrl,
-                    obscureText: true,
-                    decoration: const InputDecoration(
-                      labelText: 'API Key（加密保存）',
-                      isDense: true,
-                    ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: keyCtrl,
+                  obscureText: true,
+                  decoration: _compactFormDecoration(
+                    ctx,
+                    labelText: 'API Key（加密保存）',
                   ),
-                  const SizedBox(height: 8),
-                  Row(children: [Text('供应商并发上限：$conc')]),
-                  Slider(
-                    value: conc.toDouble(),
-                    min: 1,
-                    max: 10,
-                    divisions: 9,
-                    label: '$conc',
-                    onChanged: (v) => setD(() => conc = v.round()),
-                  ),
-                ],
-              ),
+                ),
+                const SizedBox(height: 10),
+                Row(children: [Text('供应商并发上限：$conc')]),
+                Slider(
+                  value: conc.toDouble(),
+                  min: 1,
+                  max: 10,
+                  divisions: 9,
+                  label: '$conc',
+                  onChanged: (v) => setD(() => conc = v.round()),
+                ),
+              ],
             ),
             actions: [
               TextButton(
@@ -813,7 +1079,7 @@ Future<TtsModelConfig?> showTtsModelEditorDialog(
           );
 
   try {
-    final saved = await showDialog<bool>(
+    final saved = await _showAdaptiveFormModal<bool>(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setD) {
@@ -834,187 +1100,183 @@ Future<TtsModelConfig?> showTtsModelEditorDialog(
             }
           }
 
-          return AlertDialog(
-            title: Text(editingModel == null ? '新增 TTS 模型与音色' : '编辑 TTS 模型与音色'),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    crossAxisAlignment: CrossAxisAlignment.end,
-                    children: [
-                      Expanded(
-                        child: TextField(
-                          controller: modelIdCtrl,
-                          decoration: const InputDecoration(
-                            labelText: '远端模型 ID（如 hunyuan_male，保留大小写）',
-                            isDense: true,
-                          ),
-                          onChanged: (v) {
-                            if (editingModel == null &&
-                                voiceIdCtrl.text.trim().isEmpty) {
-                              voiceIdCtrl.text = deriveVoiceIdFromModel(v.trim());
-                            }
-                            if (v.trim().endsWith('_male')) {
-                              setD(() => gender = 'male');
-                            } else if (v.trim().endsWith('_female')) {
-                              setD(() => gender = 'female');
-                            }
-                          },
+          return _buildAdaptiveFormFrame(
+            context: ctx,
+            title: editingModel == null ? '新增 TTS 模型与音色' : '编辑 TTS 模型与音色',
+            body: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: modelIdCtrl,
+                        decoration: _compactFormDecoration(
+                          ctx,
+                          labelText: '远端模型 ID（保留大小写）',
                         ),
+                        onChanged: (v) {
+                          if (editingModel == null &&
+                              voiceIdCtrl.text.trim().isEmpty) {
+                            voiceIdCtrl.text = deriveVoiceIdFromModel(v.trim());
+                          }
+                          if (v.trim().endsWith('_male')) {
+                            setD(() => gender = 'male');
+                          } else if (v.trim().endsWith('_female')) {
+                            setD(() => gender = 'female');
+                          }
+                        },
                       ),
-                      if (provider.adapter != 'native_tts') ...[
-                        const SizedBox(width: 8),
-                        OutlinedButton.icon(
-                          key: const ValueKey('fetch-tts-models-btn'),
-                          onPressed: fetchingModels
-                              ? null
-                              : () async {
+                    ),
+                    if (provider.adapter != 'native_tts') ...[
+                      const SizedBox(width: 8),
+                      OutlinedButton.icon(
+                        key: const ValueKey('fetch-tts-models-btn'),
+                        onPressed: fetchingModels
+                            ? null
+                            : () async {
+                                setD(() {
+                                  fetchingModels = true;
+                                  fetchError = null;
+                                });
+                                try {
+                                  final list = await fetcher(
+                                    baseUrl: provider.baseUrl,
+                                    apiKey: (provider.apiKey ?? '').trim(),
+                                  );
+                                  if (!ctx.mounted) return;
                                   setD(() {
-                                    fetchingModels = true;
-                                    fetchError = null;
+                                    fetchingModels = false;
+                                    fetchedModels = list;
                                   });
-                                  try {
-                                    final list = await fetcher(
-                                      baseUrl: provider.baseUrl,
-                                      apiKey: (provider.apiKey ?? '').trim(),
+                                } catch (e) {
+                                  if (!ctx.mounted) return;
+                                  setD(() {
+                                    fetchingModels = false;
+                                    fetchError = '$e'.replaceFirst(
+                                      'FormatException: ',
+                                      '',
                                     );
-                                    if (!ctx.mounted) return;
-                                    setD(() {
-                                      fetchingModels = false;
-                                      fetchedModels = list;
-                                    });
-                                  } catch (e) {
-                                    if (!ctx.mounted) return;
-                                    setD(() {
-                                      fetchingModels = false;
-                                      fetchError = '$e'.replaceFirst(
-                                        'FormatException: ',
-                                        '',
-                                      );
-                                    });
-                                  }
-                                },
-                          style: OutlinedButton.styleFrom(
-                            visualDensity: VisualDensity.compact,
-                            padding: const EdgeInsets.symmetric(
-                              horizontal: 8,
-                              vertical: 10,
-                            ),
+                                  });
+                                }
+                              },
+                        style: OutlinedButton.styleFrom(
+                          visualDensity: VisualDensity.compact,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 8,
+                            vertical: 12,
                           ),
-                          icon: fetchingModels
-                              ? const SizedBox(
-                                  width: 14,
-                                  height: 14,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                  ),
-                                )
-                              : const Icon(
-                                  Icons.cloud_download_outlined,
-                                  size: 16,
+                        ),
+                        icon: fetchingModels
+                            ? const SizedBox(
+                                width: 14,
+                                height: 14,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
                                 ),
-                          label: Text(
-                            fetchingModels ? '获取中' : '获取模型',
-                            style: const TextStyle(fontSize: 11),
-                          ),
+                              )
+                            : const Icon(
+                                Icons.cloud_download_outlined,
+                                size: 16,
+                              ),
+                        label: Text(
+                          fetchingModels ? '获取中' : '拉取',
+                          style: const TextStyle(fontSize: 11),
                         ),
-                      ],
+                      ),
                     ],
-                  ),
-                  if (fetchError != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 6),
-                      child: Text(
-                        fetchError!,
-                        style: TextStyle(
-                          fontSize: 11,
-                          color: Colors.red.shade700,
-                        ),
-                      ),
-                    ),
-                  if (fetchedModels.isNotEmpty) ...[
-                    const SizedBox(height: 8),
-                    DropdownButtonFormField<String>(
-                      key: ValueKey(
-                        'tts-models-dropdown-${fetchedModels.length}-$selectedDropdown',
-                      ),
-                      initialValue: selectedDropdown,
-                      isExpanded: true,
-                      decoration: InputDecoration(
-                        labelText:
-                            '从 /v1/models 下拉选择（${fetchedModels.length} 个）',
-                        border: const OutlineInputBorder(),
-                        isDense: true,
-                      ),
-                      items: [
-                        for (final id in fetchedModels)
-                          DropdownMenuItem(
-                            value: id,
-                            child: Text(id, overflow: TextOverflow.ellipsis),
-                          ),
-                      ],
-                      onChanged: (v) {
-                        if (v == null) return;
-                        setD(() => applyPickedModelId(v));
-                      },
-                    ),
                   ],
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: voiceIdCtrl,
-                    decoration: const InputDecoration(
-                      labelText: '远端音色 ID（默认去掉 _female/_male 后缀）',
-                      isDense: true,
+                ),
+                if (fetchError != null)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      fetchError!,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: Colors.red.shade700,
+                      ),
                     ),
                   ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: nameCtrl,
-                    decoration: const InputDecoration(
-                      labelText: '显示名称（如 混元男声）',
-                      isDense: true,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
+                if (fetchedModels.isNotEmpty) ...[
+                  const SizedBox(height: 10),
                   DropdownButtonFormField<String>(
-                    initialValue: gender,
-                    decoration: const InputDecoration(
-                      labelText: '性别（用于角色分配与自动同性兜底）',
-                      border: OutlineInputBorder(),
-                      isDense: true,
+                    key: ValueKey(
+                      'tts-models-dropdown-${fetchedModels.length}-$selectedDropdown',
                     ),
-                    items: const [
-                      DropdownMenuItem(value: 'female', child: Text('女性 (female)')),
-                      DropdownMenuItem(value: 'male', child: Text('男性 (male)')),
-                      DropdownMenuItem(value: 'neutral', child: Text('中性 (neutral)')),
-                      DropdownMenuItem(value: 'unknown', child: Text('未知 (unknown)')),
+                    initialValue: selectedDropdown,
+                    isExpanded: true,
+                    decoration: _compactFormDecoration(
+                      ctx,
+                      labelText: '从 /v1/models 下拉选择（${fetchedModels.length} 个）',
+                    ),
+                    items: [
+                      for (final id in fetchedModels)
+                        DropdownMenuItem(
+                          value: id,
+                          child: Text(id, overflow: TextOverflow.ellipsis),
+                        ),
                     ],
                     onChanged: (v) {
-                      if (v != null) setD(() => gender = v);
+                      if (v == null) return;
+                      setD(() => applyPickedModelId(v));
                     },
                   ),
-                  const SizedBox(height: 8),
-                  TextField(
-                    controller: notesCtrl,
-                    decoration: const InputDecoration(
-                      labelText: '音色备注（帮助文本模型更准确匹配角色）',
-                      isDense: true,
-                    ),
-                  ),
-                  const SizedBox(height: 8),
-                  Row(children: [Text('模型子并发上限：$conc')]),
-                  Slider(
-                    value: conc.toDouble(),
-                    min: 1,
-                    max: 8,
-                    divisions: 7,
-                    label: '$conc',
-                    onChanged: (v) => setD(() => conc = v.round()),
-                  ),
                 ],
-              ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: voiceIdCtrl,
+                  decoration: _compactFormDecoration(
+                    ctx,
+                    labelText: '远端音色 ID（默认去掉 _female/_male 后缀）',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: nameCtrl,
+                  decoration: _compactFormDecoration(
+                    ctx,
+                    labelText: '显示名称（如 混元男声）',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                DropdownButtonFormField<String>(
+                  initialValue: gender,
+                  decoration: _compactFormDecoration(
+                    ctx,
+                    labelText: '性别（用于角色分配与自动同性兜底）',
+                  ),
+                  items: const [
+                    DropdownMenuItem(value: 'female', child: Text('女性 (female)')),
+                    DropdownMenuItem(value: 'male', child: Text('男性 (male)')),
+                    DropdownMenuItem(value: 'neutral', child: Text('中性 (neutral)')),
+                    DropdownMenuItem(value: 'unknown', child: Text('未知 (unknown)')),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) setD(() => gender = v);
+                  },
+                ),
+                const SizedBox(height: 10),
+                TextField(
+                  controller: notesCtrl,
+                  decoration: _compactFormDecoration(
+                    ctx,
+                    labelText: '音色备注（帮助文本模型更准确匹配角色）',
+                  ),
+                ),
+                const SizedBox(height: 10),
+                Row(children: [Text('模型子并发上限：$conc')]),
+                Slider(
+                  value: conc.toDouble(),
+                  min: 1,
+                  max: 8,
+                  divisions: 7,
+                  label: '$conc',
+                  onChanged: (v) => setD(() => conc = v.round()),
+                ),
+              ],
             ),
             actions: [
               TextButton(

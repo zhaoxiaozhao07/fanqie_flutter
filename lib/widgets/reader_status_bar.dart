@@ -24,12 +24,18 @@ class ReaderStatusBar extends StatelessWidget {
   });
 
   @override
-  Widget build(BuildContext context) => Container(
-    key: const ValueKey('reader-status-bar'),
-    height: math.max(22, MediaQuery.textScalerOf(context).scale(10) * 1.4 + 4),
-    padding: const EdgeInsets.symmetric(horizontal: 16),
-    color: backgroundColor,
-    child: LayoutBuilder(
+  Widget build(BuildContext context) {
+    final bottomInset = MediaQuery.paddingOf(context).bottom;
+    final barHeight = math.max(
+      22.0,
+      MediaQuery.textScalerOf(context).scale(10) * 1.4 + 4,
+    );
+    return Container(
+      key: const ValueKey('reader-status-bar'),
+      height: barHeight + bottomInset,
+      padding: EdgeInsets.fromLTRB(16, 0, 16, bottomInset),
+      color: backgroundColor,
+      child: LayoutBuilder(
       builder: (context, bounds) {
         final style = TextStyle(fontSize: 10, height: 1.2, color: textColor);
         return Row(
@@ -71,5 +77,6 @@ class ReaderStatusBar extends StatelessWidget {
         );
       },
     ),
-  );
+    );
+  }
 }

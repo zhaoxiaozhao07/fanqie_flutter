@@ -9,6 +9,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
+import android.content.pm.ServiceInfo
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.media.AudioAttributes
 import android.media.AudioFocusRequest
 import android.media.AudioManager
@@ -17,6 +20,7 @@ import android.media.MediaPlayer
 import android.media.PlaybackParams
 import android.media.session.MediaSession
 import android.media.session.PlaybackState
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
@@ -28,6 +32,7 @@ import android.speech.tts.UtteranceProgressListener
 import io.flutter.plugin.common.MethodChannel
 import java.io.File
 import java.util.Locale
+import java.util.concurrent.Executors
 
 /** Native audio owner. All callbacks include the Dart playback token. */
 class ReaderPlaybackService : Service() {
@@ -71,9 +76,12 @@ class ReaderPlaybackService : Service() {
     private lateinit var session: MediaSession
     private lateinit var audio: AudioManager
     private lateinit var wakeLock: PowerManager.WakeLock
+    private var wifiLock: WifiManager.WifiLock? = null
     private var focusRequest: AudioFocusRequest? = null
     private var focusGeneration = 0
     private var legacyFocusListener: AudioManager.OnAudioFocusChangeListener? = null
+    private var ducked = false
+    private var pausedByTransientFocus = false
     private var player: MediaPlayer? = null
     private var nextPlayer: MediaPlayer? = null
     private var nextId: String? = null
@@ -81,6 +89,7 @@ class ReaderPlaybackService : Service() {
     private var nextPrepared = false
     private var nextGapMs = 0L
     private var pendingGapRunnable: Runnable? = null
+    private var suspendedGapRunnable: Runnable? = null
     private var tts: TextToSpeech? = null
     private var ttsReady = false
     private var currentId: String? = null
@@ -95,16 +104,93 @@ class ReaderPlaybackService : Service() {
     private var deadline = 0L
     private var title = "听书"
     private var subtitle = "准备播放"
+    private var coverPath: String? = null
+    private var coverBitmap: Bitmap? = null
+    private var metadataDurationMs = 0L
+    private var metadataPositionMs = 0L
+    private val coverExecutor = Executors.newSingleThreadExecutor()
+
+    private fun effectiveVolume(): Float =
+        if (ducked) (volume * 0.25f).coerceIn(0.05f, 1f) else volume
+
+    private val lockHeartbeat = object : Runnable {
+        override fun run() {
+            if (playing || pausedByTransientFocus) {
+                try { wakeLock.acquire(600000L) } catch (_: Exception) {}
+                main.postDelayed(this, 240000L)
+            }
+        }
+    }
 
     private fun focusListener(generation: Int) = AudioManager.OnAudioFocusChangeListener { change ->
-        if (generation == focusGeneration &&
-            (change == AudioManager.AUDIOFOCUS_LOSS || change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT ||
-            change == AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK)) {
-            val id = currentId
-            pauseOutput()
-            ReaderRuntime.emit("onAudioFocusLost", mapOf("id" to id))
+        if (generation != focusGeneration) return@OnAudioFocusChangeListener
+        when (change) {
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK -> {
+                // 微信提示音或导航轻播报时临时压低音量而不粗暴暂停
+                if (playing && player != null) {
+                    ducked = true
+                    val vol = effectiveVolume()
+                    try { player?.setVolume(vol, vol) } catch (_: Exception) {}
+                }
+            }
+            AudioManager.AUDIOFOCUS_LOSS_TRANSIENT -> {
+                // 短暂打断（如来电/语音消息）：挂起播放与段间切换，并同步通知 Dart 暂停看门狗
+                val gap = pendingGapRunnable
+                if (gap != null) {
+                    main.removeCallbacks(gap)
+                    pendingGapRunnable = null
+                    suspendedGapRunnable = gap
+                    pausedByTransientFocus = true
+                    playing = false
+                    updateNotification()
+                    ReaderRuntime.emit("onAudioTransientPause", mapOf("id" to currentId))
+                } else if (playing) {
+                    pausedByTransientFocus = true
+                    try { if (player?.isPlaying == true) player?.pause() } catch (_: Exception) {}
+                    playing = false
+                    updateNotification()
+                    ReaderRuntime.emit("onAudioTransientPause", mapOf("id" to currentId))
+                }
+            }
+            AudioManager.AUDIOFOCUS_GAIN -> {
+                if (ducked) {
+                    ducked = false
+                    val vol = effectiveVolume()
+                    try { player?.setVolume(vol, vol) } catch (_: Exception) {}
+                }
+                if (pausedByTransientFocus) {
+                    pausedByTransientFocus = false
+                    val suspendedGap = suspendedGapRunnable
+                    suspendedGapRunnable = null
+                    if (suspendedGap != null) {
+                        renewPlaybackLocks()
+                        ReaderRuntime.emit("onAudioTransientResume", mapOf("id" to currentId))
+                        suspendedGap.run()
+                    } else {
+                        val p = player
+                        if (p != null && currentId != null) {
+                            try {
+                                renewPlaybackLocks()
+                                val vol = effectiveVolume()
+                                p.setVolume(vol, vol)
+                                p.start()
+                                playing = true
+                                updateNotification()
+                                ReaderRuntime.emit("onAudioTransientResume", mapOf("id" to currentId))
+                            } catch (_: Exception) {}
+                        }
+                    }
+                }
+            }
+            AudioManager.AUDIOFOCUS_LOSS -> {
+                ducked = false
+                pausedByTransientFocus = false
+                suspendedGapRunnable = null
+                val id = currentId
+                pauseOutput()
+                ReaderRuntime.emit("onAudioFocusLost", mapOf("id" to id))
+            }
         }
-        // Focus gain does not auto-play: the user explicitly resumes.
     }
     private val noisy = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
@@ -138,6 +224,20 @@ class ReaderPlaybackService : Service() {
         audio = getSystemService(Context.AUDIO_SERVICE) as AudioManager
         wakeLock = (getSystemService(Context.POWER_SERVICE) as PowerManager)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "fanqie:reader-playback").apply { setReferenceCounted(false) }
+        try {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+            @Suppress("DEPRECATION")
+            val lockMode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wifiManager?.createWifiLock(lockMode, "fanqie:reader-wifi")?.apply {
+                setReferenceCounted(false)
+            }
+        } catch (_: Exception) {
+            wifiLock = null
+        }
         if (Build.VERSION.SDK_INT >= 26) {
             (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).createNotificationChannel(
                 NotificationChannel(CHANNEL, "听书播放", NotificationManager.IMPORTANCE_LOW))
@@ -150,13 +250,32 @@ class ReaderPlaybackService : Service() {
                 override fun onPause() { pauseOutput(); ReaderRuntime.emit("onMediaPause") }
                 override fun onSkipToNext() { ReaderRuntime.emit("onMediaNext") }
                 override fun onSkipToPrevious() { ReaderRuntime.emit("onMediaPrev") }
+                override fun onSeekTo(pos: Long) {
+                    val p = player ?: return
+                    try {
+                        val dur = p.duration.coerceAtLeast(0)
+                        if (dur <= 0) return
+                        val target = pos.toInt().coerceIn(0, dur)
+                        p.seekTo(target)
+                        metadataPositionMs = target.toLong()
+                        updateNotification()
+                        ReaderRuntime.emit(
+                            "onAudioSeeked",
+                            mapOf("id" to currentId, "positionMs" to target)
+                        )
+                    } catch (_: Exception) {}
+                }
                 override fun onStop() { stopPlayback(); ReaderRuntime.emit("onMediaStop"); stopSelf() }
             })
             isActive = true
         }
         if (Build.VERSION.SDK_INT >= 33) registerReceiver(noisy, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY), RECEIVER_NOT_EXPORTED)
         else @Suppress("DEPRECATION") registerReceiver(noisy, IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY))
-        startForeground(NOTIFICATION, notification())
+        if (Build.VERSION.SDK_INT >= 34) {
+            startForeground(NOTIFICATION, notification(), ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK)
+        } else {
+            startForeground(NOTIFICATION, notification())
+        }
         // Remove abandoned synthesized audio from a previous process, not user files.
         cacheDir.listFiles()?.filter { it.name.startsWith("reader-tts-") && it.extension == "wav" }?.forEach { it.delete() }
         val commands = pending.toList(); pending.clear()
@@ -240,9 +359,33 @@ class ReaderPlaybackService : Service() {
                 }
                 "resumeAudio" -> {
                     if (args["id"] != currentId || player == null || !requestFocus()) result.success(false)
-                    else { player!!.start(); playing = true; updateNotification(); result.success(true) }
+                    else { renewPlaybackLocks(); player!!.start(); playing = true; updateNotification(); result.success(true) }
                 }
                 "setAudioVolume" -> { setVolume((args["volume"] as? Number)?.toFloat() ?: 1f); result.success(true) }
+                "seekAudio" -> {
+                    val p = player
+                    if (p == null || currentId == null) {
+                        result.success(mapOf("ok" to false))
+                    } else {
+                        val dur = try { p.duration } catch (_: Exception) { 0 }
+                        if (dur <= 0) {
+                            result.success(mapOf("ok" to false))
+                        } else {
+                            val cur = try { p.currentPosition } catch (_: Exception) { 0 }
+                            val absPos = (args["positionMs"] as? Number)?.toInt()
+                            val deltaMs = (args["deltaMs"] as? Number)?.toInt()
+                            val target = when {
+                                absPos != null -> absPos
+                                deltaMs != null -> cur + deltaMs
+                                else -> cur
+                            }.coerceIn(0, (dur - 80).coerceAtLeast(0))
+                            p.seekTo(target)
+                            metadataPositionMs = target.toLong()
+                            updateNotification()
+                            result.success(mapOf("ok" to true, "positionMs" to target, "durationMs" to dur))
+                        }
+                    }
+                }
                 "setSleepDeadline" -> {
                     deadline = (args["milliseconds"] as? Number)?.toLong() ?: 0L
                     main.removeCallbacks(sleepTick)
@@ -253,6 +396,13 @@ class ReaderPlaybackService : Service() {
                     title = args["title"] as? String ?: "听书"
                     subtitle = args["subtitle"] as? String ?: ""
                     playing = args["isPlaying"] == true
+                    val passedDur = (args["durationMs"] as? Number)?.toLong()
+                    if (passedDur != null && passedDur >= 0L) metadataDurationMs = passedDur
+                    val passedPos = (args["positionMs"] as? Number)?.toLong()
+                    if (passedPos != null && passedPos >= 0L) metadataPositionMs = passedPos
+                    if (args.containsKey("coverPath")) {
+                        loadCoverAsync(args["coverPath"] as? String)
+                    }
                     updateNotification()
                     result.success(true)
                 }
@@ -276,6 +426,15 @@ class ReaderPlaybackService : Service() {
             if (id == currentId) {
                 val file = File.createTempFile("reader-tts-", ".wav", cacheDir)
                 speechFile = file
+                val voiceId = (args["voice"] as? String)?.trim() ?: ""
+                if (voiceId.isNotEmpty()) {
+                    val matched = tts?.voices?.firstOrNull { it.name == voiceId }
+                    if (matched != null) {
+                        tts?.voice = matched
+                    }
+                } else {
+                    tts?.setLanguage(Locale.SIMPLIFIED_CHINESE)
+                }
                 tts!!.setSpeechRate(((args["rate"] as? Number)?.toFloat() ?: 1f).coerceIn(.5f, 2f))
                 val accepted = tts!!.synthesizeToFile(text, Bundle(), file, id)
                 if (accepted != TextToSpeech.SUCCESS) finishStart(id, false)
@@ -391,6 +550,7 @@ class ReaderPlaybackService : Service() {
     private fun clearPreloaded() {
         pendingGapRunnable?.let { main.removeCallbacks(it) }
         pendingGapRunnable = null
+        suspendedGapRunnable = null
         nextId = null
         nextAfterId = null
         nextPrepared = false
@@ -458,7 +618,9 @@ class ReaderPlaybackService : Service() {
             try { prev?.release() } catch (_: Exception) {}
             attachActiveListeners(next, targetId)
             try {
-                next.setVolume(volume, volume)
+                renewPlaybackLocks()
+                next.setVolume(if (ducked) (volume * 0.25f).coerceIn(0.05f, 1f) else volume,
+                    if (ducked) (volume * 0.25f).coerceIn(0.05f, 1f) else volume)
                 next.start()
                 playing = true
                 applyPlaybackRate(next)
@@ -508,9 +670,35 @@ class ReaderPlaybackService : Service() {
         val result = pendingStart; pendingStart = null
         result?.success(success)
     }
+    /// 播放期间续期 CPU 与 Wi-Fi 唤醒锁，并启动 4 分钟心跳续租防止超长单段音频中途掉锁
+    private fun renewPlaybackLocks() {
+        try {
+            wakeLock.acquire(600000L)
+        } catch (_: Exception) {}
+        try {
+            if (wifiLock?.isHeld == false) {
+                wifiLock?.acquire()
+            }
+        } catch (_: Exception) {}
+        main.removeCallbacks(lockHeartbeat)
+        main.postDelayed(lockHeartbeat, 240000L)
+    }
+
+    private fun releasePlaybackLocks() {
+        main.removeCallbacks(lockHeartbeat)
+        try {
+            if (wakeLock.isHeld) wakeLock.release()
+        } catch (_: Exception) {}
+        try {
+            if (wifiLock?.isHeld == true) wifiLock?.release()
+        } catch (_: Exception) {}
+    }
+
     private fun requestFocus(): Boolean {
+        ducked = false
+        pausedByTransientFocus = false
         val listener = focusListener(++focusGeneration)
-        wakeLock.acquire(300000L)
+        renewPlaybackLocks()
         val granted = if (Build.VERSION.SDK_INT >= 26) {
             val request = AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
                 .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_MEDIA)
@@ -527,12 +715,14 @@ class ReaderPlaybackService : Service() {
     }
     private fun abandonFocus() {
         ++focusGeneration
+        ducked = false
+        pausedByTransientFocus = false
         if (Build.VERSION.SDK_INT >= 26) focusRequest?.let { audio.abandonAudioFocusRequest(it) }
         else legacyFocusListener?.let {
             @Suppress("DEPRECATION") audio.abandonAudioFocus(it)
         }
         focusRequest = null
-        if (wakeLock.isHeld) wakeLock.release()
+        releasePlaybackLocks()
     }
     private fun pauseOutput() {
         clearPreloaded()
@@ -558,17 +748,58 @@ class ReaderPlaybackService : Service() {
     }
     private fun setVolume(value: Float) {
         volume = value.coerceIn(0f, 1f)
-        try { player?.setVolume(volume, volume) } catch (_: Exception) {}
+        val vol = effectiveVolume()
+        try { player?.setVolume(vol, vol) } catch (_: Exception) {}
     }
     private fun action(name: String): PendingIntent = PendingIntent.getService(this, name.hashCode(),
         Intent(this, ReaderPlaybackService::class.java).setAction(name), PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE)
 
+    /// 异步按安全分辨率解码书籍封面图并缓存，供锁屏与通知栏媒体卡片展示
+    private fun loadCoverAsync(path: String?) {
+        val clean = path?.trim()?.takeIf { it.isNotEmpty() }
+        if (clean == coverPath) return
+        coverPath = clean
+        if (clean == null) {
+            coverBitmap = null
+            return
+        }
+        coverExecutor.execute {
+            val decoded = try {
+                val file = File(clean)
+                if (!file.isFile || file.length() <= 0L) {
+                    null
+                } else {
+                    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                    BitmapFactory.decodeFile(file.absolutePath, bounds)
+                    val maxDim = maxOf(bounds.outWidth, bounds.outHeight)
+                    var sample = 1
+                    while (maxDim / sample > 256) {
+                        sample *= 2
+                    }
+                    val opts = BitmapFactory.Options().apply {
+                        inSampleSize = sample
+                        inPreferredConfig = Bitmap.Config.RGB_565
+                    }
+                    BitmapFactory.decodeFile(file.absolutePath, opts)
+                }
+            } catch (_: Exception) {
+                null
+            }
+            main.post {
+                if (instance === this && coverPath == clean) {
+                    coverBitmap = decoded
+                    updateNotification()
+                }
+            }
+        }
+    }
+
     private fun notification(): Notification {
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL) else @Suppress("DEPRECATION") Notification.Builder(this)
         val launch = packageManager.getLaunchIntentForPackage(packageName)!!
-        return builder.setSmallIcon(android.R.drawable.ic_media_play)
+        builder.setSmallIcon(android.R.drawable.ic_media_play)
             .setContentTitle(title).setContentText(subtitle).setOnlyAlertOnce(true)
-            .setCategory(Notification.CATEGORY_TRANSPORT).setVisibility(Notification.VISIBILITY_PRIVATE)
+            .setCategory(Notification.CATEGORY_TRANSPORT).setVisibility(Notification.VISIBILITY_PUBLIC)
             .setContentIntent(PendingIntent.getActivity(this, 0, launch, PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE))
             .setDeleteIntent(action("stop"))
             .addAction(Notification.Action.Builder(android.R.drawable.ic_media_previous, "上一段", action("previous")).build())
@@ -577,19 +808,46 @@ class ReaderPlaybackService : Service() {
             .addAction(Notification.Action.Builder(android.R.drawable.ic_media_next, "下一段", action("next")).build())
             .addAction(Notification.Action.Builder(android.R.drawable.ic_menu_close_clear_cancel, "停止", action("stop")).build())
             .setStyle(Notification.MediaStyle().setMediaSession(session.sessionToken).setShowActionsInCompactView(0, 1, 2))
-            .build()
+        coverBitmap?.let { builder.setLargeIcon(it) }
+        return builder.build()
     }
     private fun updateNotification() {
-        session.setMetadata(MediaMetadata.Builder().putString(MediaMetadata.METADATA_KEY_TITLE, title)
-            .putString(MediaMetadata.METADATA_KEY_ARTIST, subtitle).build())
-        session.setPlaybackState(PlaybackState.Builder().setActions(PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
-            PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SKIP_TO_NEXT or PlaybackState.ACTION_SKIP_TO_PREVIOUS or PlaybackState.ACTION_STOP)
-            .setState(if (playing) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED, PlaybackState.PLAYBACK_POSITION_UNKNOWN, 1f).build())
+        val p = player
+        val liveDur = try { if (p != null) p.duration.toLong() else 0L } catch (_: Exception) { 0L }
+        val livePos = try { if (p != null) p.currentPosition.toLong() else 0L } catch (_: Exception) { 0L }
+        val effectiveDur = if (liveDur > 0L) liveDur else metadataDurationMs
+        val effectivePos = if (liveDur > 0L) livePos.coerceIn(0L, liveDur) else metadataPositionMs.coerceAtLeast(0L)
+
+        val metaBuilder = MediaMetadata.Builder()
+            .putString(MediaMetadata.METADATA_KEY_TITLE, title)
+            .putString(MediaMetadata.METADATA_KEY_ARTIST, subtitle)
+        if (effectiveDur > 0L) {
+            metaBuilder.putLong(MediaMetadata.METADATA_KEY_DURATION, effectiveDur)
+        }
+        coverBitmap?.let { metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, it) }
+        session.setMetadata(metaBuilder.build())
+
+        val actions = PlaybackState.ACTION_PLAY or PlaybackState.ACTION_PAUSE or
+            PlaybackState.ACTION_PLAY_PAUSE or PlaybackState.ACTION_SKIP_TO_NEXT or
+            PlaybackState.ACTION_SKIP_TO_PREVIOUS or PlaybackState.ACTION_STOP or
+            PlaybackState.ACTION_SEEK_TO
+        session.setPlaybackState(
+            PlaybackState.Builder()
+                .setActions(actions)
+                .setState(
+                    if (playing) PlaybackState.STATE_PLAYING else PlaybackState.STATE_PAUSED,
+                    if (effectiveDur > 0L) effectivePos else PlaybackState.PLAYBACK_POSITION_UNKNOWN,
+                    if (playing) playbackRate else 0f
+                )
+                .build()
+        )
         (getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager).notify(NOTIFICATION, notification())
     }
     override fun onDestroy() {
         main.removeCallbacks(sleepTick)
         stopPlayback()
+        coverExecutor.shutdownNow()
+        coverBitmap = null
         tts?.shutdown(); tts = null
         session.isActive = false; session.release()
         try { unregisterReceiver(noisy) } catch (_: Exception) {}

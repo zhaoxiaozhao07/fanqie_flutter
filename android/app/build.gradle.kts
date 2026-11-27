@@ -57,9 +57,9 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
-            // 禁用代码和资源压缩
-            isMinifyEnabled = false
-            isShrinkResources = false
+            // 开启 R8 代码压缩与资源压缩以缩减 Android 安装包体积
+            isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"

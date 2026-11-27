@@ -156,8 +156,8 @@ class _ReaderBackupDialogState extends State<ReaderBackupDialog> {
     canPop: !_busy,
     child: AlertDialog(
       title: const Text('备份与恢复'),
-      content: SizedBox(
-        width: 500,
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 500),
         child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,

@@ -71,6 +71,7 @@ import '../services/app_theme_service.dart';
 import '../services/text_replace_rule_service.dart';
 import '../widgets/text_replace_rules_dialog.dart';
 import '../widgets/ai_reading_assistant_sheet.dart';
+import '../widgets/quote_share_card_sheet.dart';
 import '../models/reading_selection.dart';
 import '../widgets/reader_undo.dart';
 
@@ -87,6 +88,7 @@ class ReaderScreen extends StatefulWidget {
   final Future<ChapterCommentStats?> Function(Chapter chapter)?
   chapterCommentStatsLoader;
   final bool offlineOnly;
+  final bool autoStartAudio;
   final TtsService? ttsService;
   final ImmersivePlaybackCoordinator? immersiveService;
 
@@ -103,6 +105,7 @@ class ReaderScreen extends StatefulWidget {
     this.chapterContentLoader,
     this.chapterCommentStatsLoader,
     this.offlineOnly = false,
+    this.autoStartAudio = false,
     this.ttsService,
     this.immersiveService,
   });
@@ -120,6 +123,7 @@ class _ReaderScreenState extends State<ReaderScreen>
   PageRoute<dynamic>? _observedRoute;
   bool _readerRouteActive = true;
   bool _dependenciesReady = false;
+  bool _autoStartAudioTriggered = false;
   Size? _desktopViewport;
   int _desktopColumns = 1;
   bool _readingFullScreen = false;
@@ -265,10 +269,12 @@ class _ReaderScreenState extends State<ReaderScreen>
   final Map<int, GlobalKey> _chapterKeys = {};
   // 当前视口已挂载段落的轻量级上下文追踪表（仅保存视口附近 ~15-25 个段落）
   final Map<String, _MountedParagraphInfo> _mountedParagraphs = {};
-  // 按需激活长按自由选词的段落 key（平时 100% 纯 Text.rich 零开销渲染）
+  // 当前选词状态通知器（由统一跨段 SelectionArea 控制器同步驱动）
   final ValueNotifier<String?> _activeSelectableParaNotifier =
       ValueNotifier<String?>(null);
-  final GlobalKey _activeSelectableTextKey = GlobalKey();
+  // 移动端翻页模式当前活跃页通知器，确保仅当前可见页接入外层 SelectionArea
+  final ActivePageSelectionNotifier _activePageSpreadNotifier =
+      ActivePageSelectionNotifier();
   // 段评/章评统计异步更新局部通知器，避免滚动途中全屏 setState
   final ValueNotifier<int> _commentStatsVersionNotifier = ValueNotifier<int>(0);
 
@@ -630,6 +636,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     _activeChapterNotifier.dispose();
     _statusTextNotifier.dispose();
     _activeSelectableParaNotifier.dispose();
+    _activePageSpreadNotifier.dispose();
     _commentStatsVersionNotifier.dispose();
     _statusTimer?.cancel();
     _highlightTimer?.cancel();
@@ -2718,6 +2725,7 @@ class _ReaderScreenState extends State<ReaderScreen>
         if (!_isPageMode) _restoreVerticalPosition();
         _triggerSilentPrefetch(index);
         if (!_isPageMode) _autoAppendNextChapter();
+        _maybeAutoStartAudio();
       }
     } finally {
       if (mounted && generation == _chapterOpenGeneration) {
@@ -2733,11 +2741,6 @@ class _ReaderScreenState extends State<ReaderScreen>
     if (!_scrollController.hasClients) return;
     if (_restoringPosition) return;
     _schedulePositionSave();
-
-    // 滚动开始时自动收起已激活的段落选词句柄，保持 100% 轻量绘制
-    if (_activeSelectableParaNotifier.value != null) {
-      _activeSelectableParaNotifier.value = null;
-    }
 
     final pos = _scrollController.position;
     final currentPixels = pos.pixels;
@@ -3382,24 +3385,43 @@ class _ReaderScreenState extends State<ReaderScreen>
   }
 
   void _dismissReaderSelection() {
-    if (ReaderPlatform.isDesktop) _desktopSelectionController.clear();
+    _desktopSelectionController.clear();
     _activeSelectableParaNotifier.value = null;
   }
 
-  Widget _desktopSelection(Widget child, {Key? key}) {
-    if (!ReaderPlatform.isDesktop) return child;
+  Widget _desktopSelection(
+    Widget child, {
+    Key? key,
+    bool enableBlankTap = true,
+    bool enableTouchTap = false,
+  }) {
     return DesktopReaderSelection(
       key: key,
       controller: _desktopSelectionController,
-      onBlankTap: (position) {
-        if (_desktopSelectionController.hasSelection) return;
-        _desktopFocus.requestFocus();
-        if (_isPageMode) {
-          _pageViewKey.currentState?.handleContentTap(position);
-        } else {
-          _toggleControls();
-        }
-      },
+      onBlankTap: enableBlankTap
+          ? (position) {
+              if (_desktopSelectionController.hasSelection) return;
+              if (ReaderPlatform.isDesktop) _desktopFocus.requestFocus();
+              if (_isPageMode) {
+                _pageViewKey.currentState?.handleContentTap(position);
+              } else {
+                _toggleControls();
+              }
+            }
+          : null,
+      onTouchTap: enableTouchTap
+          ? (position, pointer) {
+              if (_desktopSelectionController.hasSelection) return;
+              if (_isPageMode) {
+                _pageViewKey.currentState?.handleContentTap(
+                  position,
+                  pointer: pointer,
+                );
+              } else {
+                _toggleControls();
+              }
+            }
+          : null,
       singleSelectionMenu: (context, anchors, range, dismiss) =>
           _buildDarkBubbleMenu(
             context: context,
@@ -3417,9 +3439,7 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  Widget _nonSelectable(Widget child) => ReaderPlatform.isDesktop
-      ? SelectionContainer.disabled(child: child)
-      : child;
+  Widget _nonSelectable(Widget child) => SelectionContainer.disabled(child: child);
 
   Widget _desktopMultipleSelectionMenu(
     BuildContext context,
@@ -3447,6 +3467,24 @@ class _ReaderScreenState extends State<ReaderScreen>
     } on FormatException catch (e) {
       error = e.message;
     }
+    final existingSpanNote = captured == null
+        ? null
+        : _cachedNotes.where((n) {
+            return n.chapterIndex == captured!.chapter &&
+                n.paragraphIndex == captured.firstParagraph &&
+                n.endParagraphIndex == captured.lastParagraph &&
+                n.startOffset == captured.start &&
+                n.endOffset == captured.end;
+          }).firstOrNull;
+    final selectedAllText =
+        captured?.text ?? _desktopSelectionController.selectedText.trim();
+    final messenger = ScaffoldMessenger.of(context);
+    final btnStyle = TextButton.styleFrom(
+      foregroundColor: Colors.white,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      minimumSize: const Size(44, 44),
+    );
+
     return TextSelectionToolbar(
       anchorAbove: anchors.primaryAnchor,
       anchorBelow: anchors.secondaryAnchor ?? anchors.primaryAnchor,
@@ -3458,36 +3496,77 @@ class _ReaderScreenState extends State<ReaderScreen>
           decoration: BoxDecoration(
             color: const Color(0xFF232326),
             borderRadius: BorderRadius.circular(20),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withValues(alpha: 0.45),
+                blurRadius: 10,
+                offset: const Offset(0, 3),
+              ),
+            ],
           ),
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
           child: Wrap(
             crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 8,
+            spacing: 2,
+            runSpacing: 2,
             children: [
               TextButton.icon(
                 key: const ValueKey('desktop-copy-paragraphs'),
-                style: TextButton.styleFrom(foregroundColor: Colors.white),
+                style: btnStyle,
                 onPressed: () async {
                   await _desktopSelectionController.copy();
                   dismiss();
+                  if (mounted) {
+                    messenger.showSnackBar(
+                      const SnackBar(
+                        content: Text('已复制多段文本'),
+                        duration: Duration(seconds: 1),
+                      ),
+                    );
+                  }
                 },
-                icon: const Icon(Icons.copy, size: 16),
-                label: const Text('复制'),
+                icon: const Icon(Icons.copy_rounded, size: 15),
+                label: const Text('复制', style: TextStyle(fontSize: 13)),
               ),
               if (captured != null) ...[
-                TextButton.icon(
-                  key: const ValueKey('desktop-highlight-range'),
-                  style: TextButton.styleFrom(foregroundColor: Colors.white),
-                  onPressed: () {
-                    dismiss();
-                    unawaited(_saveReadingSelection(captured!));
-                  },
-                  icon: const Icon(Icons.format_underlined, size: 16),
-                  label: const Text('跨段划线'),
-                ),
+                if (existingSpanNote != null)
+                  TextButton.icon(
+                    style: btnStyle,
+                    onPressed: () async {
+                      dismiss();
+                      try {
+                        final undo = await _bookmarkService.deleteNotes(
+                          widget.book.bookId,
+                          {existingSpanNote.id},
+                        );
+                        if (mounted && undo != null) {
+                          showReaderUndo(this.context, '跨段划线已移入回收站', [undo]);
+                        }
+                      } catch (_) {
+                        if (mounted) {
+                          messenger.showSnackBar(
+                            const SnackBar(content: Text('删除未完成，原批注保留')),
+                          );
+                        }
+                      }
+                    },
+                    icon: const Icon(Icons.format_clear_rounded, size: 15),
+                    label: const Text('取消划线', style: TextStyle(fontSize: 13)),
+                  )
+                else
+                  TextButton.icon(
+                    key: const ValueKey('desktop-highlight-range'),
+                    style: btnStyle,
+                    onPressed: () {
+                      dismiss();
+                      unawaited(_saveReadingSelection(captured!));
+                    },
+                    icon: const Icon(Icons.format_underlined, size: 15),
+                    label: const Text('跨段划线', style: TextStyle(fontSize: 13)),
+                  ),
                 TextButton.icon(
                   key: const ValueKey('desktop-note-range'),
-                  style: TextButton.styleFrom(foregroundColor: Colors.white),
+                  style: btnStyle,
                   onPressed: () async {
                     final snapshot = captured!;
                     _beginReaderPanel();
@@ -3506,14 +3585,50 @@ class _ReaderScreenState extends State<ReaderScreen>
                       if (mounted) _endReaderPanel();
                     }
                   },
-                  icon: const Icon(Icons.note_add_outlined, size: 16),
-                  label: const Text('跨段笔记'),
+                  icon: const Icon(Icons.note_add_outlined, size: 15),
+                  label: const Text('跨段笔记', style: TextStyle(fontSize: 13)),
                 ),
               ],
-              Text(
-                error ?? '同章跨段选区 · 原文坐标保持',
-                style: const TextStyle(color: Colors.white70, fontSize: 12),
-              ),
+              if (selectedAllText.isNotEmpty) ...[
+                TextButton.icon(
+                  style: btnStyle,
+                  onPressed: () {
+                    dismiss();
+                    _openAiReadingAssistant(initialTerm: selectedAllText);
+                  },
+                  icon: const Icon(Icons.auto_awesome_outlined, size: 15),
+                  label: const Text('AI 速查', style: TextStyle(fontSize: 13)),
+                ),
+                TextButton.icon(
+                  style: btnStyle,
+                  onPressed: () {
+                    dismiss();
+                    final chIdx = captured?.chapter ?? ranges.first.chapterIndex;
+                    final chapterTitle =
+                        (chIdx >= 0 && chIdx < widget.chapters.length)
+                        ? widget.chapters[chIdx].title
+                        : null;
+                    _beginReaderPanel();
+                    QuoteShareCardSheet.show(
+                      this.context,
+                      quote: selectedAllText,
+                      bookName: widget.book.bookName,
+                      author: widget.book.author,
+                      chapterTitle: chapterTitle,
+                    ).whenComplete(_endReaderPanel);
+                  },
+                  icon: const Icon(Icons.share_outlined, size: 15),
+                  label: const Text('分享卡片', style: TextStyle(fontSize: 13)),
+                ),
+              ],
+              if (error != null || ReaderPlatform.isDesktop)
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 6),
+                  child: Text(
+                    error ?? '同章跨段选区 · 原文坐标保持',
+                    style: const TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                ),
             ],
           ),
         ),
@@ -4101,7 +4216,31 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   @override
   Widget build(BuildContext context) {
-    if (!ReaderPlatform.isDesktop) return _buildReaderScaffold(context);
+    if (!ReaderPlatform.isDesktop) {
+      return ListenableBuilder(
+        listenable: Listenable.merge([
+          _controlsNotifier,
+          _activeSelectableParaNotifier,
+        ]),
+        builder: (context, child) {
+          final hasSelection = _activeSelectableParaNotifier.value != null;
+          final controlsVisible = _controlsNotifier.value;
+          return PopScope(
+            canPop: !controlsVisible && !hasSelection,
+            onPopInvokedWithResult: (didPop, _) {
+              if (didPop) return;
+              if (_activeSelectableParaNotifier.value != null) {
+                _dismissReaderSelection();
+              } else if (_showControls) {
+                _showControls = false;
+              }
+            },
+            child: child!,
+          );
+        },
+        child: _buildReaderScaffold(context),
+      );
+    }
     return LayoutBuilder(
       builder: (context, constraints) {
         final directoryVisible = _desktopDirectoryOpen && !_readingFullScreen;
@@ -5162,6 +5301,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                     ),
                   ),
                 ),
+                enableTouchTap: !ReaderPlatform.isDesktop,
               ),
             ),
           ),
@@ -5636,7 +5776,8 @@ class _ReaderScreenState extends State<ReaderScreen>
     );
   }
 
-  /// 按需激活的长按自由选词段落组件：默认零开销 Text.rich，长按当帧无缝切换为 SelectableText.rich 并呼出气泡菜单
+  /// 全平台统一的跨段自由选词段落组件：默认零开销轻量 Text.rich + SelectionListener，
+  /// 在外层 SelectionArea 协同下原生支持单段与跨多段长按/拖拽手柄选词、复制、跨段划线/笔记与金句分享。
   Widget _buildOnDemandSelectableParagraph({
     required String paraKeyStr,
     required List<InlineSpan> inlineSpans,
@@ -5677,242 +5818,60 @@ class _ReaderScreenState extends State<ReaderScreen>
       children: [...inlineSpans, if (commentSpan != null) commentSpan],
     );
 
-    if (ReaderPlatform.isDesktop) {
-      final selectable = DesktopSelectableParagraph(
-        key: ValueKey('desktop-paragraph-$paraKeyStr'),
-        span: TextSpan(children: inlineSpans),
-        style: baseStyle,
-        chapterIndex: chapterIndex,
-        paragraphIndex: paraIndex,
-        sourceParagraph: sourceParagraph,
-        sourceStart: sourceStart,
-        sourceEnd: sourceEnd,
-        textWidthInset: _textWidthInset,
-        onPointerDown: _desktopTextPointerDown,
-        onPointerMove: _desktopTextPointerMove,
-        onPointerUp: _desktopTextTap,
-        onPointerCancel: _desktopTextPointerCancel,
-      );
-      if (commentSpan == null) return selectable;
-      return LayoutBuilder(
-        builder: (context, constraints) {
-          final painter =
-              TextPainter(
-                text: TextSpan(style: baseStyle, children: textSpan.children),
-                textDirection: TextDirection.ltr,
-                textScaler: MediaQuery.textScalerOf(context),
-              )..setPlaceholderDimensions([
-                PlaceholderDimensions(
-                  size: commentBubbleSize!,
-                  alignment: PlaceholderAlignment.middle,
-                ),
-              ]);
-          painter.layout(
-            maxWidth: math.max(1, constraints.maxWidth - _textWidthInset),
-          );
-          final height = painter.height;
-          final rect = painter.inlinePlaceholderBoxes!.single.toRect();
-          painter.dispose();
-          return SizedBox(
-            width: constraints.maxWidth,
-            height: height,
-            child: Stack(
-              clipBehavior: Clip.none,
-              children: [
-                selectable,
-                Positioned.fromRect(
-                  rect: rect,
-                  child: _nonSelectable(commentChild!),
-                ),
-              ],
-            ),
-          );
-        },
-      );
-    }
-
-    return ValueListenableBuilder<String?>(
-      valueListenable: _activeSelectableParaNotifier,
-      builder: (context, activeParaKey, _) {
-        final isSelectedPara = activeParaKey == paraKeyStr;
-        if (isSelectedPara) {
-          Widget selectable = SelectableText.rich(
-            key: _activeSelectableTextKey,
-            TextSpan(children: inlineSpans),
-            style: baseStyle,
-            cursorWidth: ReaderLayout.selectableCursorWidth,
-            onTap: () {
-              _activeSelectableParaNotifier.value = null;
-              onTap?.call();
-            },
-            contextMenuBuilder: (context, editableTextState) {
-              final textVal = editableTextState.textEditingValue;
-              final selected = textVal.selection.textInside(textVal.text);
-              if (selected.trim().isEmpty) return const SizedBox.shrink();
-              final prefixLength =
-                  textVal.text.length - (sourceEnd - sourceStart);
-              final start = ReaderText.safeOffset(
-                sourceParagraph,
-                (textVal.selection.start +
-                        selected.length -
-                        selected.trimLeft().length -
-                        prefixLength +
-                        sourceStart)
-                    .clamp(0, sourceParagraph.length),
-              );
-              final end = ReaderText.safeOffset(
-                sourceParagraph,
-                (textVal.selection.end -
-                        (selected.length - selected.trimRight().length) -
-                        prefixLength +
-                        sourceStart)
-                    .clamp(start, sourceParagraph.length),
-              );
-              return _buildDarkBubbleMenu(
-                context: context,
-                anchors: editableTextState.contextMenuAnchors,
-                selectedText: sourceParagraph.substring(start, end),
-                sourceParagraph: sourceParagraph,
-                selectionStart: start,
-                selectionEnd: end,
-                onDismiss: () {
-                  editableTextState.hideToolbar();
-                  _activeSelectableParaNotifier.value = null;
-                },
-                chapterIndex: chapterIndex,
-                paraIndex: paraIndex,
-              );
-            },
-          );
-          if (commentSpan == null) return selectable;
-          // EditableText 不支持内联控件。保持原排版高度并覆盖同一段尾位置，
-          // 选词/复制只包含原文，不带气泡占位符或计数，也不让后续段落跳动。
-          return LayoutBuilder(
-            builder: (context, constraints) {
-              final painter =
-                  TextPainter(
-                    text: TextSpan(
-                      style: baseStyle,
-                      children: textSpan.children,
-                    ),
-                    textDirection: TextDirection.ltr,
-                    textScaler: MediaQuery.textScalerOf(context),
-                  )..setPlaceholderDimensions([
-                    PlaceholderDimensions(
-                      size: commentBubbleSize!,
-                      alignment: PlaceholderAlignment.middle,
-                    ),
-                  ]);
-              painter.layout(
-                maxWidth: math.max(1, constraints.maxWidth - _textWidthInset),
-              );
-              final height = painter.height;
-              final rect = painter.inlinePlaceholderBoxes!.single.toRect();
-              painter.dispose();
-              return SizedBox(
-                width: constraints.maxWidth,
-                height: height,
-                child: Stack(
-                  clipBehavior: Clip.none,
-                  children: [
-                    selectable,
-                    Positioned.fromRect(rect: rect, child: commentChild!),
-                  ],
-                ),
-              );
-            },
-          );
-        }
-
-        return GestureDetector(
-          behavior: HitTestBehavior.translucent,
-          onTap: onTap,
-          onLongPressStart: (details) => _activateParagraphSelection(
-            paraKeyStr: paraKeyStr,
-            globalPosition: details.globalPosition,
-          ),
-          onLongPressMoveUpdate: (details) => _updateParagraphSelectionDrag(
-            paraKeyStr: paraKeyStr,
-            globalPosition: details.globalPosition,
-            offsetFromOrigin: details.offsetFromOrigin,
-          ),
-          onLongPressEnd: (_) =>
-              _endParagraphSelectionDrag(paraKeyStr: paraKeyStr),
-          child: Text.rich(
-            textSpan,
-            key: ValueKey('reader-paragraph-$paraKeyStr'),
-            style: baseStyle,
+    final selectable = DesktopSelectableParagraph(
+      key: ValueKey('desktop-paragraph-$paraKeyStr'),
+      textKey: ValueKey('reader-paragraph-$paraKeyStr'),
+      span: TextSpan(children: inlineSpans),
+      style: baseStyle,
+      chapterIndex: chapterIndex,
+      paragraphIndex: paraIndex,
+      sourceParagraph: sourceParagraph,
+      sourceStart: sourceStart,
+      sourceEnd: sourceEnd,
+      textWidthInset: _textWidthInset,
+      onPointerDown: _desktopTextPointerDown,
+      onPointerMove: _desktopTextPointerMove,
+      onPointerUp: _desktopTextTap,
+      onPointerCancel: _desktopTextPointerCancel,
+    );
+    if (commentSpan == null) return selectable;
+    // 段评气泡独立置于不可选叠加层并按 TextPainter 精确定位到段尾：
+    // 既保持排版几何与分页不变，又保证单段/跨段复制与选词永不包含气泡占位符或计数。
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final painter =
+            TextPainter(
+              text: TextSpan(style: baseStyle, children: textSpan.children),
+              textDirection: TextDirection.ltr,
+              textScaler: MediaQuery.textScalerOf(context),
+            )..setPlaceholderDimensions([
+              PlaceholderDimensions(
+                size: commentBubbleSize!,
+                alignment: PlaceholderAlignment.middle,
+              ),
+            ]);
+        painter.layout(
+          maxWidth: math.max(1, constraints.maxWidth - _textWidthInset),
+        );
+        final height = painter.height;
+        final rect = painter.inlinePlaceholderBoxes!.single.toRect();
+        painter.dispose();
+        return SizedBox(
+          width: constraints.maxWidth,
+          height: height,
+          child: Stack(
+            clipBehavior: Clip.none,
+            children: [
+              selectable,
+              Positioned.fromRect(
+                rect: rect,
+                child: _nonSelectable(commentChild!),
+              ),
+            ],
           ),
         );
       },
     );
-  }
-
-  void _activateParagraphSelection({
-    required String paraKeyStr,
-    required Offset globalPosition,
-  }) {
-    if (DateTime.now().difference(_lastBubbleTapTime) <
-        const Duration(milliseconds: 400)) {
-      return;
-    }
-    _activeSelectableParaNotifier.value = paraKeyStr;
-    WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (!mounted || _activeSelectableParaNotifier.value != paraKeyStr) return;
-      final Object? state = _activeSelectableTextKey.currentState;
-      if (state is TextSelectionGestureDetectorBuilderDelegate) {
-        final editable = state.editableTextKey.currentState;
-        if (editable != null && editable.mounted) {
-          editable.renderEditable.selectWordsInRange(
-            from: globalPosition,
-            cause: SelectionChangedCause.longPress,
-          );
-          final sel = editable.textEditingValue.selection;
-          final fullText = editable.textEditingValue.text;
-          if (sel.isCollapsed && fullText.isNotEmpty) {
-            final base = sel.baseOffset.clamp(0, fullText.length - 1);
-            final end = (base + 2).clamp(1, fullText.length);
-            editable.userUpdateTextEditingValue(
-              editable.textEditingValue.copyWith(
-                selection: TextSelection(baseOffset: base, extentOffset: end),
-              ),
-              SelectionChangedCause.longPress,
-            );
-          }
-          editable.showToolbar();
-        }
-      }
-    });
-  }
-
-  void _updateParagraphSelectionDrag({
-    required String paraKeyStr,
-    required Offset globalPosition,
-    required Offset offsetFromOrigin,
-  }) {
-    if (_activeSelectableParaNotifier.value != paraKeyStr) return;
-    final Object? state = _activeSelectableTextKey.currentState;
-    if (state is TextSelectionGestureDetectorBuilderDelegate) {
-      final editable = state.editableTextKey.currentState;
-      if (editable != null && editable.mounted) {
-        editable.renderEditable.selectWordsInRange(
-          from: globalPosition - offsetFromOrigin,
-          to: globalPosition,
-          cause: SelectionChangedCause.longPress,
-        );
-      }
-    }
-  }
-
-  void _endParagraphSelectionDrag({required String paraKeyStr}) {
-    if (_activeSelectableParaNotifier.value != paraKeyStr) return;
-    final Object? state = _activeSelectableTextKey.currentState;
-    if (state is TextSelectionGestureDetectorBuilderDelegate) {
-      final editable = state.editableTextKey.currentState;
-      if (editable != null && editable.mounted) {
-        editable.showToolbar();
-      }
-    }
   }
 
   /// 打开指定段落评论抽屉
@@ -6229,231 +6188,279 @@ class _ReaderScreenState extends State<ReaderScreen>
                   icon: Icon(Icons.fullscreen_exit, color: theme.textColor),
                   onPressed: () => _setReadingFullScreen(false),
                 ),
-              // 右上角折叠更多选项 (PopupMenuButton)
-              PopupMenuButton<String>(
+              // 右上角更多操作入口：改为单手可达的底部网格操作面板
+              IconButton(
                 icon: Icon(
                   Icons.more_vert_rounded,
                   size: 22,
                   color: theme.textColor,
                 ),
                 tooltip: '更多选项',
-                color: theme.backgroundColor,
-                onSelected: (val) {
-                  switch (val) {
-                    case 'notes':
-                      _showNotesManagement();
-                      break;
-                    case 'pure':
-                      _setPureMode();
-                      break;
-                    case 'search':
-                      _showReaderSearch();
-                      break;
-                    case 'bookshelf':
-                      _toggleBookshelf();
-                      break;
-                    case 'bookmark':
-                      _toggleBookmark();
-                      break;
-                    case 'cache':
-                      _showQuickCacheModal();
-                      break;
-                    case 'detail':
-                      _openBookDetail();
-                      break;
-                    case 'immersiveListen':
-                      unawaited(_startImmersiveReading());
-                      break;
-                    case 'immersiveSettings':
-                      _openImmersiveSettings();
-                      break;
-                    case 'immersiveCharacters':
-                      _openImmersiveCharacters();
-                      break;
-                    case 'aiAssistant':
-                      _openAiReadingAssistant();
-                      break;
-                    case 'replaceRules':
-                      _openTextReplaceRules();
-                      break;
-                  }
-                },
-                itemBuilder: (context) => [
-                  if (ReaderPlatform.capabilities.tts) ...[
-                    PopupMenuItem(
-                      value: 'immersiveListen',
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.record_voice_over_outlined,
-                            size: 18,
-                            color: theme.textColor,
-                          ),
-                          const SizedBox(width: 12),
-                          Text('沉浸式多角色听书', style: TextStyle(color: theme.textColor)),
-                        ],
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'immersiveSettings',
-                      child: Row(
-                        children: [
-                          Icon(Icons.tune_rounded, size: 18, color: theme.textColor),
-                          const SizedBox(width: 12),
-                          Text('沉浸式听书设置', style: TextStyle(color: theme.textColor)),
-                        ],
-                      ),
-                    ),
-                    PopupMenuItem(
-                      value: 'immersiveCharacters',
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.people_alt_outlined,
-                            size: 18,
-                            color: theme.textColor,
-                          ),
-                          const SizedBox(width: 12),
-                          Text('本书角色与音色', style: TextStyle(color: theme.textColor)),
-                        ],
-                      ),
-                    ),
-                  ],
-                  PopupMenuItem(
-                    value: 'aiAssistant',
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.auto_awesome_outlined,
-                          size: 18,
-                          color: theme.textColor,
-                        ),
-                        const SizedBox(width: 12),
-                        Text(
-                          'AI 前情提要与角色速查',
-                          style: TextStyle(color: theme.textColor),
-                        ),
-                      ],
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: 'replaceRules',
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.cleaning_services_outlined,
-                          size: 18,
-                          color: theme.textColor,
-                        ),
-                        const SizedBox(width: 12),
-                        Text(
-                          '正文净化与替换规则',
-                          style: TextStyle(color: theme.textColor),
-                        ),
-                      ],
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: 'notes',
-                    child: Text(
-                      '笔记管理与导出',
-                      style: TextStyle(color: theme.textColor),
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: 'pure',
-                    child: Text(
-                      _readerPreferences.pureMode ? '退出纯净阅读' : '纯净阅读',
-                      style: TextStyle(color: theme.textColor),
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: 'search',
-                    child: Row(
-                      children: [
-                        Icon(Icons.search, size: 18, color: theme.textColor),
-                        const SizedBox(width: 12),
-                        Text('正文搜索', style: TextStyle(color: theme.textColor)),
-                      ],
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: 'bookshelf',
-                    child: Row(
-                      children: [
-                        Icon(
-                          _isInBookshelf
-                              ? Icons.bookmark_added
-                              : Icons.bookmark_add_outlined,
-                          size: 18,
-                          color: _isInBookshelf
-                              ? Theme.of(context).primaryColor
-                              : theme.textColor,
-                        ),
-                        const SizedBox(width: 12),
-                        Text(
-                          _isInBookshelf ? '移出书架' : '加入书架',
-                          style: TextStyle(color: theme.textColor),
-                        ),
-                      ],
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: 'bookmark',
-                    child: Row(
-                      children: [
-                        Icon(
-                          _isCurrentChapterBookmarked
-                              ? Icons.bookmark
-                              : Icons.bookmark_border,
-                          size: 18,
-                          color: _isCurrentChapterBookmarked
-                              ? Theme.of(context).primaryColor
-                              : theme.textColor,
-                        ),
-                        const SizedBox(width: 12),
-                        Text(
-                          _isCurrentChapterBookmarked ? '取消书签' : '添加书签',
-                          style: TextStyle(color: theme.textColor),
-                        ),
-                      ],
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: 'cache',
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.download_for_offline_outlined,
-                          size: 18,
-                          color: theme.textColor,
-                        ),
-                        const SizedBox(width: 12),
-                        Text('批量离线', style: TextStyle(color: theme.textColor)),
-                      ],
-                    ),
-                  ),
-                  PopupMenuItem(
-                    value: 'detail',
-                    child: Row(
-                      children: [
-                        Icon(
-                          Icons.info_outline,
-                          size: 18,
-                          color: theme.textColor,
-                        ),
-                        const SizedBox(width: 12),
-                        Text('书籍详情', style: TextStyle(color: theme.textColor)),
-                      ],
-                    ),
-                  ),
-                ],
+                onPressed: () => _showMoreActionsSheet(theme),
               ),
             ],
           ),
         ),
       ),
     );
+  }
+
+  /// 详情页或快捷方式指定自动开播时，在首章加载完成后自动触发听书
+  void _maybeAutoStartAudio() {
+    if (!widget.autoStartAudio ||
+        _autoStartAudioTriggered ||
+        !ReaderPlatform.capabilities.tts) {
+      return;
+    }
+    _autoStartAudioTriggered = true;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final cfg = _immersiveService.config;
+      final useImmersive =
+          cfg != null &&
+          (cfg.primaryTextModel.apiKey?.trim().isNotEmpty ?? false) &&
+          cfg.tts.providers.any(
+            (p) => p.enabled && p.models.any((m) => m.enabled),
+          );
+      if (useImmersive) {
+        unawaited(_startImmersiveReading());
+      } else {
+        unawaited(_startTtsReading());
+      }
+    });
+  }
+
+  /// 底部网格化更多操作抽屉（替代超长顶栏下拉菜单，单手大拇指可达且兼容大字号缩放）
+  void _showMoreActionsSheet(ReaderTheme theme) {
+    final actions =
+        <({IconData icon, String label, bool highlighted, VoidCallback onTap})>[
+          (
+            icon: Icons.search_rounded,
+            label: '正文搜索',
+            highlighted: false,
+            onTap: _showReaderSearch,
+          ),
+          (
+            icon: _isCurrentChapterBookmarked
+                ? Icons.bookmark_rounded
+                : Icons.bookmark_border_rounded,
+            label: _isCurrentChapterBookmarked ? '取消书签' : '添加书签',
+            highlighted: _isCurrentChapterBookmarked,
+            onTap: _toggleBookmark,
+          ),
+          (
+            icon: _isInBookshelf
+                ? Icons.bookmark_added_rounded
+                : Icons.bookmark_add_outlined,
+            label: _isInBookshelf ? '移出书架' : '加入书架',
+            highlighted: _isInBookshelf,
+            onTap: _toggleBookshelf,
+          ),
+          (
+            icon: _readerPreferences.pureMode
+                ? Icons.visibility_rounded
+                : Icons.visibility_off_outlined,
+            label: _readerPreferences.pureMode ? '退出纯净阅读' : '纯净阅读',
+            highlighted: _readerPreferences.pureMode,
+            onTap: _setPureMode,
+          ),
+          if (ReaderPlatform.capabilities.tts) ...[
+            (
+              icon: Icons.record_voice_over_outlined,
+              label: '沉浸式多角色听书',
+              highlighted: _immersiveService.isActive,
+              onTap: () => unawaited(_startImmersiveReading()),
+            ),
+            (
+              icon: Icons.tune_rounded,
+              label: '沉浸式听书设置',
+              highlighted: false,
+              onTap: _openImmersiveSettings,
+            ),
+            (
+              icon: Icons.people_alt_outlined,
+              label: '本书角色与音色',
+              highlighted: false,
+              onTap: _openImmersiveCharacters,
+            ),
+          ],
+          (
+            icon: Icons.auto_awesome_outlined,
+            label: 'AI 前情提要',
+            highlighted: false,
+            onTap: _openAiReadingAssistant,
+          ),
+          (
+            icon: Icons.cleaning_services_outlined,
+            label: '正文净化',
+            highlighted: false,
+            onTap: _openTextReplaceRules,
+          ),
+          (
+            icon: Icons.edit_note_rounded,
+            label: '笔记管理与导出',
+            highlighted: false,
+            onTap: _showNotesManagement,
+          ),
+          (
+            icon: Icons.download_for_offline_outlined,
+            label: '批量离线',
+            highlighted: false,
+            onTap: _showQuickCacheModal,
+          ),
+          (
+            icon: Icons.info_outline_rounded,
+            label: '书籍详情',
+            highlighted: false,
+            onTap: _openBookDetail,
+          ),
+        ];
+
+    _beginReaderPanel();
+    showModalBottomSheet<VoidCallback>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      backgroundColor: theme.backgroundColor,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(18)),
+      ),
+      builder: (sheetCtx) {
+        final primaryColor = Theme.of(sheetCtx).primaryColor;
+        final textScale = MediaQuery.textScalerOf(sheetCtx).scale(1.0);
+        return SafeArea(
+          top: false,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: MediaQuery.sizeOf(sheetCtx).height * 0.72,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const SizedBox(height: 10),
+                Container(
+                  width: 36,
+                  height: 4,
+                  decoration: BoxDecoration(
+                    color: theme.secondaryColor.withValues(alpha: 0.35),
+                    borderRadius: BorderRadius.circular(2),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(16, 10, 8, 6),
+                  child: Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          '更多阅读工具',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.bold,
+                            color: theme.textColor,
+                          ),
+                        ),
+                      ),
+                      IconButton(
+                        icon: Icon(
+                          Icons.close,
+                          size: 20,
+                          color: theme.secondaryColor,
+                        ),
+                        visualDensity: VisualDensity.compact,
+                        onPressed: () => Navigator.pop(sheetCtx),
+                      ),
+                    ],
+                  ),
+                ),
+                Divider(
+                  height: 1,
+                  color: theme.secondaryColor.withValues(alpha: 0.16),
+                ),
+                Flexible(
+                  child: LayoutBuilder(
+                    builder: (context, constraints) {
+                      final cols = (constraints.maxWidth < 360 || textScale > 1.45)
+                          ? 2
+                          : (constraints.maxWidth >= 560 ? 4 : 3);
+                      final spacing = 10.0;
+                      final itemWidth =
+                          (constraints.maxWidth - 32 - spacing * (cols - 1)) /
+                          cols;
+                      return SingleChildScrollView(
+                        padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
+                        child: Wrap(
+                          spacing: spacing,
+                          runSpacing: spacing,
+                          children: [
+                            for (final item in actions)
+                              SizedBox(
+                                width: itemWidth,
+                                child: Material(
+                                  color: item.highlighted
+                                      ? primaryColor.withValues(alpha: 0.12)
+                                      : theme.textColor.withValues(alpha: 0.05),
+                                  borderRadius: BorderRadius.circular(12),
+                                  child: InkWell(
+                                    borderRadius: BorderRadius.circular(12),
+                                    onTap: () {
+                                      Navigator.pop(sheetCtx, item.onTap);
+                                    },
+                                    child: Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 8,
+                                        vertical: 12,
+                                      ),
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Icon(
+                                            item.icon,
+                                            size: 22,
+                                            color: item.highlighted
+                                                ? primaryColor
+                                                : theme.textColor,
+                                          ),
+                                          const SizedBox(height: 6),
+                                          Text(
+                                            item.label,
+                                            textAlign: TextAlign.center,
+                                            maxLines: 2,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                              fontSize: 12,
+                                              fontWeight: item.highlighted
+                                                  ? FontWeight.w600
+                                                  : FontWeight.normal,
+                                              color: item.highlighted
+                                                  ? primaryColor
+                                                  : theme.textColor,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              ),
+                          ],
+                        ),
+                      );
+                    },
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    ).then((selectedAction) {
+      _endReaderPanel();
+      if (mounted && selectedAction != null) {
+        selectedAction();
+      }
+    });
   }
 
   void _openBookDetail() {
@@ -6800,7 +6807,23 @@ class _ReaderScreenState extends State<ReaderScreen>
   Widget _buildPageModeBody(ReaderTheme theme) {
     return LayoutBuilder(
       builder: (context, constraints) {
-        final columns = ReaderPlatform.isDesktop ? _desktopColumns : 1;
+        final int columns;
+        if (ReaderPlatform.isDesktop) {
+          columns = _desktopColumns;
+        } else if (constraints.maxWidth >= 720) {
+          // 折叠屏展开态与安卓平板自动复用宽屏双栏排版逻辑
+          final wideLayout = DesktopReaderLayout.resolve(
+            constraints.maxWidth,
+            _captureReaderSettings(),
+            MediaQuery.textScalerOf(context),
+            immersive: false,
+          );
+          columns = wideLayout.columns;
+          _desktopColumns = columns;
+        } else {
+          columns = 1;
+          _desktopColumns = 1;
+        }
         final columnWidth = columns == 2
             ? (constraints.maxWidth - _readerPreferences.columnGap) / 2
             : constraints.maxWidth;
@@ -6888,9 +6911,8 @@ class _ReaderScreenState extends State<ReaderScreen>
           }
         }
         _warmAdjacentPages();
-        return Stack(
-          fit: StackFit.expand,
-          children: [
+        _activePageSpreadNotifier.sync(source);
+        Widget buildPageView(SelectionRegistrar? spreadRegistrar) =>
             RepaintBoundary(
               key: _pagePaintKey,
               child: ReaderPageView(
@@ -6904,6 +6926,7 @@ class _ReaderScreenState extends State<ReaderScreen>
                         theme,
                         constraints,
                         columns,
+                        spreadRegistrar: spreadRegistrar,
                       ),
                     ),
                 ],
@@ -6962,7 +6985,34 @@ class _ReaderScreenState extends State<ReaderScreen>
                 onPageSettled: _onPageSettled,
                 onInteractionEnded: _onPageInteractionEnded,
               ),
-            ),
+            );
+        // 移动端翻页模式将 SelectionArea 置于 ReaderPageView 外层，使内层 PageView /
+        // SimulationPageTurn 的水平滑屏与轻点手势天然优先赢得手势竞技场，同时由
+        // ActivePageSelectionBridge 将当前可见页直接桥接到外层 SelectionRegistrar 实现跨多段选词。
+        final pageView = ReaderPlatform.isDesktop
+            ? buildPageView(null)
+            : _desktopSelection(
+                Builder(
+                  builder: (selectionContext) {
+                    final spreadRegistrar = SelectionContainer.maybeOf(
+                      selectionContext,
+                    );
+                    // 用 SelectionContainer.disabled 阻止内层 PageView(Scrollable)
+                    // 自身向外层 SelectionArea 注册空壳 _ScrollableSelectionHandler，
+                    // 再由 ActivePageSelectionBridge 将当前可见页直连到 spreadRegistrar。
+                    return SelectionContainer.disabled(
+                      child: buildPageView(spreadRegistrar),
+                    );
+                  },
+                ),
+                key: const ValueKey('mobile-page-selection'),
+                enableBlankTap: false,
+                enableTouchTap: false,
+              );
+        return Stack(
+          fit: StackFit.expand,
+          children: [
+            pageView,
             Positioned(
               left: 0,
               right: 0,
@@ -6988,11 +7038,24 @@ class _ReaderScreenState extends State<ReaderScreen>
     _ReaderPageAddress address,
     ReaderTheme theme,
     BoxConstraints constraints,
-    int columns,
-  ) => _desktopSelection(
-    _buildPageColumns(address, theme, constraints, columns),
-    key: ValueKey(('desktop-page-selection', address)),
-  );
+    int columns, {
+    SelectionRegistrar? spreadRegistrar,
+  }) {
+    final spread = _buildPageColumns(address, theme, constraints, columns);
+    if (ReaderPlatform.isDesktop) {
+      return _desktopSelection(
+        spread,
+        key: ValueKey(('desktop-page-selection', address)),
+      );
+    }
+    return ActivePageSelectionBridge(
+      key: ValueKey(('mobile-page-selection-bridge', address)),
+      pageId: address,
+      activePageId: _activePageSpreadNotifier,
+      registrar: spreadRegistrar,
+      child: spread,
+    );
+  }
 
   Widget _buildPageColumns(
     _ReaderPageAddress address,
@@ -7056,7 +7119,8 @@ class _ReaderScreenState extends State<ReaderScreen>
       _positionNeedsReflow =
           _preparedPages[address.chapterIndex]?.key != address.layout.key;
       _chapterTransition = null;
-      _activeSelectableParaNotifier.value = null;
+      _activePageSpreadNotifier.sync(address);
+      _dismissReaderSelection();
       if (changedChapter) {
         _anchorChapterIndex = _currentActiveIndex;
         _displayedChapters.clear();
@@ -7814,6 +7878,46 @@ class _ReaderScreenState extends State<ReaderScreen>
                 ),
                 label: const Text(
                   'AI 速查',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 13,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  foregroundColor: Colors.white,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 6,
+                  ),
+                  visualDensity: VisualDensity.standard,
+                  minimumSize: const Size(48, 48),
+                ),
+                onPressed: () {
+                  onDismiss();
+                  final chapterTitle =
+                      (chapterIndex >= 0 && chapterIndex < widget.chapters.length)
+                      ? widget.chapters[chapterIndex].title
+                      : null;
+                  _beginReaderPanel();
+                  QuoteShareCardSheet.show(
+                    this.context,
+                    quote: cleanSelected,
+                    bookName: widget.book.bookName,
+                    author: widget.book.author,
+                    chapterTitle: chapterTitle,
+                    noteText: existing?.note.note,
+                  ).whenComplete(_endReaderPanel);
+                },
+                icon: const Icon(
+                  Icons.share_outlined,
+                  size: 15,
+                  color: Colors.white,
+                ),
+                label: const Text(
+                  '分享卡片',
                   style: TextStyle(
                     color: Colors.white,
                     fontSize: 13,

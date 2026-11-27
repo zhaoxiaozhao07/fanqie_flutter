@@ -815,13 +815,12 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
 
   @override
   Widget build(BuildContext context) {
+    final compactBar = MediaQuery.sizeOf(context).width < 480;
     return Scaffold(
       appBar: AppBar(
         title: Text(
           _isSelectionMode
               ? '已选择 ${_selectedBookIds.length} 项'
-              : MediaQuery.sizeOf(context).width < 400
-              ? '书架'
               : '我的书架 (${_currentSubTab == 0 ? _books.length : _downloadedBooks.length})',
         ),
         leading: _isSelectionMode
@@ -843,16 +842,28 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
               },
             ),
             const DownloadActionButton(),
-            // 导入本地 TXT / EPUB 小说
+            // 导入、视图、排序与管理统一入口（窄屏收纳避免顶栏拥挤）
             PopupMenuButton<String>(
-              icon: const Icon(Icons.file_upload_outlined),
-              tooltip: '导入与备份',
+              icon: Icon(
+                compactBar ? Icons.more_vert_rounded : Icons.file_upload_outlined,
+              ),
+              tooltip: compactBar ? '更多操作' : '导入与备份',
               onSelected: (value) async {
                 if (value == 'import') {
                   await _showImportLocalBookDialog();
                 } else if (value == 'webdav') {
                   await showWebDavSyncSheet(context);
                   if (mounted) _loadData(silent: true);
+                } else if (value == 'toggleView') {
+                  await _toggleViewMode();
+                } else if (value == 'sortRecentRead') {
+                  _changeSort(BookshelfSortType.recentRead);
+                } else if (value == 'sortRecentAdded') {
+                  _changeSort(BookshelfSortType.recentAdded);
+                } else if (value == 'sortBookName') {
+                  _changeSort(BookshelfSortType.bookName);
+                } else if (value == 'batchManage') {
+                  setState(() => _isSelectionMode = true);
                 } else if (value == 'activity') {
                   await showDialog<void>(
                     context: context,
@@ -886,6 +897,39 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                 }
               },
               itemBuilder: (_) => [
+                if (compactBar) ...[
+                  PopupMenuItem(
+                    value: 'toggleView',
+                    child: Text(
+                      _viewMode == BookshelfViewMode.list
+                          ? '切换为三列宫格'
+                          : '切换为列表视图',
+                    ),
+                  ),
+                  if (_currentSubTab == 0 && _books.isNotEmpty) ...[
+                    CheckedPopupMenuItem(
+                      value: 'sortRecentRead',
+                      checked: _sortType == BookshelfSortType.recentRead,
+                      child: const Text('按最近阅读排序'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: 'sortRecentAdded',
+                      checked: _sortType == BookshelfSortType.recentAdded,
+                      child: const Text('按最近加入排序'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: 'sortBookName',
+                      checked: _sortType == BookshelfSortType.bookName,
+                      child: const Text('按书名排序'),
+                    ),
+                  ],
+                  if (_currentTabTotalCount > 0)
+                    const PopupMenuItem(
+                      value: 'batchManage',
+                      child: Text('批量管理书籍'),
+                    ),
+                  const PopupMenuDivider(),
+                ],
                 const PopupMenuItem(value: 'import', child: Text('导入本地小说')),
                 const PopupMenuItem(value: 'webdav', child: Text('WebDAV 云同步')),
                 const PopupMenuItem(value: 'backup', child: Text('备份与恢复')),
@@ -906,51 +950,53 @@ class BookshelfScreenState extends State<BookshelfScreen> with RouteAware {
                 const PopupMenuItem(value: 'trash', child: Text('回收站与修改历史')),
               ],
             ),
-            // 切换 列表 / 三列 视图按钮
-            IconButton(
-              icon: Icon(
-                _viewMode == BookshelfViewMode.list
-                    ? Icons.grid_view_rounded
-                    : Icons.view_list_rounded,
-              ),
-              tooltip: _viewMode == BookshelfViewMode.list
-                  ? '切换为三列视图'
-                  : '切换为列表视图',
-              onPressed: _toggleViewMode,
-            ),
-            // 排序选项 (仅收藏页支持)
-            if (_currentSubTab == 0 && _books.isNotEmpty)
-              PopupMenuButton<BookshelfSortType>(
-                icon: const Icon(Icons.sort_rounded),
-                tooltip: '排序方式',
-                onSelected: _changeSort,
-                itemBuilder: (context) => [
-                  CheckedPopupMenuItem(
-                    value: BookshelfSortType.recentRead,
-                    checked: _sortType == BookshelfSortType.recentRead,
-                    child: const Text('最近阅读优先'),
-                  ),
-                  CheckedPopupMenuItem(
-                    value: BookshelfSortType.recentAdded,
-                    checked: _sortType == BookshelfSortType.recentAdded,
-                    child: const Text('最近加入优先'),
-                  ),
-                  CheckedPopupMenuItem(
-                    value: BookshelfSortType.bookName,
-                    checked: _sortType == BookshelfSortType.bookName,
-                    child: const Text('按书名排序'),
-                  ),
-                ],
-              ),
-            // 批量管理
-            if (_currentTabTotalCount > 0)
+            if (!compactBar) ...[
+              // 切换 列表 / 三列 视图按钮
               IconButton(
-                icon: const Icon(Icons.checklist_rounded),
-                tooltip: '批量管理',
-                onPressed: () {
-                  setState(() => _isSelectionMode = true);
-                },
+                icon: Icon(
+                  _viewMode == BookshelfViewMode.list
+                      ? Icons.grid_view_rounded
+                      : Icons.view_list_rounded,
+                ),
+                tooltip: _viewMode == BookshelfViewMode.list
+                    ? '切换为三列视图'
+                    : '切换为列表视图',
+                onPressed: _toggleViewMode,
               ),
+              // 排序选项 (仅收藏页支持)
+              if (_currentSubTab == 0 && _books.isNotEmpty)
+                PopupMenuButton<BookshelfSortType>(
+                  icon: const Icon(Icons.sort_rounded),
+                  tooltip: '排序方式',
+                  onSelected: _changeSort,
+                  itemBuilder: (context) => [
+                    CheckedPopupMenuItem(
+                      value: BookshelfSortType.recentRead,
+                      checked: _sortType == BookshelfSortType.recentRead,
+                      child: const Text('最近阅读优先'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: BookshelfSortType.recentAdded,
+                      checked: _sortType == BookshelfSortType.recentAdded,
+                      child: const Text('最近加入优先'),
+                    ),
+                    CheckedPopupMenuItem(
+                      value: BookshelfSortType.bookName,
+                      checked: _sortType == BookshelfSortType.bookName,
+                      child: const Text('按书名排序'),
+                    ),
+                  ],
+                ),
+              // 批量管理
+              if (_currentTabTotalCount > 0)
+                IconButton(
+                  icon: const Icon(Icons.checklist_rounded),
+                  tooltip: '批量管理',
+                  onPressed: () {
+                    setState(() => _isSelectionMode = true);
+                  },
+                ),
+            ],
           ],
           if (_isSelectionMode)
             IconButton(

@@ -181,13 +181,16 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
               ),
             ],
           ),
-          if (ReaderPlatform.isDesktop)
-            Wrap(
+          Padding(
+            padding: const EdgeInsets.only(top: 4),
+            child: Wrap(
               spacing: 8,
+              runSpacing: 4,
               crossAxisAlignment: WrapCrossAlignment.center,
               children: [
-                const Text('并行书籍'),
+                const Text('并行书籍', style: TextStyle(fontSize: 12)),
                 DropdownButton<int>(
+                  isDense: true,
                   value: _downloadService.maxConcurrentTasks,
                   items: [
                     for (final n in [1, 2, 3, 4])
@@ -195,8 +198,9 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
                   ],
                   onChanged: (v) => _concurrency(books: v),
                 ),
-                const Text('每书并行'),
+                const Text('每书并行', style: TextStyle(fontSize: 12)),
                 DropdownButton<int>(
+                  isDense: true,
                   value: _downloadService.chapterConcurrency,
                   items: [
                     for (final n in [3, 6, 12])
@@ -204,9 +208,9 @@ class _DownloadManagerSheetState extends State<DownloadManagerSheet> {
                   ],
                   onChanged: (v) => _concurrency(chapters: v),
                 ),
-                const Text('降低并行数不会丢弃正在完成的请求。', style: TextStyle(fontSize: 11)),
               ],
             ),
+          ),
         ],
       ),
     );

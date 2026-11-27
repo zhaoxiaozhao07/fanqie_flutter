@@ -98,6 +98,7 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
 
   bool _loaded = false;
   bool _obscurePassword = true;
+  bool _credentialsExpanded = true;
   bool _enabled = false;
   bool _autoSyncOnStart = false;
   bool _autoSyncOnBackground = true;
@@ -157,6 +158,7 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
       _syncImmersiveProfiles = cfg.syncImmersiveProfiles;
       _syncReadingData = cfg.syncReadingData;
       _syncOfflineBooks = cfg.syncOfflineBooks;
+      _credentialsExpanded = !cfg.hasCredentials;
       _loaded = true;
     });
     unawaited(_refreshOfflineBooks());
@@ -459,8 +461,8 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
               color: _noticeIsError
-                  ? Colors.red.shade50
-                  : AppTheme.primaryColor.withValues(alpha: 0.08),
+                  ? Colors.red.withValues(alpha: 0.12)
+                  : AppTheme.primaryColor.withValues(alpha: 0.1),
               borderRadius: BorderRadius.circular(8),
             ),
             child: Row(
@@ -483,8 +485,10 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
                     style: TextStyle(
                       fontSize: 12,
                       color: _noticeIsError
-                          ? Colors.red.shade800
-                          : Colors.black87,
+                          ? (AppTheme.isDark(context)
+                                ? Colors.redAccent.shade100
+                                : Colors.red.shade800)
+                          : AppTheme.textPrimaryOf(context),
                     ),
                   ),
                 ),
@@ -539,92 +543,169 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
                 },
         ),
         const Divider(),
-        const Text(
-          '服务器凭据',
-          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
-        ),
-        const SizedBox(height: 10),
-        TextField(
-          key: const ValueKey('webdav-url-field'),
-          controller: _urlCtrl,
-          enabled: !syncing,
-          keyboardType: TextInputType.url,
-          onChanged: (_) => setState(() {}),
-          decoration: const InputDecoration(
-            labelText: 'WebDAV 服务器地址',
-            hintText: '例如 https://dav.example.com',
-            border: OutlineInputBorder(),
-            isDense: true,
-          ),
-        ),
-        if (isInsecureRemoteHttpUrl(
-          WebDavConfig.normalizeServerUrl(_urlCtrl.text),
-        ))
-          Padding(
-            padding: const EdgeInsets.only(top: 6),
-            child: Text(
-              '安全提示：当前地址使用明文 HTTP 协议，公共网络下存在凭据被窃听风险，建议改用 HTTPS。',
-              style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
-            ),
-          ),
-        const SizedBox(height: 10),
-        TextField(
-          key: const ValueKey('webdav-user-field'),
-          controller: _userCtrl,
-          enabled: !syncing,
-          decoration: const InputDecoration(
-            labelText: '账号',
-            hintText: '填写 WebDAV 登录用户名或邮箱',
-            border: OutlineInputBorder(),
-            isDense: true,
-          ),
-        ),
-        const SizedBox(height: 10),
-        TextField(
-          key: const ValueKey('webdav-pass-field'),
-          controller: _passCtrl,
-          enabled: !syncing,
-          obscureText: _obscurePassword,
-          decoration: InputDecoration(
-            labelText: '密码 / 应用专用密码',
-            border: const OutlineInputBorder(),
-            isDense: true,
-            suffixIcon: IconButton(
-              icon: Icon(
-                _obscurePassword
-                    ? Icons.visibility_outlined
-                    : Icons.visibility_off_outlined,
-              ),
-              onPressed: () =>
-                  setState(() => _obscurePassword = !_obscurePassword),
-            ),
-          ),
-        ),
-        const SizedBox(height: 10),
-        Wrap(
-          spacing: 10,
-          runSpacing: 8,
+        Row(
           children: [
-            FilledButton.icon(
-              key: const ValueKey('webdav-save-btn'),
-              icon: const Icon(Icons.save_outlined, size: 18),
-              label: const Text('保存配置'),
-              onPressed: syncing || _testing ? null : () => _saveDraft(),
+            const Expanded(
+              child: Text(
+                '服务器凭据',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
+              ),
             ),
-            OutlinedButton.icon(
-              key: const ValueKey('webdav-test-btn'),
-              icon: _testing
-                  ? const SizedBox(
-                      width: 14,
-                      height: 14,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.wifi_tethering_rounded, size: 18),
-              label: const Text('测试连接'),
-              onPressed: syncing || _testing ? null : _testConnection,
-            ),
+            if (cfg.hasCredentials)
+              TextButton.icon(
+                style: TextButton.styleFrom(
+                  visualDensity: VisualDensity.compact,
+                ),
+                onPressed: () => setState(
+                  () => _credentialsExpanded = !_credentialsExpanded,
+                ),
+                icon: Icon(
+                  _credentialsExpanded
+                      ? Icons.expand_less
+                      : Icons.edit_outlined,
+                  size: 16,
+                ),
+                label: Text(_credentialsExpanded ? '收起' : '修改凭据'),
+              ),
           ],
         ),
+        if (!_credentialsExpanded && cfg.hasCredentials)
+          Container(
+            margin: const EdgeInsets.only(top: 6),
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+            decoration: BoxDecoration(
+              color: AppTheme.inputFillOf(context),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: AppTheme.dividerOf(context)),
+            ),
+            child: Row(
+              children: [
+                const Icon(
+                  Icons.cloud_done_outlined,
+                  size: 18,
+                  color: AppTheme.primaryColor,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        cfg.normalizedServerUrl,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          fontSize: 12.5,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                      Text(
+                        '账号：${cfg.username}',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: AppTheme.textSecondaryOf(context),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+                OutlinedButton(
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 10),
+                  ),
+                  onPressed: syncing || _testing ? null : _testConnection,
+                  child: const Text('测试', style: TextStyle(fontSize: 12)),
+                ),
+              ],
+            ),
+          )
+        else ...[
+          const SizedBox(height: 10),
+          TextField(
+            key: const ValueKey('webdav-url-field'),
+            controller: _urlCtrl,
+            enabled: !syncing,
+            keyboardType: TextInputType.url,
+            onChanged: (_) => setState(() {}),
+            decoration: const InputDecoration(
+              labelText: 'WebDAV 服务器地址',
+              hintText: '例如 https://dav.example.com',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          if (isInsecureRemoteHttpUrl(
+            WebDavConfig.normalizeServerUrl(_urlCtrl.text),
+          ))
+            Padding(
+              padding: const EdgeInsets.only(top: 6),
+              child: Text(
+                '安全提示：当前地址使用明文 HTTP 协议，公共网络下存在凭据被窃听风险，建议改用 HTTPS。',
+                style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
+              ),
+            ),
+          const SizedBox(height: 10),
+          TextField(
+            key: const ValueKey('webdav-user-field'),
+            controller: _userCtrl,
+            enabled: !syncing,
+            decoration: const InputDecoration(
+              labelText: '账号',
+              hintText: '填写 WebDAV 登录用户名或邮箱',
+              border: OutlineInputBorder(),
+              isDense: true,
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            key: const ValueKey('webdav-pass-field'),
+            controller: _passCtrl,
+            enabled: !syncing,
+            obscureText: _obscurePassword,
+            decoration: InputDecoration(
+              labelText: '密码 / 应用专用密码',
+              border: const OutlineInputBorder(),
+              isDense: true,
+              suffixIcon: IconButton(
+                icon: Icon(
+                  _obscurePassword
+                      ? Icons.visibility_outlined
+                      : Icons.visibility_off_outlined,
+                ),
+                onPressed: () =>
+                    setState(() => _obscurePassword = !_obscurePassword),
+              ),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 10,
+            runSpacing: 8,
+            children: [
+              FilledButton.icon(
+                key: const ValueKey('webdav-save-btn'),
+                icon: const Icon(Icons.save_outlined, size: 18),
+                label: const Text('保存配置'),
+                onPressed: syncing || _testing ? null : () => _saveDraft(),
+              ),
+              OutlinedButton.icon(
+                key: const ValueKey('webdav-test-btn'),
+                icon: _testing
+                    ? const SizedBox(
+                        width: 14,
+                        height: 14,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.wifi_tethering_rounded, size: 18),
+                label: const Text('测试连接'),
+                onPressed: syncing || _testing ? null : _testConnection,
+              ),
+            ],
+          ),
+        ],
         const Divider(height: 28),
         const Text(
           '同步策略与范围',
@@ -792,10 +873,13 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
           padding: const EdgeInsets.fromLTRB(16, 10, 16, 6),
           child: Row(
             children: [
-              const Expanded(
+              Expanded(
                 child: Text(
                   '仅展示已离线书籍（本地导入或已离线下载）；未离线在线书籍仅同步书架信息与进度。',
-                  style: TextStyle(fontSize: 12, color: Colors.black54),
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: AppTheme.textSecondaryOf(context),
+                  ),
                 ),
               ),
               TextButton.icon(

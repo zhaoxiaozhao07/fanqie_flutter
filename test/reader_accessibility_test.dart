@@ -123,8 +123,8 @@ void main() {
       await fixture.settleReader(tester);
       await tester.tap(find.text('排版设置'));
       await fixture.settleReader(tester);
-      await tester.ensureVisible(find.text('高级排版与操作'));
-      await tester.tap(find.text('高级排版与操作'));
+      await tester.ensureVisible(find.text('操作与外观'));
+      await tester.tap(find.text('操作与外观'));
       await fixture.settleReader(tester);
       await tester.ensureVisible(find.text('休息提醒'));
       await fixture.settleReader(tester);

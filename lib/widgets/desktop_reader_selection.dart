@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:math' as math;
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/rendering.dart';
@@ -118,7 +119,8 @@ class DesktopReaderSelection extends StatefulWidget {
   final DesktopReaderSelectionController controller;
   final DesktopSingleSelectionMenu singleSelectionMenu;
   final DesktopMultipleSelectionMenu? multipleSelectionMenu;
-  final ValueChanged<Offset> onBlankTap;
+  final ValueChanged<Offset>? onBlankTap;
+  final void Function(Offset globalPosition, int pointer)? onTouchTap;
   final Widget child;
 
   const DesktopReaderSelection({
@@ -126,7 +128,8 @@ class DesktopReaderSelection extends StatefulWidget {
     required this.controller,
     required this.singleSelectionMenu,
     this.multipleSelectionMenu,
-    required this.onBlankTap,
+    this.onBlankTap,
+    this.onTouchTap,
     required this.child,
   });
 
@@ -140,6 +143,10 @@ class _DesktopReaderSelectionState extends State<DesktopReaderSelection> {
   int? _textPointer;
   Offset? _blankPointerStart;
   bool _blankHadSelection = false;
+  int? _touchPointer;
+  Offset? _touchPointerStart;
+  DateTime? _touchPointerDownAt;
+  bool _touchHadSelection = false;
 
   @override
   void initState() {
@@ -222,22 +229,42 @@ class _DesktopReaderSelectionState extends State<DesktopReaderSelection> {
       },
       child: Listener(
         onPointerDown: (event) {
-          _blankHadSelection = widget.controller.hasSelection;
-          _blankPointerStart =
-              event.buttons == kPrimaryButton && _textPointer != event.pointer
-              ? event.position
-              : null;
+          if (widget.onTouchTap != null &&
+              event.kind != PointerDeviceKind.mouse) {
+            // 移动端触屏统一追踪单指轻点，用于穿透 SelectionArea 触发翻页或呼出控制栏，
+            // 同时避免长按跨段选词、滑动翻页、交互气泡与取消选区时误触发。
+            _touchPointer = event.pointer;
+            _touchPointerStart = event.position;
+            _touchPointerDownAt = DateTime.now();
+            _touchHadSelection = widget.controller.hasSelection;
+          } else {
+            _blankHadSelection = widget.controller.hasSelection;
+            _blankPointerStart =
+                event.buttons == kPrimaryButton && _textPointer != event.pointer
+                ? event.position
+                : null;
+          }
         },
         onPointerMove: (event) {
           final start = _blankPointerStart;
           if (start != null && (event.position - start).distance > kTouchSlop) {
             _blankPointerStart = null;
           }
+          if (event.pointer == _touchPointer && _touchPointerStart != null) {
+            if ((event.position - _touchPointerStart!).distance > kTouchSlop) {
+              _touchPointerStart = null;
+            }
+          }
         },
         onPointerCancel: (event) {
           widget.controller._consumeInteractivePress(event.pointer);
           _blankPointerStart = null;
           _textPointer = null;
+          if (event.pointer == _touchPointer) {
+            _touchPointer = null;
+            _touchPointerStart = null;
+            _touchPointerDownAt = null;
+          }
         },
         onPointerUp: (event) {
           // 交互控件上的按压不视为阅读面空白点击：否则点击段评、章节评论
@@ -245,8 +272,33 @@ class _DesktopReaderSelectionState extends State<DesktopReaderSelection> {
           final interactive = widget.controller._consumeInteractivePress(
             event.pointer,
           );
-          if (!interactive && _blankPointerStart != null && !_blankHadSelection) {
-            widget.onBlankTap(event.position);
+          if (widget.onTouchTap != null &&
+              event.kind != PointerDeviceKind.mouse) {
+            if (event.pointer == _touchPointer) {
+              final start = _touchPointerStart;
+              final downAt = _touchPointerDownAt;
+              final hadSelection = _touchHadSelection;
+              _touchPointer = null;
+              _touchPointerStart = null;
+              _touchPointerDownAt = null;
+              _textPointer = null;
+              final elapsed = downAt == null
+                  ? Duration.zero
+                  : DateTime.now().difference(downAt);
+              if (!interactive &&
+                  start != null &&
+                  !hadSelection &&
+                  !widget.controller.hasSelection &&
+                  elapsed < const Duration(milliseconds: 350)) {
+                widget.onTouchTap!(event.position, event.pointer);
+              }
+            }
+            return;
+          }
+          if (!interactive &&
+              _blankPointerStart != null &&
+              !_blankHadSelection) {
+            widget.onBlankTap?.call(event.position);
           }
           _blankPointerStart = null;
           _textPointer = null;
@@ -372,6 +424,74 @@ class _DesktopSelectionScope extends InheritedWidget {
       owner != oldWidget.owner;
 }
 
+/// 追踪移动端翻页容器的当前活跃页标识，支持在 build 阶段安全同步最新页标识并在帧末通知已挂载页更新注册状态。
+class ActivePageSelectionNotifier extends ChangeNotifier
+    implements ValueListenable<Object?> {
+  Object? _value;
+  bool _disposed = false;
+  bool _notifyScheduled = false;
+
+  @override
+  Object? get value => _value;
+
+  void sync(Object? next) {
+    if (_disposed || _value == next) return;
+    _value = next;
+    if (SchedulerBinding.instance.schedulerPhase ==
+        SchedulerPhase.persistentCallbacks) {
+      if (_notifyScheduled) return;
+      _notifyScheduled = true;
+      SchedulerBinding.instance.addPostFrameCallback((_) {
+        _notifyScheduled = false;
+        if (!_disposed) notifyListeners();
+      });
+    } else {
+      notifyListeners();
+    }
+  }
+
+  @override
+  void dispose() {
+    _disposed = true;
+    super.dispose();
+  }
+}
+
+/// 将当前活跃页直接桥接到外层 SelectionArea 的 SelectionRegistrar，
+/// 绕过 PageView 内置 Scrollable 的 SelectionHandler 干扰，同时屏蔽相邻缓存页参与选区。
+class ActivePageSelectionBridge extends StatelessWidget {
+  final Object pageId;
+  final ValueListenable<Object?> activePageId;
+  final SelectionRegistrar? registrar;
+  final Widget child;
+
+  const ActivePageSelectionBridge({
+    super.key,
+    required this.pageId,
+    required this.activePageId,
+    required this.registrar,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return ValueListenableBuilder<Object?>(
+      valueListenable: activePageId,
+      builder: (context, activeId, child) {
+        final targetRegistrar = registrar;
+        if (targetRegistrar != null && activeId == pageId) {
+          return SelectionRegistrarScope(
+            registrar: targetRegistrar,
+            child: child!,
+          );
+        }
+        return SelectionContainer.disabled(child: child!);
+      },
+      child: child,
+    );
+  }
+}
+
 /// Ordinary pages cannot scroll vertically. Register their column directly
 /// with the spread instead of the Scrollable selection handler, which resets
 /// the original start edge when a drag crosses into another scrollable. Keep
@@ -450,6 +570,7 @@ class _DesktopPageColumnDelegate extends StaticSelectionContainerDelegate {
 
 /// Only mounted paragraphs allocate selection listeners, not whole chapters.
 class DesktopSelectableParagraph extends StatefulWidget {
+  final Key? textKey;
   final TextSpan span;
   final TextStyle style;
   final int chapterIndex, paragraphIndex, sourceStart, sourceEnd;
@@ -461,6 +582,7 @@ class DesktopSelectableParagraph extends StatefulWidget {
 
   const DesktopSelectableParagraph({
     super.key,
+    this.textKey,
     required this.span,
     required this.style,
     required this.chapterIndex,
@@ -556,7 +678,7 @@ class _DesktopSelectableParagraphState
       padding: EdgeInsets.only(right: widget.textWidthInset),
       child: SelectionListener(
         selectionNotifier: _selection,
-        child: Text.rich(widget.span, style: widget.style),
+        child: Text.rich(widget.span, key: widget.textKey, style: widget.style),
       ),
     ),
   );

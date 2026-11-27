@@ -5,13 +5,20 @@ import 'package:flutter/material.dart';
 import 'search_screen.dart';
 import 'bookshelf_screen.dart';
 import 'history_screen.dart';
+import 'reader_screen.dart';
+import '../models/book.dart';
+import '../models/chapter.dart';
+import '../widgets/book_page_route.dart';
 import '../widgets/tts_player_panel.dart';
 import '../immersive/widgets/immersive_player_panel.dart';
 import '../widgets/local_book_import_dialog.dart';
 import '../widgets/reader_settings_sheet.dart';
+import '../services/api_service.dart';
 import '../services/desktop_commands.dart';
 import '../services/reader_platform.dart';
 import '../services/reader_settings_repository.dart';
+import '../services/reader_system_service.dart';
+import '../services/reading_history_service.dart';
 import '../services/external_book_import_service.dart';
 import '../webdav/services/webdav_sync_service.dart';
 import 'notes_workspace_screen.dart';
@@ -30,6 +37,7 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   final _searchFocus = FocusNode(debugLabel: 'desktop-library-search');
   bool _dialogOpen = false;
   bool _externalScheduled = false;
+  bool _shortcutBusy = false;
   late final _externalImports =
       widget.externalImports ?? ExternalBookImportService();
 
@@ -45,11 +53,19 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
     WidgetsBinding.instance.addObserver(this);
     if (ReaderPlatform.isDesktop) {
       DesktopCommands.register(this, _desktopCommand);
+    }
+    if (ReaderPlatform.isDesktop || ReaderPlatform.capabilities.fileImport) {
       _externalImports.addListener(_onExternalImports);
       _onExternalImports();
     }
+    if (ReaderPlatform.isAndroid) {
+      ReaderSystemService.registerShortcutListener(this, _onShortcutReceived);
+    }
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
+      if (ReaderPlatform.isAndroid) {
+        unawaited(_drainPendingShortcuts());
+      }
       unawaited(
         WebDavSyncService().triggerAutoSyncOnStart().then((report) {
           if (!mounted || report == null || !report.success) return;
@@ -76,9 +92,110 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     DesktopCommands.register(this, null);
+    ReaderSystemService.registerShortcutListener(this, null);
     _externalImports.removeListener(_onExternalImports);
     _searchFocus.dispose();
     super.dispose();
+  }
+
+  Future<void> _drainPendingShortcuts() async {
+    final pending = await ReaderSystemService.takePendingShortcuts();
+    if (!mounted || pending.isEmpty) return;
+    final last = pending.last;
+    _onShortcutReceived(last.action, last.bookId);
+  }
+
+  void _onShortcutReceived(String action, String? bookId) {
+    if (!mounted) return;
+    unawaited(_executeShortcutAction(action, bookId));
+  }
+
+  /// 处理 Android 图标长按快捷方式与桌面小组件点击路由
+  Future<void> _executeShortcutAction(String action, String? bookId) async {
+    if (!mounted || _shortcutBusy) return;
+    _shortcutBusy = true;
+    try {
+      switch (action) {
+        case 'search_books':
+          Navigator.of(context).popUntil((route) => route.isFirst);
+          _select(0);
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (mounted) _searchFocus.requestFocus();
+          });
+          return;
+        case 'import_local':
+          if (!_dialogOpen) {
+            await _import();
+          }
+          return;
+        case 'continue_reading':
+        case 'continue_listening':
+          await _openRecentBookFromShortcut(
+            preferredBookId: bookId,
+            autoStartAudio: action == 'continue_listening',
+          );
+          return;
+      }
+    } finally {
+      _shortcutBusy = false;
+    }
+  }
+
+  Future<void> _openRecentBookFromShortcut({
+    String? preferredBookId,
+    required bool autoStartAudio,
+  }) async {
+    final history = await ReadingHistoryService().getHistoryList();
+    if (!mounted) return;
+    if (history.isEmpty) {
+      Navigator.of(context).popUntil((route) => route.isFirst);
+      _select(1);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('暂无最近阅读记录，请先选择一本书籍')),
+      );
+      return;
+    }
+    final picked =
+        (preferredBookId != null && preferredBookId.isNotEmpty)
+        ? history.firstWhere(
+            (h) => h.bookId == preferredBookId,
+            orElse: () => history.first,
+          )
+        : history.first;
+    final Book book = picked.toBook();
+    final api = ApiService();
+    List<Chapter> chapters = const [];
+    try {
+      chapters = await api.getBookChapters(book.bookId);
+    } catch (_) {
+      chapters = const [];
+    } finally {
+      api.dispose();
+    }
+    if (!mounted) return;
+    if (chapters.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('《${book.bookName}》目录加载失败，请稍后重试')),
+      );
+      return;
+    }
+    final settings = await ReaderSettingsRepository().load(book.bookId);
+    if (!mounted) return;
+    final targetIdx = picked.lastReadChapterIndex.clamp(0, chapters.length - 1);
+    Navigator.of(context).popUntil((route) => route.isFirst);
+    await Navigator.push(
+      context,
+      BookPageRoute(
+        builder: (_) => ReaderScreen(
+          book: book,
+          chapters: chapters,
+          initialChapterIndex: targetIdx,
+          resumeSavedPosition: true,
+          initialSettings: settings,
+          autoStartAudio: autoStartAudio,
+        ),
+      ),
+    );
   }
 
   void _select(int index) {
@@ -128,8 +245,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         builder: (_) => const LocalBookImportDialog(),
       );
       if (result != null && mounted) {
-        Navigator.of(context).popUntil((route) => route.isFirst);
-        _select(1);
+        final isHomeTop = ModalRoute.of(context)?.isCurrent ?? true;
+        if (isHomeTop) {
+          _select(1);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('外部小说已导入书架，退出当前页面后可查看')),
+          );
+        }
       }
     } finally {
       _dialogOpen = false;
@@ -172,8 +295,14 @@ class _MainScreenState extends State<MainScreen> with WidgetsBindingObserver {
         ),
       );
       if (result != null && mounted) {
-        Navigator.of(context).popUntil((route) => route.isFirst);
-        _select(1);
+        final isHomeTop = ModalRoute.of(context)?.isCurrent ?? true;
+        if (isHomeTop) {
+          _select(1);
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('外部小说已导入书架，退出当前页面后可查看')),
+          );
+        }
       }
     } finally {
       await _externalImports.complete(request);

@@ -625,6 +625,7 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
           ),
         );
 
+        final selectionActive = widget.isSelectionActive?.call() == true;
         return Listener(
           onPointerCancel: (_) => _pointerCancelled = true,
           child: GestureDetector(
@@ -634,11 +635,11 @@ class SimulationPageTurnState extends State<SimulationPageTurn>
               supportedDevices: widget.supportedDevices,
               behavior: HitTestBehavior.translucent,
               dragStartBehavior: DragStartBehavior.down,
-              onHorizontalDragDown: _onDragDown,
-              onHorizontalDragStart: (_) {},
-              onHorizontalDragUpdate: _onDragUpdate,
-              onHorizontalDragEnd: _onDragEnd,
-              onHorizontalDragCancel: _onDragCancel,
+              onHorizontalDragDown: selectionActive ? null : _onDragDown,
+              onHorizontalDragStart: selectionActive ? null : (_) {},
+              onHorizontalDragUpdate: selectionActive ? null : _onDragUpdate,
+              onHorizontalDragEnd: selectionActive ? null : _onDragEnd,
+              onHorizontalDragCancel: selectionActive ? null : _onDragCancel,
               child: ClipRect(
                 child: Stack(
                   fit: StackFit.expand,

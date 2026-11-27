@@ -107,6 +107,7 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
   final Map<String, ({bool ok, String message})> _textTestResults = {};
   String? _testingVoiceId;
   bool _rebuilding = false;
+  String _voiceGenderFilter = 'all';
 
   @override
   void initState() {
@@ -419,13 +420,39 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
         ),
         const SizedBox(height: 6),
         Text(
-          '可选择性启用模型与音色并逐个试听；若已编排数据使用的 TTS 模型被禁用、删除或失效，'
-          '系统自动按男对男、女对女寻找可用音色兜底。',
+          '可按供应商折叠管理模型与音色并逐个试听；若已编排数据使用的 TTS 模型被禁用或移除，'
+          '系统自动按同性别寻找可用音色兜底。',
           style: TextStyle(
             fontSize: 11,
             color: AppTheme.textSecondaryOf(context),
           ),
         ),
+        if (cfg.allVoiceProfiles.length > 4) ...[
+          const SizedBox(height: 8),
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: [
+                for (final item in const [
+                  ('all', '全部音色'),
+                  ('female', '女声'),
+                  ('male', '男声'),
+                  ('neutral', '中性/系统'),
+                ])
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: ChoiceChip(
+                      label: Text(item.$2, style: const TextStyle(fontSize: 11)),
+                      visualDensity: VisualDensity.compact,
+                      selected: _voiceGenderFilter == item.$1,
+                      onSelected: (_) =>
+                          setState(() => _voiceGenderFilter = item.$1),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+        ],
         const SizedBox(height: 8),
         for (final provider in cfg.tts.providers)
           _buildTtsProviderCard(cfg, provider),
@@ -442,256 +469,278 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
     final testRes = _textTestResults[tm.effectiveId];
     final isTesting = _testingTextModelId == tm.effectiveId;
     final canDelete = cfg.textAnalysisModels.length > 1;
+    final missingKey =
+        (tm.apiKey ?? '').trim().isEmpty &&
+        (tm.apiKeyEnv ?? '').trim().isEmpty;
 
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(10),
+        borderRadius: BorderRadius.circular(12),
         side: BorderSide(
           color: isPrimary
-              ? AppTheme.primaryColor.withValues(alpha: 0.6)
+              ? AppTheme.primaryColor.withValues(alpha: 0.55)
               : isFallback
-              ? Colors.orange.withValues(alpha: 0.6)
+              ? Colors.orange.withValues(alpha: 0.55)
               : AppTheme.dividerOf(context),
         ),
       ),
-      child: Padding(
-        padding: const EdgeInsets.fromLTRB(12, 8, 8, 10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              children: [
-                Expanded(
-                  child: Wrap(
-                    spacing: 6,
-                    runSpacing: 4,
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    children: [
-                      Text(
-                        tm.displayName,
-                        style: TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 13,
-                          color: tm.enabled
-                              ? AppTheme.textPrimaryOf(context)
-                              : AppTheme.textHintOf(context),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: () => _showTextModelEditorDialog(cfg, editing: tm),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 8, 8),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Wrap(
+                      spacing: 6,
+                      runSpacing: 4,
+                      crossAxisAlignment: WrapCrossAlignment.center,
+                      children: [
+                        Text(
+                          tm.displayName,
+                          style: TextStyle(
+                            fontWeight: FontWeight.w700,
+                            fontSize: 14,
+                            color: tm.enabled
+                                ? AppTheme.textPrimaryOf(context)
+                                : AppTheme.textHintOf(context),
+                          ),
                         ),
-                      ),
-                      if (isPrimary)
-                        _badge('主模型', AppTheme.primaryColor)
-                      else if (isFallback)
-                        _badge('兜底模型', Colors.orange.shade800)
-                      else
-                        _badge(tm.enabled ? '备选' : '已停用', Colors.grey),
-                      if (isInsecureRemoteHttpUrl(tm.baseUrl))
-                        _badge('明文 HTTP', Colors.deepOrange),
-                      if ((tm.apiKey ?? '').trim().isEmpty &&
-                          (tm.apiKeyEnv ?? '').trim().isEmpty)
-                        _badge('未填密钥', Colors.red.shade700),
-                    ],
-                  ),
-                ),
-                Switch(
-                  value: tm.enabled,
-                  onChanged: (v) async {
-                    final nextModels = cfg.textAnalysisModels
-                        .map(
-                          (m) => m.effectiveId == tm.effectiveId
-                              ? m.copyWith(enabled: v)
-                              : m,
-                        )
-                        .toList();
-                    var nextPrimary = cfg.primaryTextModelId;
-                    var nextFallback = cfg.fallbackTextModelId;
-                    if (!v && nextPrimary == tm.effectiveId) {
-                      final other = nextModels.where((m) => m.enabled);
-                      if (other.isNotEmpty) {
-                        nextPrimary = other.first.effectiveId;
-                      }
-                    }
-                    if (!v && nextFallback == tm.effectiveId) {
-                      nextFallback = null;
-                    }
-                    await _applyAndSaveConfig(
-                      cfg.copyWith(
-                        textAnalysisModels: nextModels,
-                        primaryTextModelId: nextPrimary,
-                        fallbackTextModelId: nextFallback,
-                      ),
-                      successMessage: v
-                          ? '已启用文本模型 ${tm.modelId}'
-                          : '已停用文本模型 ${tm.modelId}',
-                    );
-                  },
-                ),
-              ],
-            ),
-            Text(
-              '模型 ID: ${tm.modelId} · 并发: ${tm.maxConcurrency} · 思考: ${_thinkingLabel(tm.thinkingLevel)}',
-              style: TextStyle(
-                fontSize: 11,
-                color: AppTheme.textPrimaryOf(context),
-              ),
-            ),
-            Text(
-              '上下文: ${formatTokenCountShort(tm.contextWindowTokens, emptyLabel: '默认 1M')} · 最大输出: ${formatTokenCountShort(tm.maxOutputTokens, emptyLabel: '不传该字段')} · 协议: ${tm.structuredOutput.mode == 'json_schema' ? 'JSON Schema' : 'ToolCall'}',
-              style: TextStyle(
-                fontSize: 10,
-                color: AppTheme.textSecondaryOf(context),
-              ),
-            ),
-            Text(
-              '接口: ${tm.baseUrl}${tm.endpoint}',
-              style: TextStyle(
-                fontSize: 10,
-                color: AppTheme.textSecondaryOf(context),
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            if (testRes != null)
-              Padding(
-                padding: const EdgeInsets.only(top: 4),
-                child: Text(
-                  testRes.message,
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: testRes.ok
-                        ? Colors.green.shade800
-                        : Colors.red.shade700,
-                  ),
-                ),
-              ),
-            const SizedBox(height: 6),
-            Wrap(
-              spacing: 6,
-              runSpacing: 4,
-              children: [
-                OutlinedButton.icon(
-                  style: OutlinedButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.symmetric(horizontal: 10),
-                  ),
-                  icon: isTesting
-                      ? const SizedBox(
-                          width: 12,
-                          height: 12,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.bolt, size: 15),
-                  label: const Text('测试 JSON', style: TextStyle(fontSize: 11)),
-                  onPressed: _testingTextModelId != null
-                      ? null
-                      : () => _testSingleTextModel(tm),
-                ),
-                if (!isPrimary && tm.enabled)
-                  OutlinedButton(
-                    style: OutlinedButton.styleFrom(
-                      visualDensity: VisualDensity.compact,
-                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                        if (isPrimary)
+                          _badge('主模型', AppTheme.primaryColor)
+                        else if (isFallback)
+                          _badge('兜底模型', Colors.orange.shade800)
+                        else
+                          _badge(tm.enabled ? '备选' : '已停用', Colors.grey),
+                        if (isInsecureRemoteHttpUrl(tm.baseUrl))
+                          _badge('明文 HTTP', Colors.deepOrange),
+                        if (missingKey)
+                          _badge('未填密钥', Colors.red.shade700),
+                      ],
                     ),
-                    onPressed: () async {
-                      final nextFallback =
-                          cfg.fallbackTextModelId == tm.effectiveId
-                          ? cfg.primaryTextModelId
-                          : cfg.fallbackTextModelId;
-                      await _applyAndSaveConfig(
-                        cfg.copyWith(
-                          primaryTextModelId: tm.effectiveId,
-                          fallbackTextModelId: nextFallback,
-                        ),
-                        successMessage: '已将 ${tm.modelId} 设为主文本提取模型（已重置旧报错并重新调度）',
-                      );
-                    },
-                    child: const Text('设为主模型', style: TextStyle(fontSize: 11)),
                   ),
-                if (!isPrimary && !isFallback && tm.enabled)
-                  OutlinedButton(
-                    style: OutlinedButton.styleFrom(
-                      visualDensity: VisualDensity.compact,
-                      padding: const EdgeInsets.symmetric(horizontal: 10),
-                    ),
-                    onPressed: () async {
-                      await _applyAndSaveConfig(
-                        cfg.copyWith(fallbackTextModelId: tm.effectiveId),
-                        successMessage: '已将 ${tm.modelId} 设为兜底模型',
-                      );
-                    },
-                    child: const Text('设为兜底', style: TextStyle(fontSize: 11)),
-                  ),
-                if (isFallback)
-                  TextButton(
-                    style: TextButton.styleFrom(
-                      visualDensity: VisualDensity.compact,
-                    ),
-                    onPressed: () async {
-                      await _applyAndSaveConfig(
-                        cfg.copyWith(fallbackTextModelId: null),
-                        successMessage: '已取消兜底模型设置',
-                      );
-                    },
-                    child: const Text('取消兜底', style: TextStyle(fontSize: 11)),
-                  ),
-                TextButton.icon(
-                  style: TextButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                  ),
-                  icon: const Icon(Icons.edit_outlined, size: 14),
-                  label: const Text('编辑', style: TextStyle(fontSize: 11)),
-                  onPressed: () => _showTextModelEditorDialog(cfg, editing: tm),
-                ),
-                if (canDelete)
-                  TextButton.icon(
-                    style: TextButton.styleFrom(
-                      visualDensity: VisualDensity.compact,
-                      foregroundColor: Colors.redAccent,
-                    ),
-                    icon: const Icon(Icons.delete_outline, size: 14),
-                    label: const Text('删除', style: TextStyle(fontSize: 11)),
-                    onPressed: () async {
+                  Switch(
+                    value: tm.enabled,
+                    onChanged: (v) async {
                       final nextModels = cfg.textAnalysisModels
-                          .where((m) => m.effectiveId != tm.effectiveId)
+                          .map(
+                            (m) => m.effectiveId == tm.effectiveId
+                                ? m.copyWith(enabled: v)
+                                : m,
+                          )
                           .toList();
-                      final nextPrimary =
-                          cfg.primaryTextModelId == tm.effectiveId
-                          ? (nextModels
-                                    .where((m) => m.enabled)
-                                    .firstOrNull
-                                    ?.effectiveId ??
-                                nextModels.first.effectiveId)
-                          : cfg.primaryTextModelId;
-                      final nextFallback =
-                          cfg.fallbackTextModelId == tm.effectiveId
-                          ? null
-                          : cfg.fallbackTextModelId;
+                      var nextPrimary = cfg.primaryTextModelId;
+                      var nextFallback = cfg.fallbackTextModelId;
+                      if (!v && nextPrimary == tm.effectiveId) {
+                        final other = nextModels.where((m) => m.enabled);
+                        if (other.isNotEmpty) {
+                          nextPrimary = other.first.effectiveId;
+                        }
+                      }
+                      if (!v && nextFallback == tm.effectiveId) {
+                        nextFallback = null;
+                      }
                       await _applyAndSaveConfig(
                         cfg.copyWith(
                           textAnalysisModels: nextModels,
                           primaryTextModelId: nextPrimary,
                           fallbackTextModelId: nextFallback,
                         ),
-                        successMessage: '已删除文本模型 ${tm.modelId}',
+                        successMessage: v
+                            ? '已启用文本模型 ${tm.modelId}'
+                            : '已停用文本模型 ${tm.modelId}',
                       );
                     },
                   ),
-              ],
-            ),
-          ],
+                ],
+              ),
+              Text(
+                '${tm.modelId} · 并发 ${tm.maxConcurrency} · 思考 ${_thinkingLabel(tm.thinkingLevel)}',
+                style: TextStyle(
+                  fontSize: 11.5,
+                  color: AppTheme.textSecondaryOf(context),
+                ),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              if (testRes != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    testRes.message,
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: testRes.ok
+                          ? Colors.green.shade700
+                          : Colors.red.shade700,
+                    ),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ),
+              const SizedBox(height: 6),
+              Row(
+                children: [
+                  OutlinedButton.icon(
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(horizontal: 10),
+                    ),
+                    icon: isTesting
+                        ? const SizedBox(
+                            width: 12,
+                            height: 12,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.bolt, size: 15),
+                    label: const Text('测试 JSON', style: TextStyle(fontSize: 11)),
+                    onPressed: _testingTextModelId != null
+                        ? null
+                        : () => _testSingleTextModel(tm),
+                  ),
+                  const SizedBox(width: 6),
+                  TextButton.icon(
+                    style: TextButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    icon: const Icon(Icons.edit_outlined, size: 15),
+                    label: const Text('配置', style: TextStyle(fontSize: 12)),
+                    onPressed: () => _showTextModelEditorDialog(cfg, editing: tm),
+                  ),
+                  const Spacer(),
+                  if ((!isPrimary && tm.enabled) || isFallback || canDelete)
+                    PopupMenuButton<String>(
+                    tooltip: '更多操作',
+                    icon: Icon(
+                      Icons.more_horiz,
+                      size: 20,
+                      color: AppTheme.textSecondaryOf(context),
+                    ),
+                    onSelected: (action) async {
+                      if (action == 'primary') {
+                        final nextFallback =
+                            cfg.fallbackTextModelId == tm.effectiveId
+                            ? cfg.primaryTextModelId
+                            : cfg.fallbackTextModelId;
+                        await _applyAndSaveConfig(
+                          cfg.copyWith(
+                            primaryTextModelId: tm.effectiveId,
+                            fallbackTextModelId: nextFallback,
+                          ),
+                          successMessage:
+                              '已将 ${tm.modelId} 设为主文本提取模型（已重置旧报错并重新调度）',
+                        );
+                      } else if (action == 'fallback') {
+                        await _applyAndSaveConfig(
+                          cfg.copyWith(fallbackTextModelId: tm.effectiveId),
+                          successMessage: '已将 ${tm.modelId} 设为兜底模型',
+                        );
+                      } else if (action == 'clear_fallback') {
+                        await _applyAndSaveConfig(
+                          cfg.copyWith(fallbackTextModelId: null),
+                          successMessage: '已取消兜底模型设置',
+                        );
+                      } else if (action == 'delete') {
+                        final nextModels = cfg.textAnalysisModels
+                            .where((m) => m.effectiveId != tm.effectiveId)
+                            .toList();
+                        final nextPrimary =
+                            cfg.primaryTextModelId == tm.effectiveId
+                            ? (nextModels
+                                      .where((m) => m.enabled)
+                                      .firstOrNull
+                                      ?.effectiveId ??
+                                  nextModels.first.effectiveId)
+                            : cfg.primaryTextModelId;
+                        final nextFallback =
+                            cfg.fallbackTextModelId == tm.effectiveId
+                            ? null
+                            : cfg.fallbackTextModelId;
+                        await _applyAndSaveConfig(
+                          cfg.copyWith(
+                            textAnalysisModels: nextModels,
+                            primaryTextModelId: nextPrimary,
+                            fallbackTextModelId: nextFallback,
+                          ),
+                          successMessage: '已删除文本模型 ${tm.modelId}',
+                        );
+                      }
+                    },
+                    itemBuilder: (_) => [
+                      if (!isPrimary && tm.enabled)
+                        const PopupMenuItem(
+                          value: 'primary',
+                          child: Text('设为主模型'),
+                        ),
+                      if (!isPrimary && !isFallback && tm.enabled)
+                        const PopupMenuItem(
+                          value: 'fallback',
+                          child: Text('设为兜底模型'),
+                        ),
+                      if (isFallback)
+                        const PopupMenuItem(
+                          value: 'clear_fallback',
+                          child: Text('取消兜底设置'),
+                        ),
+                      if (canDelete)
+                        const PopupMenuItem(
+                          value: 'delete',
+                          child: Text(
+                            '删除该模型',
+                            style: TextStyle(color: Colors.redAccent),
+                          ),
+                        ),
+                    ],
+                  ),
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );
+  }
+
+  bool _matchesGenderFilter(String gender) {
+    if (_voiceGenderFilter == 'all') return true;
+    if (_voiceGenderFilter == 'neutral') {
+      return gender != 'male' && gender != 'female';
+    }
+    return gender == _voiceGenderFilter;
   }
 
   Widget _buildTtsProviderCard(
     ImmersiveConfig cfg,
     TtsProviderConfig provider,
   ) {
-    final enabledModelCount = provider.models.where((m) => m.enabled).length;
+    final totalVoices = provider.models.fold<int>(
+      0,
+      (sum, m) => sum + m.voices.length,
+    );
+    final enabledVoices = provider.models.fold<int>(
+      0,
+      (sum, m) => sum + (m.enabled ? m.voices.where((v) => v.enabled).length : 0),
+    );
+    final filteredModels = [
+      for (final model in provider.models)
+        if (model.voices.any((v) => _matchesGenderFilter(v.gender))) model,
+    ];
+
     return Card(
       margin: const EdgeInsets.only(bottom: 12),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: AppTheme.dividerOf(context)),
+      ),
+      clipBehavior: Clip.antiAlias,
       child: ExpansionTile(
-        initiallyExpanded: true,
+        initiallyExpanded: totalVoices <= 2,
+        tilePadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
         title: Row(
           children: [
             Expanded(
@@ -701,17 +750,17 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   Text(
-                    '${provider.displayName} (${provider.providerId})',
+                    provider.displayName,
                     style: TextStyle(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 13,
+                      fontWeight: FontWeight.w700,
+                      fontSize: 13.5,
                       color: provider.enabled
                           ? AppTheme.textPrimaryOf(context)
                           : AppTheme.textHintOf(context),
                     ),
                   ),
                   if (provider.adapter == 'native_tts')
-                    _badge('本地离线免费', Colors.green.shade700)
+                    _badge('本地离线', Colors.green.shade700)
                   else ...[
                     if (isInsecureRemoteHttpUrl(provider.baseUrl))
                       _badge('明文 HTTP', Colors.deepOrange),
@@ -743,34 +792,45 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
           ],
         ),
         subtitle: Text(
-          '${provider.baseUrl}${provider.endpoint} · 并发 ${provider.maxConcurrency} · 启用 $enabledModelCount/${provider.models.length} 模型',
-          style: const TextStyle(fontSize: 11),
+          '已启 $enabledVoices/$totalVoices 音色 · 并发 ${provider.maxConcurrency} · 点击展开音色库',
+          style: TextStyle(
+            fontSize: 11,
+            color: AppTheme.textSecondaryOf(context),
+          ),
         ),
         children: [
           Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 6),
-            child: Wrap(
-              spacing: 8,
+            child: Row(
               children: [
                 TextButton.icon(
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
                   icon: const Icon(Icons.add, size: 15),
-                  label: const Text('新增模型与音色', style: TextStyle(fontSize: 12)),
+                  label: const Text('新增音色', style: TextStyle(fontSize: 12)),
                   onPressed: () =>
                       _showTtsModelEditorDialog(cfg, provider: provider),
                 ),
                 TextButton.icon(
+                  style: TextButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                  ),
                   icon: const Icon(Icons.edit_outlined, size: 15),
                   label: const Text('编辑供应商', style: TextStyle(fontSize: 12)),
                   onPressed: () =>
                       _showTtsProviderEditorDialog(cfg, editing: provider),
                 ),
+                const Spacer(),
                 if (cfg.tts.providers.length > 1)
-                  TextButton.icon(
-                    style: TextButton.styleFrom(
-                      foregroundColor: Colors.redAccent,
+                  IconButton(
+                    tooltip: '删除供应商',
+                    visualDensity: VisualDensity.compact,
+                    icon: const Icon(
+                      Icons.delete_outline,
+                      size: 18,
+                      color: Colors.redAccent,
                     ),
-                    icon: const Icon(Icons.delete_outline, size: 15),
-                    label: const Text('删除供应商', style: TextStyle(fontSize: 12)),
                     onPressed: () async {
                       final nextProviders = cfg.tts.providers
                           .where((p) => p.providerId != provider.providerId)
@@ -787,8 +847,206 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
               ],
             ),
           ),
-          for (final model in provider.models)
-            _buildTtsModelBlock(cfg, provider, model),
+          const Divider(height: 1),
+          if (filteredModels.isEmpty)
+            Padding(
+              padding: const EdgeInsets.all(14),
+              child: Text(
+                '当前性别筛选下无匹配音色',
+                style: TextStyle(
+                  fontSize: 12,
+                  color: AppTheme.textSecondaryOf(context),
+                ),
+              ),
+            )
+          else
+            for (final model in filteredModels)
+              if (model.voices.length == 1)
+                _buildFlatSingleVoiceTile(cfg, provider, model, model.voices.first)
+              else
+                _buildTtsModelBlock(cfg, provider, model),
+          const SizedBox(height: 4),
+        ],
+      ),
+    );
+  }
+
+  /// 单音色模型扁平化展示：消除模型外框与音色复选框双重开关冗余
+  Widget _buildFlatSingleVoiceTile(
+    ImmersiveConfig cfg,
+    TtsProviderConfig provider,
+    TtsModelConfig model,
+    TtsVoiceProfileConfig voice,
+  ) {
+    final effectiveEnabled = model.enabled && voice.enabled;
+    final genderText = switch (voice.gender) {
+      'female' => '女',
+      'male' => '男',
+      _ => '中性',
+    };
+
+    return Container(
+      padding: const EdgeInsets.fromLTRB(6, 6, 4, 6),
+      decoration: BoxDecoration(
+        border: Border(
+          bottom: BorderSide(color: AppTheme.dividerOf(context), width: 0.6),
+        ),
+      ),
+      child: Row(
+        children: [
+          Checkbox(
+            visualDensity: VisualDensity.compact,
+            value: effectiveEnabled,
+            onChanged: (checked) async {
+              final nextVal = checked ?? true;
+              final nextModels = provider.models
+                  .map(
+                    (m) => m.modelKey == model.modelKey
+                        ? m.copyWith(
+                            enabled: nextVal,
+                            voices: [voice.copyWith(enabled: nextVal)],
+                          )
+                        : m,
+                  )
+                  .toList();
+              final nextProviders = cfg.tts.providers
+                  .map(
+                    (p) => p.providerId == provider.providerId
+                        ? p.copyWith(models: nextModels)
+                        : p,
+                  )
+                  .toList();
+              await _applyAndSaveConfig(
+                cfg.copyWith(tts: cfg.tts.copyWith(providers: nextProviders)),
+                successMessage: nextVal
+                    ? '已启用音色 ${voice.displayName}'
+                    : '已停用音色 ${voice.displayName}（已编排数据将自动同性别兜底）',
+              );
+            },
+          ),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        voice.displayName,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: (provider.enabled && effectiveEnabled)
+                              ? AppTheme.textPrimaryOf(context)
+                              : AppTheme.textHintOf(context),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 6),
+                    _badge(
+                      genderText,
+                      voice.gender == 'female'
+                          ? Colors.pink.shade400
+                          : voice.gender == 'male'
+                          ? Colors.blue.shade600
+                          : Colors.teal,
+                    ),
+                  ],
+                ),
+                if (voice.notes.isNotEmpty)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 2),
+                    child: Text(
+                      voice.notes,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: AppTheme.textSecondaryOf(context),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+          ),
+          if (voice.sampleAsset != null)
+            IconButton(
+              tooltip: '本地样本试听',
+              visualDensity: VisualDensity.compact,
+              icon: Icon(
+                _coord.previewingVoiceProfileId == voice.voiceProfileId
+                    ? Icons.volume_up
+                    : Icons.play_circle_outline,
+                size: 20,
+                color: AppTheme.primaryColor,
+              ),
+              onPressed: () => unawaited(
+                _coord.playLocalVoiceSample(
+                  voiceProfileId: voice.voiceProfileId,
+                  assetPath: voice.sampleAsset!,
+                ),
+              ),
+            ),
+          IconButton(
+            tooltip: provider.adapter == 'native_tts' ? '本地系统朗读试听' : '在线合成试听',
+            visualDensity: VisualDensity.compact,
+            icon: _testingVoiceId == voice.voiceProfileId
+                ? const SizedBox(
+                    width: 15,
+                    height: 15,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : Icon(
+                    provider.adapter == 'native_tts'
+                        ? Icons.play_circle_outline
+                        : Icons.cloud_done_outlined,
+                    size: 18,
+                  ),
+            onPressed: _testingVoiceId != null
+                ? null
+                : () => _testVoiceOnline(voice.voiceProfileId),
+          ),
+          PopupMenuButton<String>(
+            tooltip: '音色操作',
+            icon: Icon(
+              Icons.more_vert,
+              size: 17,
+              color: AppTheme.textSecondaryOf(context),
+            ),
+            onSelected: (action) async {
+              if (action == 'edit') {
+                await _showTtsModelEditorDialog(
+                  cfg,
+                  provider: provider,
+                  editingModel: model,
+                );
+              } else if (action == 'delete') {
+                final nextModels = provider.models
+                    .where((m) => m.modelKey != model.modelKey)
+                    .toList();
+                final nextProviders = cfg.tts.providers
+                    .map(
+                      (p) => p.providerId == provider.providerId
+                          ? p.copyWith(models: nextModels)
+                          : p,
+                    )
+                    .toList();
+                await _applyAndSaveConfig(
+                  cfg.copyWith(tts: cfg.tts.copyWith(providers: nextProviders)),
+                  successMessage: '已删除音色 ${voice.displayName}（已编排数据将自动按同性别兜底）',
+                );
+              }
+            },
+            itemBuilder: (_) => const [
+              PopupMenuItem(value: 'edit', child: Text('编辑模型与音色')),
+              PopupMenuItem(
+                value: 'delete',
+                child: Text('删除', style: TextStyle(color: Colors.redAccent)),
+              ),
+            ],
+          ),
         ],
       ),
     );
@@ -1254,6 +1512,32 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
         });
       },
       onRebuildPressed: _confirmAndRebuild,
+      onPreSynthesizePressed: (count) async {
+        final book = widget.book ?? _coord.currentBook;
+        final chapters = widget.chapters;
+        if (book == null || chapters == null || chapters.isEmpty) {
+          setState(() {
+            _statusMessage = '请先进入书籍阅读页后再触发通勤离线预合成';
+            _statusIsError = true;
+          });
+          return;
+        }
+        final startIdx = widget.currentChapterIndex ?? _coord.currentChapterIndex;
+        unawaited(
+          _coord.preSynthesizeUpcomingChapters(
+            book: book,
+            chapters: chapters,
+            startChapterIndex: startIdx,
+            chapterCount: count,
+            contentLoader: widget.contentLoader,
+            offlineOnly: widget.offlineOnly,
+          ),
+        );
+        setState(() {
+          _statusMessage = '已启动后续 $count 章通勤离线预合成，可随时在此查看进度或停止';
+          _statusIsError = false;
+        });
+      },
       onRetryBlocked: () async {
         await _coord.retryBlockedRange();
         await _loadData();
@@ -1339,6 +1623,7 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
     final provider = await showTtsProviderEditorDialog(
       context,
       editing: editing,
+      cfg: cfg,
     );
     if (provider == null || !mounted) return;
 

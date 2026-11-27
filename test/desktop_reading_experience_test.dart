@@ -357,6 +357,8 @@ void main() {
     await tester.pump(const Duration(milliseconds: 30));
     await tester.tap(find.byTooltip('阅读设置'));
     await tester.pumpAndSettle();
+    await tester.tap(find.text('排版字体'));
+    await tester.pumpAndSettle();
     expect(find.text('桌面阅读栏数'), findsOneWidget);
     tester.state<NavigatorState>(find.byType(Navigator).first).pop();
     await tester.pumpAndSettle();
@@ -830,6 +832,8 @@ void main() {
       expect(tester.getRect(find.byType(ReaderPageView)), viewport);
       await tester.tap(find.byTooltip('阅读设置'));
       await tester.pumpAndSettle();
+      await tester.tap(find.text('排版字体'));
+      await tester.pumpAndSettle();
       expect(find.text('桌面阅读栏数'), findsOneWidget);
       tester.state<NavigatorState>(find.byType(Navigator).first).pop();
       await tester.pumpAndSettle();
@@ -917,6 +921,8 @@ void main() {
       await tester.tap(find.text('排版设置'));
       await tester.pumpAndSettle();
       await tester.sendKeyEvent(LogicalKeyboardKey.f11);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('排版字体'));
       await tester.pumpAndSettle();
       expect(find.text('桌面阅读栏数'), findsOneWidget);
       tester.state<NavigatorState>(find.byType(Navigator).first).pop();

@@ -13,6 +13,7 @@ import '../services/reader_export_service.dart';
 import '../services/reader_settings_repository.dart';
 import '../widgets/book_page_route.dart';
 import '../widgets/note_editor_dialog.dart';
+import '../widgets/quote_share_card_sheet.dart';
 import '../widgets/reader_undo.dart';
 import '../widgets/reader_trash_dialog.dart';
 import '../widgets/reader_text_input_dialog.dart';
@@ -961,6 +962,18 @@ class NotesWorkspaceScreenState extends State<NotesWorkspaceScreen> {
                   onPressed: () =>
                       Clipboard.setData(ClipboardData(text: note.text)),
                   icon: const Icon(Icons.copy, size: 18),
+                ),
+                IconButton(
+                  tooltip: '生成金句卡片',
+                  onPressed: () => QuoteShareCardSheet.show(
+                    context,
+                    quote: note.text,
+                    bookName: entry.book.bookName,
+                    author: entry.book.author,
+                    chapterTitle: note.chapterTitle,
+                    noteText: note.note,
+                  ),
+                  icon: const Icon(Icons.share_outlined, size: 18),
                 ),
               ],
             ),

@@ -131,7 +131,8 @@ void main() {
       await openInlineReader(tester, mode);
       final text = paragraphText(mode);
       final span = tester.widget<Text>(text).textSpan! as TextSpan;
-      expect(span.children!.last, isA<WidgetSpan>());
+      // 正文 Text.rich 保持纯文本不含 WidgetSpan（气泡通过独立不可选叠加层精确贴合段尾，确保跨段选词与复制不含气泡计数）
+      expect(span.children!.whereType<WidgetSpan>(), isEmpty);
       expect(
         paragraphRender(tester, text).constraints.maxWidth,
         closeTo(360, 0.01),
@@ -192,13 +193,13 @@ void main() {
     final count = layout.pages.length as int;
     expect(count, greaterThan(2));
     for (var index = 0; index < count; index++) {
-      final text = tester.widget<Text>(
-        paragraphText('simulation', page: index),
-      );
-      final span = text.textSpan! as TextSpan;
       expect(
-        span.children!.whereType<WidgetSpan>().length,
-        index == count - 1 ? 1 : 0,
+        paragraphText('simulation', page: index),
+        findsOneWidget,
+      );
+      expect(
+        bubble(0),
+        index == count - 1 ? findsOneWidget : findsNothing,
       );
       if (index < count - 1) {
         view.turnToNextPage();
@@ -235,12 +236,11 @@ void main() {
       Offset(paragraphBefore.left + 80, paragraphBefore.center.dy),
     );
     await fixture.settleReader(tester);
-    final selectable = tester.widget<SelectableText>(
-      find.byType(SelectableText),
-    );
-    expect(selectable.textSpan!.toPlainText(), body);
-    expect(selectable.textSpan!.children!.whereType<WidgetSpan>(), isEmpty);
+    final updatedSpan = tester.widget<Text>(text).textSpan! as TextSpan;
+    expect(updatedSpan.toPlainText(), body);
+    expect(updatedSpan.children!.whereType<WidgetSpan>(), isEmpty);
     expect(tester.getRect(bubble(0)), bubbleBefore);
+    expect(find.text('复制'), findsOneWidget);
     expect(tester.takeException(), isNull);
     await tester.pumpWidget(const SizedBox.shrink());
     await fixture.settleReader(tester);
@@ -260,17 +260,20 @@ void main() {
     for (var index = 0; index < count; index++) {
       final page = fixture.address(tester).page;
       final fragment = page.fragments.single;
-      final paragraph = paragraphRender(
-        tester,
-        paragraphText('simulation', page: index),
-      );
+      final paragraphHost = find
+          .ancestor(
+            of: paragraphText('simulation', page: index),
+            matching: find.byType(DecoratedBox),
+          )
+          .first;
+      final renderedHeight = tester.getRect(paragraphHost).height;
       expect(
-        paragraph.size.height,
+        renderedHeight,
         closeTo(fragment.height, 0.01),
         reason: 'The tail placeholder must scale exactly once on page $index.',
       );
       expect(
-        paragraph.size.height,
+        renderedHeight,
         lessThanOrEqualTo(page.availableHeight + 0.01),
       );
       if (index < count - 1) {

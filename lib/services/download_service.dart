@@ -1551,13 +1551,8 @@ $navPoints  </navMap>
       return true;
     }
 
-    var status = await Permission.storage.request();
+    final status = await Permission.storage.request();
     if (status.isGranted) return true;
-
-    if (status.isDenied || status.isRestricted || status.isPermanentlyDenied) {
-      status = await Permission.manageExternalStorage.request();
-      if (status.isGranted) return true;
-    }
 
     if (status.isPermanentlyDenied) {
       openAppSettings();

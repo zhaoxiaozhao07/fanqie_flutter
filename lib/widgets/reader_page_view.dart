@@ -247,7 +247,18 @@ class ReaderPageViewState extends State<ReaderPageView> {
       _turn(forward: true, fromWheel: fromWheel);
   void turnToPreviousPage({bool fromWheel = false}) =>
       _turn(forward: false, fromWheel: fromWheel);
-  void handleContentTap(Offset globalPosition) {
+
+  int? _lastDownPointer;
+  int? _handledTapPointer;
+
+  bool _isDuplicatePointerTap() =>
+      _lastDownPointer != null && _handledTapPointer == _lastDownPointer;
+
+  void handleContentTap(Offset globalPosition, {int? pointer}) {
+    if (pointer != null) {
+      if (_handledTapPointer == pointer) return;
+      _handledTapPointer = pointer;
+    }
     final box = context.findRenderObject();
     if (box is RenderBox && box.hasSize) {
       _tap(box.globalToLocal(globalPosition), box.size.width);
@@ -517,6 +528,7 @@ class ReaderPageViewState extends State<ReaderPageView> {
           });
         },
         onPointerDown: (event) {
+          _lastDownPointer = event.pointer;
           _pointerStart =
               ReaderPlatform.isDesktop && event.kind == PointerDeviceKind.mouse
               ? null
@@ -590,20 +602,26 @@ class ReaderPageViewState extends State<ReaderPageView> {
                 onPageChanged: _finish,
                 onInteractionEnded: () => _finish(_index),
                 onTurnRequested: (forward) {
+                  if (_isDuplicatePointerTap()) return;
                   widget.onUserPageTurn?.call();
                   _turn(forward: forward);
                 },
                 onTurnStarted: clearQueuedTurns,
                 onPreviousChapter: widget.onPreviousBoundary,
                 onNextChapter: widget.onNextBoundary,
-                onCenterTap: widget.onCenterTap,
+                onCenterTap: () {
+                  if (_isDuplicatePointerTap()) return;
+                  widget.onCenterTap();
+                },
                 tapToTurn: widget.tapToTurn,
               );
             } else {
               page = GestureDetector(
                 behavior: HitTestBehavior.translucent,
-                onTapUp: (details) =>
-                    _tap(details.localPosition, viewport.width),
+                onTapUp: (details) {
+                  if (_isDuplicatePointerTap()) return;
+                  _tap(details.localPosition, viewport.width);
+                },
                 child: NotificationListener<ScrollNotification>(
                   onNotification: _scroll,
                   child: PageView.builder(
