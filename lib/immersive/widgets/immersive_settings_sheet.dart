@@ -245,11 +245,14 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
             children: [
               const Icon(Icons.record_voice_over, color: AppTheme.primaryColor),
               const SizedBox(width: 8),
-              const Text(
-                '沉浸式多角色听书设置',
-                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              const Expanded(
+                child: Text(
+                  '沉浸式多角色听书设置',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                ),
               ),
-              const Spacer(),
               IconButton(
                 icon: const Icon(Icons.close),
                 onPressed: () => Navigator.pop(context),

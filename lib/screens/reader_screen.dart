@@ -3441,6 +3441,44 @@ class _ReaderScreenState extends State<ReaderScreen>
 
   Widget _nonSelectable(Widget child) => SelectionContainer.disabled(child: child);
 
+  /// 选区气泡菜单通用紧凑操作按钮，兼顾窄屏单行/折行自适应与手指触控舒适度
+  Widget _buildSelectionMenuAction({
+    Key? key,
+    required IconData icon,
+    required String label,
+    required VoidCallback onPressed,
+  }) {
+    return TextButton(
+      key: key,
+      style: TextButton.styleFrom(
+        foregroundColor: Colors.white,
+        padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+        minimumSize: const Size(0, 38),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      ),
+      onPressed: onPressed,
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, size: 15, color: Colors.white),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            maxLines: 1,
+            softWrap: false,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontWeight: FontWeight.w600,
+              height: 1.15,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _desktopMultipleSelectionMenu(
     BuildContext context,
     TextSelectionToolbarAnchors anchors,
@@ -3479,159 +3517,123 @@ class _ReaderScreenState extends State<ReaderScreen>
     final selectedAllText =
         captured?.text ?? _desktopSelectionController.selectedText.trim();
     final messenger = ScaffoldMessenger.of(context);
-    final btnStyle = TextButton.styleFrom(
-      foregroundColor: Colors.white,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-      minimumSize: const Size(44, 44),
-    );
 
-    return TextSelectionToolbar(
-      anchorAbove: anchors.primaryAnchor,
-      anchorBelow: anchors.secondaryAnchor ?? anchors.primaryAnchor,
+    return AdaptiveSelectionBubbleToolbar(
+      anchors: anchors,
       children: [
-        Container(
-          constraints: BoxConstraints(
-            maxWidth: math.max(160, MediaQuery.sizeOf(context).width - 24),
-          ),
-          decoration: BoxDecoration(
-            color: const Color(0xFF232326),
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.45),
-                blurRadius: 10,
-                offset: const Offset(0, 3),
-              ),
-            ],
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-          child: Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            spacing: 2,
-            runSpacing: 2,
-            children: [
-              TextButton.icon(
-                key: const ValueKey('desktop-copy-paragraphs'),
-                style: btnStyle,
-                onPressed: () async {
-                  await _desktopSelectionController.copy();
-                  dismiss();
+        _buildSelectionMenuAction(
+          key: const ValueKey('desktop-copy-paragraphs'),
+          icon: Icons.copy_rounded,
+          label: '复制',
+          onPressed: () async {
+            await _desktopSelectionController.copy();
+            dismiss();
+            if (mounted) {
+              messenger.showSnackBar(
+                const SnackBar(
+                  content: Text('已复制多段文本'),
+                  duration: Duration(seconds: 1),
+                ),
+              );
+            }
+          },
+        ),
+        if (captured != null) ...[
+          if (existingSpanNote != null)
+            _buildSelectionMenuAction(
+              icon: Icons.format_clear_rounded,
+              label: '取消划线',
+              onPressed: () async {
+                dismiss();
+                try {
+                  final undo = await _bookmarkService.deleteNotes(
+                    widget.book.bookId,
+                    {existingSpanNote.id},
+                  );
+                  if (mounted && undo != null) {
+                    showReaderUndo(this.context, '跨段划线已移入回收站', [undo]);
+                  }
+                } catch (_) {
                   if (mounted) {
                     messenger.showSnackBar(
-                      const SnackBar(
-                        content: Text('已复制多段文本'),
-                        duration: Duration(seconds: 1),
-                      ),
+                      const SnackBar(content: Text('删除未完成，原批注保留')),
                     );
                   }
-                },
-                icon: const Icon(Icons.copy_rounded, size: 15),
-                label: const Text('复制', style: TextStyle(fontSize: 13)),
-              ),
-              if (captured != null) ...[
-                if (existingSpanNote != null)
-                  TextButton.icon(
-                    style: btnStyle,
-                    onPressed: () async {
-                      dismiss();
-                      try {
-                        final undo = await _bookmarkService.deleteNotes(
-                          widget.book.bookId,
-                          {existingSpanNote.id},
-                        );
-                        if (mounted && undo != null) {
-                          showReaderUndo(this.context, '跨段划线已移入回收站', [undo]);
-                        }
-                      } catch (_) {
-                        if (mounted) {
-                          messenger.showSnackBar(
-                            const SnackBar(content: Text('删除未完成，原批注保留')),
-                          );
-                        }
-                      }
-                    },
-                    icon: const Icon(Icons.format_clear_rounded, size: 15),
-                    label: const Text('取消划线', style: TextStyle(fontSize: 13)),
-                  )
-                else
-                  TextButton.icon(
-                    key: const ValueKey('desktop-highlight-range'),
-                    style: btnStyle,
-                    onPressed: () {
-                      dismiss();
-                      unawaited(_saveReadingSelection(captured!));
-                    },
-                    icon: const Icon(Icons.format_underlined, size: 15),
-                    label: const Text('跨段划线', style: TextStyle(fontSize: 13)),
+                }
+              },
+            )
+          else
+            _buildSelectionMenuAction(
+              key: const ValueKey('desktop-highlight-range'),
+              icon: Icons.format_underlined,
+              label: '跨段划线',
+              onPressed: () {
+                dismiss();
+                unawaited(_saveReadingSelection(captured!));
+              },
+            ),
+          _buildSelectionMenuAction(
+            key: const ValueKey('desktop-note-range'),
+            icon: Icons.note_add_outlined,
+            label: '跨段笔记',
+            onPressed: () async {
+              final snapshot = captured!;
+              _beginReaderPanel();
+              dismiss();
+              try {
+                final edit = await showDialog<NoteEditData>(
+                  context: context,
+                  builder: (_) => _themes[_themeIndex].wrap(
+                    NoteEditorDialog(quote: snapshot.text),
                   ),
-                TextButton.icon(
-                  key: const ValueKey('desktop-note-range'),
-                  style: btnStyle,
-                  onPressed: () async {
-                    final snapshot = captured!;
-                    _beginReaderPanel();
-                    dismiss();
-                    try {
-                      final edit = await showDialog<NoteEditData>(
-                        context: context,
-                        builder: (_) => _themes[_themeIndex].wrap(
-                          NoteEditorDialog(quote: snapshot.text),
-                        ),
-                      );
-                      if (edit != null && mounted) {
-                        await _saveReadingSelection(snapshot, edit: edit);
-                      }
-                    } finally {
-                      if (mounted) _endReaderPanel();
-                    }
-                  },
-                  icon: const Icon(Icons.note_add_outlined, size: 15),
-                  label: const Text('跨段笔记', style: TextStyle(fontSize: 13)),
-                ),
-              ],
-              if (selectedAllText.isNotEmpty) ...[
-                TextButton.icon(
-                  style: btnStyle,
-                  onPressed: () {
-                    dismiss();
-                    _openAiReadingAssistant(initialTerm: selectedAllText);
-                  },
-                  icon: const Icon(Icons.auto_awesome_outlined, size: 15),
-                  label: const Text('AI 速查', style: TextStyle(fontSize: 13)),
-                ),
-                TextButton.icon(
-                  style: btnStyle,
-                  onPressed: () {
-                    dismiss();
-                    final chIdx = captured?.chapter ?? ranges.first.chapterIndex;
-                    final chapterTitle =
-                        (chIdx >= 0 && chIdx < widget.chapters.length)
-                        ? widget.chapters[chIdx].title
-                        : null;
-                    _beginReaderPanel();
-                    QuoteShareCardSheet.show(
-                      this.context,
-                      quote: selectedAllText,
-                      bookName: widget.book.bookName,
-                      author: widget.book.author,
-                      chapterTitle: chapterTitle,
-                    ).whenComplete(_endReaderPanel);
-                  },
-                  icon: const Icon(Icons.share_outlined, size: 15),
-                  label: const Text('分享卡片', style: TextStyle(fontSize: 13)),
-                ),
-              ],
-              if (error != null || ReaderPlatform.isDesktop)
-                Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 6),
-                  child: Text(
-                    error ?? '同章跨段选区 · 原文坐标保持',
-                    style: const TextStyle(color: Colors.white70, fontSize: 12),
-                  ),
-                ),
-            ],
+                );
+                if (edit != null && mounted) {
+                  await _saveReadingSelection(snapshot, edit: edit);
+                }
+              } finally {
+                if (mounted) _endReaderPanel();
+              }
+            },
           ),
-        ),
+        ],
+        if (selectedAllText.isNotEmpty) ...[
+          _buildSelectionMenuAction(
+            icon: Icons.auto_awesome_outlined,
+            label: 'AI 速查',
+            onPressed: () {
+              dismiss();
+              _openAiReadingAssistant(initialTerm: selectedAllText);
+            },
+          ),
+          _buildSelectionMenuAction(
+            icon: Icons.share_outlined,
+            label: '分享卡片',
+            onPressed: () {
+              dismiss();
+              final chIdx = captured?.chapter ?? ranges.first.chapterIndex;
+              final chapterTitle =
+                  (chIdx >= 0 && chIdx < widget.chapters.length)
+                  ? widget.chapters[chIdx].title
+                  : null;
+              _beginReaderPanel();
+              QuoteShareCardSheet.show(
+                this.context,
+                quote: selectedAllText,
+                bookName: widget.book.bookName,
+                author: widget.book.author,
+                chapterTitle: chapterTitle,
+              ).whenComplete(_endReaderPanel);
+            },
+          ),
+        ],
+        if (error != null || ReaderPlatform.isDesktop)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+            child: Text(
+              error ?? '同章跨段选区 · 原文坐标保持',
+              style: const TextStyle(color: Colors.white70, fontSize: 12),
+            ),
+          ),
       ],
     );
   }
@@ -6267,7 +6269,7 @@ class _ReaderScreenState extends State<ReaderScreen>
           if (ReaderPlatform.capabilities.tts) ...[
             (
               icon: Icons.record_voice_over_outlined,
-              label: '沉浸式多角色听书',
+              label: '沉浸式听书',
               highlighted: _immersiveService.isActive,
               onTap: () => unawaited(_startImmersiveReading()),
             ),
@@ -6384,66 +6386,119 @@ class _ReaderScreenState extends State<ReaderScreen>
                       final cols = (constraints.maxWidth < 360 || textScale > 1.45)
                           ? 2
                           : (constraints.maxWidth >= 560 ? 4 : 3);
-                      final spacing = 10.0;
-                      final itemWidth =
-                          (constraints.maxWidth - 32 - spacing * (cols - 1)) /
-                          cols;
+                      const spacing = 10.0;
+                      // 按行分组并使用 IntrinsicHeight 等高拉伸，保证同行卡片始终齐平不错位
+                      final rows =
+                          <
+                            List<
+                              ({
+                                IconData icon,
+                                String label,
+                                bool highlighted,
+                                VoidCallback onTap,
+                              })
+                            >
+                          >[];
+                      for (var i = 0; i < actions.length; i += cols) {
+                        rows.add(
+                          actions.sublist(i, math.min(i + cols, actions.length)),
+                        );
+                      }
                       return SingleChildScrollView(
                         padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-                        child: Wrap(
-                          spacing: spacing,
-                          runSpacing: spacing,
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
                           children: [
-                            for (final item in actions)
-                              SizedBox(
-                                width: itemWidth,
-                                child: Material(
-                                  color: item.highlighted
-                                      ? primaryColor.withValues(alpha: 0.12)
-                                      : theme.textColor.withValues(alpha: 0.05),
-                                  borderRadius: BorderRadius.circular(12),
-                                  child: InkWell(
-                                    borderRadius: BorderRadius.circular(12),
-                                    onTap: () {
-                                      Navigator.pop(sheetCtx, item.onTap);
-                                    },
-                                    child: Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        horizontal: 8,
-                                        vertical: 12,
+                            for (var r = 0; r < rows.length; r++) ...[
+                              if (r > 0) const SizedBox(height: spacing),
+                              IntrinsicHeight(
+                                child: Row(
+                                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                                  children: [
+                                    for (var c = 0; c < cols; c++) ...[
+                                      if (c > 0) const SizedBox(width: spacing),
+                                      Expanded(
+                                        child: c < rows[r].length
+                                            ? Material(
+                                                color: rows[r][c].highlighted
+                                                    ? primaryColor.withValues(
+                                                        alpha: 0.12,
+                                                      )
+                                                    : theme.textColor.withValues(
+                                                        alpha: 0.05,
+                                                      ),
+                                                borderRadius:
+                                                    BorderRadius.circular(12),
+                                                child: InkWell(
+                                                  borderRadius:
+                                                      BorderRadius.circular(12),
+                                                  onTap: () {
+                                                    Navigator.pop(
+                                                      sheetCtx,
+                                                      rows[r][c].onTap,
+                                                    );
+                                                  },
+                                                  child: Padding(
+                                                    padding:
+                                                        const EdgeInsets.symmetric(
+                                                          horizontal: 6,
+                                                          vertical: 12,
+                                                        ),
+                                                    child: Column(
+                                                      mainAxisSize:
+                                                          MainAxisSize.min,
+                                                      mainAxisAlignment:
+                                                          MainAxisAlignment
+                                                              .center,
+                                                      children: [
+                                                        Icon(
+                                                          rows[r][c].icon,
+                                                          size: 22,
+                                                          color:
+                                                              rows[r][c]
+                                                                  .highlighted
+                                                              ? primaryColor
+                                                              : theme.textColor,
+                                                        ),
+                                                        const SizedBox(
+                                                          height: 6,
+                                                        ),
+                                                        Text(
+                                                          rows[r][c].label,
+                                                          textAlign:
+                                                              TextAlign.center,
+                                                          maxLines: 2,
+                                                          overflow: TextOverflow
+                                                              .ellipsis,
+                                                          style: TextStyle(
+                                                            fontSize: 12,
+                                                            fontWeight:
+                                                                rows[r][c]
+                                                                    .highlighted
+                                                                ? FontWeight
+                                                                      .w600
+                                                                : FontWeight
+                                                                      .normal,
+                                                            color:
+                                                                rows[r][c]
+                                                                    .highlighted
+                                                                ? primaryColor
+                                                                : theme
+                                                                      .textColor,
+                                                          ),
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ),
+                                              )
+                                            : const SizedBox.shrink(),
                                       ),
-                                      child: Column(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          Icon(
-                                            item.icon,
-                                            size: 22,
-                                            color: item.highlighted
-                                                ? primaryColor
-                                                : theme.textColor,
-                                          ),
-                                          const SizedBox(height: 6),
-                                          Text(
-                                            item.label,
-                                            textAlign: TextAlign.center,
-                                            maxLines: 2,
-                                            overflow: TextOverflow.ellipsis,
-                                            style: TextStyle(
-                                              fontSize: 12,
-                                              fontWeight: item.highlighted
-                                                  ? FontWeight.w600
-                                                  : FontWeight.normal,
-                                              color: item.highlighted
-                                                  ? primaryColor
-                                                  : theme.textColor,
-                                            ),
-                                          ),
-                                        ],
-                                      ),
-                                    ),
-                                  ),
+                                    ],
+                                  ],
                                 ),
                               ),
+                            ],
                           ],
                         ),
                       );
@@ -7656,277 +7711,149 @@ class _ReaderScreenState extends State<ReaderScreen>
 
     final messenger = ScaffoldMessenger.of(context);
 
-    return TextSelectionToolbar(
-      anchorAbove: anchors.primaryAnchor,
-      anchorBelow: anchors.secondaryAnchor ?? anchors.primaryAnchor,
+    return AdaptiveSelectionBubbleToolbar(
+      anchors: anchors,
       children: [
-        Container(
-          constraints: BoxConstraints(
-            maxWidth: math.max(160, MediaQuery.sizeOf(context).width - 24),
-          ),
-          decoration: BoxDecoration(
-            color: const Color(0xFF232326),
-            borderRadius: BorderRadius.circular(20),
-            boxShadow: [
-              BoxShadow(
-                color: Colors.black.withValues(alpha: 0.45),
-                blurRadius: 10,
-                offset: const Offset(0, 3),
-              ),
-            ],
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 2),
-          child: Wrap(
-            crossAxisAlignment: WrapCrossAlignment.center,
-            runSpacing: 4,
-            children: [
-              TextButton.icon(
-                style: TextButton.styleFrom(
-                  foregroundColor: Colors.white,
-                  minimumSize: const Size(48, 48),
+        _buildSelectionMenuAction(
+          icon: Icons.note_add_outlined,
+          label: '笔记',
+          onPressed: () async {
+            onDismiss();
+            _beginReaderPanel();
+            final edit = await showDialog<NoteEditData>(
+              context: context,
+              builder: (_) => _themes[_themeIndex].wrap(
+                NoteEditorDialog(
+                  quote: existing?.note.text ?? cleanSelected,
+                  initialNote: existing?.note.note ?? '',
+                  initialColor: existing?.note.colorIndex ?? 0,
+                  initialTags: existing?.note.tags ?? const [],
                 ),
-                onPressed: () async {
-                  onDismiss();
-                  _beginReaderPanel();
-                  final edit = await showDialog<NoteEditData>(
-                    context: context,
-                    builder: (_) => _themes[_themeIndex].wrap(
-                      NoteEditorDialog(
-                        quote: existing?.note.text ?? cleanSelected,
-                        initialNote: existing?.note.note ?? '',
-                        initialColor: existing?.note.colorIndex ?? 0,
-                        initialTags: existing?.note.tags ?? const [],
-                      ),
-                    ),
-                  ).whenComplete(_endReaderPanel);
-                  if (edit == null) return;
-                  if (existing != null) {
-                    try {
-                      final undo = await _bookmarkService.updateNoteWithUndo(
-                        existing.note.edited(
-                          note: edit.note,
-                          colorIndex: edit.colorIndex,
-                          tags: edit.tags,
-                        ),
-                        expectedUpdatedAt: existing.note.updatedAt,
-                      );
-                      if (mounted && undo != null) {
-                        showReaderUndo(this.context, '笔记已更新', [undo]);
-                      }
-                    } catch (_) {
-                      if (mounted) {
-                        messenger.showSnackBar(
-                          const SnackBar(content: Text('笔记未保存，较新的记录与旧版本都保留')),
-                        );
-                      }
-                    }
-                  } else {
-                    await _saveSelectedNote(
-                      chapterIndex,
-                      paraIndex,
-                      sourceParagraph,
-                      selectionStart,
-                      selectionEnd,
-                      edit: edit,
-                    );
-                  }
-                },
-                icon: const Icon(Icons.note_add_outlined, size: 16),
-                label: const Text('笔记'),
               ),
-              TextButton.icon(
-                style: TextButton.styleFrom(
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
+            ).whenComplete(_endReaderPanel);
+            if (edit == null) return;
+            if (existing != null) {
+              try {
+                final undo = await _bookmarkService.updateNoteWithUndo(
+                  existing.note.edited(
+                    note: edit.note,
+                    colorIndex: edit.colorIndex,
+                    tags: edit.tags,
                   ),
-                  visualDensity: VisualDensity.standard,
-                  minimumSize: const Size(48, 48),
-                ),
-                onPressed: () {
-                  Clipboard.setData(ClipboardData(text: cleanSelected));
-                  onDismiss();
+                  expectedUpdatedAt: existing.note.updatedAt,
+                );
+                if (mounted && undo != null) {
+                  showReaderUndo(this.context, '笔记已更新', [undo]);
+                }
+              } catch (_) {
+                if (mounted) {
                   messenger.showSnackBar(
-                    const SnackBar(
-                      content: Text('已复制文本'),
-                      duration: Duration(seconds: 1),
-                    ),
+                    const SnackBar(content: Text('笔记未保存，较新的记录与旧版本都保留')),
                   );
-                },
-                icon: const Icon(
-                  Icons.copy_rounded,
-                  size: 15,
-                  color: Colors.white,
-                ),
-                label: const Text(
-                  '复制',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
+                }
+              }
+            } else {
+              await _saveSelectedNote(
+                chapterIndex,
+                paraIndex,
+                sourceParagraph,
+                selectionStart,
+                selectionEnd,
+                edit: edit,
+              );
+            }
+          },
+        ),
+        _buildSelectionMenuAction(
+          icon: Icons.copy_rounded,
+          label: '复制',
+          onPressed: () {
+            Clipboard.setData(ClipboardData(text: cleanSelected));
+            onDismiss();
+            messenger.showSnackBar(
+              const SnackBar(
+                content: Text('已复制文本'),
+                duration: Duration(seconds: 1),
               ),
-              if (isAlreadyUnderlined)
-                TextButton.icon(
-                  style: TextButton.styleFrom(
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
-                    ),
-                    visualDensity: VisualDensity.standard,
-                    minimumSize: const Size(48, 48),
+            );
+          },
+        ),
+        if (isAlreadyUnderlined)
+          _buildSelectionMenuAction(
+            icon: Icons.format_clear_rounded,
+            label: '取消划线',
+            onPressed: () async {
+              onDismiss();
+              try {
+                final undo = await _bookmarkService.deleteNotes(
+                  widget.book.bookId,
+                  {existing.note.id},
+                );
+                if (mounted && undo != null) {
+                  showReaderUndo(this.context, '划线已移入回收站', [undo]);
+                }
+              } catch (_) {
+                if (mounted) {
+                  messenger.showSnackBar(
+                    const SnackBar(content: Text('删除未完成，原批注保留')),
+                  );
+                }
+              }
+            },
+          )
+        else
+          _buildSelectionMenuAction(
+            icon: Icons.edit_outlined,
+            label: '划线',
+            onPressed: () async {
+              onDismiss();
+              if (!await _saveSelectedNote(
+                chapterIndex,
+                paraIndex,
+                sourceParagraph,
+                selectionStart,
+                selectionEnd,
+              )) {
+                return;
+              }
+              await _loadNotes();
+              if (mounted) {
+                messenger.showSnackBar(
+                  const SnackBar(
+                    content: Text('已添加虚线划线'),
+                    duration: Duration(seconds: 1),
                   ),
-                  onPressed: () async {
-                    onDismiss();
-                    try {
-                      final undo = await _bookmarkService.deleteNotes(
-                        widget.book.bookId,
-                        {existing.note.id},
-                      );
-                      if (mounted && undo != null) {
-                        showReaderUndo(this.context, '划线已移入回收站', [undo]);
-                      }
-                    } catch (_) {
-                      if (mounted) {
-                        messenger.showSnackBar(
-                          const SnackBar(content: Text('删除未完成，原批注保留')),
-                        );
-                      }
-                    }
-                  },
-                  icon: const Icon(
-                    Icons.format_clear_rounded,
-                    size: 15,
-                    color: Colors.white,
-                  ),
-                  label: const Text(
-                    '取消划线',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                )
-              else
-                TextButton.icon(
-                  style: TextButton.styleFrom(
-                    foregroundColor: Colors.white,
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 6,
-                    ),
-                    visualDensity: VisualDensity.standard,
-                    minimumSize: const Size(48, 48),
-                  ),
-                  onPressed: () async {
-                    onDismiss();
-                    if (!await _saveSelectedNote(
-                      chapterIndex,
-                      paraIndex,
-                      sourceParagraph,
-                      selectionStart,
-                      selectionEnd,
-                    )) {
-                      return;
-                    }
-                    await _loadNotes();
-                    if (mounted) {
-                      messenger.showSnackBar(
-                        const SnackBar(
-                          content: Text('已添加虚线划线'),
-                          duration: Duration(seconds: 1),
-                        ),
-                      );
-                    }
-                  },
-                  icon: const Icon(
-                    Icons.edit_outlined,
-                    size: 15,
-                    color: Colors.white,
-                  ),
-                  label: const Text(
-                    '划线',
-                    style: TextStyle(
-                      color: Colors.white,
-                      fontSize: 13,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              TextButton.icon(
-                style: TextButton.styleFrom(
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
-                  ),
-                  visualDensity: VisualDensity.standard,
-                  minimumSize: const Size(48, 48),
-                ),
-                onPressed: () {
-                  onDismiss();
-                  _openAiReadingAssistant(initialTerm: cleanSelected);
-                },
-                icon: const Icon(
-                  Icons.auto_awesome_outlined,
-                  size: 15,
-                  color: Colors.white,
-                ),
-                label: const Text(
-                  'AI 速查',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-              TextButton.icon(
-                style: TextButton.styleFrom(
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 6,
-                  ),
-                  visualDensity: VisualDensity.standard,
-                  minimumSize: const Size(48, 48),
-                ),
-                onPressed: () {
-                  onDismiss();
-                  final chapterTitle =
-                      (chapterIndex >= 0 && chapterIndex < widget.chapters.length)
-                      ? widget.chapters[chapterIndex].title
-                      : null;
-                  _beginReaderPanel();
-                  QuoteShareCardSheet.show(
-                    this.context,
-                    quote: cleanSelected,
-                    bookName: widget.book.bookName,
-                    author: widget.book.author,
-                    chapterTitle: chapterTitle,
-                    noteText: existing?.note.note,
-                  ).whenComplete(_endReaderPanel);
-                },
-                icon: const Icon(
-                  Icons.share_outlined,
-                  size: 15,
-                  color: Colors.white,
-                ),
-                label: const Text(
-                  '分享卡片',
-                  style: TextStyle(
-                    color: Colors.white,
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
-            ],
+                );
+              }
+            },
           ),
+        _buildSelectionMenuAction(
+          icon: Icons.auto_awesome_outlined,
+          label: 'AI 速查',
+          onPressed: () {
+            onDismiss();
+            _openAiReadingAssistant(initialTerm: cleanSelected);
+          },
+        ),
+        _buildSelectionMenuAction(
+          icon: Icons.share_outlined,
+          label: '分享卡片',
+          onPressed: () {
+            onDismiss();
+            final chapterTitle =
+                (chapterIndex >= 0 && chapterIndex < widget.chapters.length)
+                ? widget.chapters[chapterIndex].title
+                : null;
+            _beginReaderPanel();
+            QuoteShareCardSheet.show(
+              this.context,
+              quote: cleanSelected,
+              bookName: widget.book.bookName,
+              author: widget.book.author,
+              chapterTitle: chapterTitle,
+              noteText: existing?.note.note,
+            ).whenComplete(_endReaderPanel);
+          },
         ),
       ],
     );

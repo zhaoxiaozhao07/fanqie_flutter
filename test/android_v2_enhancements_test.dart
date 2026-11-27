@@ -428,5 +428,276 @@ void main() {
         variant: TargetPlatformVariant.only(TargetPlatform.android),
       );
     }
+
+    testWidgets(
+      'Android 窄屏阅读长按单段与跨段选词时全部菜单项自适应展示且分享卡片可点击',
+      (tester) async {
+        ReaderPlatform.resetForTesting();
+        addTearDown(ReaderPlatform.resetForTesting);
+        tester.view.devicePixelRatio = 1.0;
+        // 模拟经典小屏安卓手机（360x780），验证菜单自动折行不被 44dp 裁切
+        tester.view.physicalSize = const Size(360, 780);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        const para1 = '第一段清风拂面，长夜将尽晨光微露。';
+        const para2 = '第二段江河奔涌，少年仗剑行万里路。';
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setBool('reader_is_page_mode', false);
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ReaderScreen(
+              book: Book(
+                bookId: 'narrow-selection-menu-test',
+                bookName: '窄屏选词测试书',
+                author: '测试作者',
+              ),
+              chapters: [
+                Chapter(
+                  itemId: 'ch1',
+                  title: '第一章 窄屏测试',
+                  content: '$para1\n\n$para2',
+                ),
+              ],
+              resumeSavedPosition: false,
+            ),
+          ),
+        );
+        for (var i = 0; i < 10; i++) {
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+
+        final p1Rect = tester.getRect(
+          find.byKey(const ValueKey('reader-paragraph-ch1_0')),
+        );
+        final p2Rect = tester.getRect(
+          find.byKey(const ValueKey('reader-paragraph-ch1_1')),
+        );
+
+        // 1. 单段长按选词：校验全部 5 个按钮完整落在气泡与屏幕内，且未撑满整屏
+        await tester.longPressAt(Offset(p1Rect.left + 64, p1Rect.top + 10));
+        await tester.pumpAndSettle();
+
+        final toolbarFinder = find.byKey(
+          const ValueKey('adaptive-selection-bubble-toolbar'),
+        );
+        expect(toolbarFinder, findsOneWidget);
+        final toolbarRect = tester.getRect(toolbarFinder);
+        expect(toolbarRect.left, greaterThanOrEqualTo(0));
+        expect(toolbarRect.right, lessThanOrEqualTo(360));
+        expect(toolbarRect.top, greaterThanOrEqualTo(0));
+        expect(toolbarRect.bottom, lessThanOrEqualTo(780));
+        // 气泡应按内容自适应包裹，不撑满视口高度
+        expect(toolbarRect.height, lessThan(180));
+
+        for (final label in ['笔记', '复制', '划线', 'AI 速查', '分享卡片']) {
+          final itemFinder = find.text(label);
+          expect(itemFinder, findsOneWidget);
+          final itemRect = tester.getRect(itemFinder);
+          expect(itemRect.left, greaterThanOrEqualTo(toolbarRect.left));
+          expect(itemRect.right, lessThanOrEqualTo(toolbarRect.right));
+          expect(itemRect.top, greaterThanOrEqualTo(toolbarRect.top));
+          expect(itemRect.bottom, lessThanOrEqualTo(toolbarRect.bottom));
+        }
+
+        // 实际点击末尾的「分享卡片」，确保无裁剪遮挡并成功打开金句分享卡片
+        await tester.tap(find.text('分享卡片'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('quote-share-card-preview')),
+          findsOneWidget,
+        );
+        Navigator.of(
+          tester.element(find.byKey(const ValueKey('quote-share-card-preview'))),
+        ).pop();
+        await tester.pumpAndSettle();
+
+        // 2. 跨段长按拖拽选词：校验全部 5 个跨段按钮同样完整展示且「分享卡片」可点击
+        final gesture = await tester.startGesture(
+          Offset(p1Rect.left + 48, p1Rect.top + 10),
+        );
+        await tester.pump(const Duration(milliseconds: 600));
+        await gesture.moveTo(Offset(p2Rect.right - 24, p2Rect.bottom - 6));
+        await tester.pump(const Duration(milliseconds: 120));
+        await gesture.up();
+        await tester.pumpAndSettle();
+
+        expect(toolbarFinder, findsOneWidget);
+        final multiRect = tester.getRect(toolbarFinder);
+        expect(multiRect.left, greaterThanOrEqualTo(0));
+        expect(multiRect.right, lessThanOrEqualTo(360));
+        expect(multiRect.bottom, lessThanOrEqualTo(780));
+        for (final label in ['复制', '跨段划线', '跨段笔记', 'AI 速查', '分享卡片']) {
+          final itemFinder = find.text(label);
+          expect(itemFinder, findsOneWidget);
+          final itemRect = tester.getRect(itemFinder);
+          expect(itemRect.top, greaterThanOrEqualTo(multiRect.top));
+          expect(itemRect.bottom, lessThanOrEqualTo(multiRect.bottom));
+          expect(itemRect.left, greaterThanOrEqualTo(multiRect.left));
+          expect(itemRect.right, lessThanOrEqualTo(multiRect.right));
+        }
+
+        await tester.tap(find.text('分享卡片'));
+        await tester.pumpAndSettle();
+        expect(
+          find.byKey(const ValueKey('quote-share-card-preview')),
+          findsOneWidget,
+        );
+        expect(tester.takeException(), isNull);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets(
+      'Android 阅读器更多阅读工具中沉浸式听书不换行且同行卡片严格等高对齐',
+      (tester) async {
+        ReaderPlatform.resetForTesting();
+        addTearDown(ReaderPlatform.resetForTesting);
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(360, 780);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            home: ReaderScreen(
+              book: Book(
+                bookId: 'more-actions-grid-test',
+                bookName: '网格布局测试书',
+                author: '测试作者',
+              ),
+              chapters: [
+                Chapter(
+                  itemId: 'ch1',
+                  title: '第一章',
+                  content: '正文测试内容段落，用于唤起阅读器顶部与底部工具栏。',
+                ),
+              ],
+              resumeSavedPosition: false,
+            ),
+          ),
+        );
+        for (var i = 0; i < 10; i++) {
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+
+        // 点击屏幕中央唤起阅读器控制栏，再打开右上角「更多选项」底部工具网格
+        await tester.tapAt(const Offset(180, 390));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('更多选项'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('更多阅读工具'), findsOneWidget);
+        expect(find.text('沉浸式多角色听书'), findsNothing);
+        expect(find.text('沉浸式听书'), findsOneWidget);
+
+        // 校验第二行三个卡片（「纯净阅读」「沉浸式听书」「沉浸式听书设置」）均单行且等高齐平
+        final rowLabels = ['纯净阅读', '沉浸式听书', '沉浸式听书设置'];
+        final cardRects = <Rect>[];
+        for (final label in rowLabels) {
+          final textFinder = find.text(label);
+          expect(textFinder, findsOneWidget);
+          // 12px 单行文字高度远小于 24px（两行会达到 ~32px 以上）
+          expect(tester.getSize(textFinder).height, lessThan(24));
+          final cardFinder = find.ancestor(
+            of: textFinder,
+            matching: find.byType(InkWell),
+          );
+          cardRects.add(tester.getRect(cardFinder.first));
+        }
+        for (var i = 1; i < cardRects.length; i++) {
+          expect(cardRects[i].top, closeTo(cardRects[0].top, 0.5));
+          expect(cardRects[i].bottom, closeTo(cardRects[0].bottom, 0.5));
+          expect(cardRects[i].height, closeTo(cardRects[0].height, 0.5));
+        }
+        expect(tester.takeException(), isNull);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
+
+    testWidgets(
+      'Android 320dp 超窄屏与 1.5x 系统字号下选词气泡与更多工具网格无溢出且等高对齐',
+      (tester) async {
+        ReaderPlatform.resetForTesting();
+        addTearDown(ReaderPlatform.resetForTesting);
+        tester.view.devicePixelRatio = 1.0;
+        tester.view.physicalSize = const Size(320, 640);
+        addTearDown(() {
+          tester.view.resetPhysicalSize();
+          tester.view.resetDevicePixelRatio();
+        });
+
+        await tester.pumpWidget(
+          MaterialApp(
+            builder: (context, child) => MediaQuery(
+              data: MediaQuery.of(
+                context,
+              ).copyWith(textScaler: const TextScaler.linear(1.5)),
+              child: child!,
+            ),
+            home: ReaderScreen(
+              book: Book(
+                bookId: 'small-large-font-test',
+                bookName: '超窄大字测试书',
+                author: '测试作者',
+              ),
+              chapters: [
+                Chapter(
+                  itemId: 'ch1',
+                  title: '第一章',
+                  content: '超窄屏大字号选词测试段落内容，验证气泡与分享卡片不溢出且可点击。',
+                ),
+              ],
+              resumeSavedPosition: false,
+            ),
+          ),
+        );
+        for (var i = 0; i < 10; i++) {
+          await tester.pump(const Duration(milliseconds: 50));
+        }
+
+        // 呼出控制栏并打开「更多选项」，大字号下自动切为 2 列且每行严格等高
+        await tester.tapAt(const Offset(160, 320));
+        await tester.pumpAndSettle();
+        await tester.tap(find.byTooltip('更多选项'));
+        await tester.pumpAndSettle();
+
+        expect(find.text('沉浸式听书'), findsOneWidget);
+        final cardA = tester.getRect(
+          find
+              .ancestor(
+                of: find.text('沉浸式听书'),
+                matching: find.byType(InkWell),
+              )
+              .first,
+        );
+        final cardB = tester.getRect(
+          find
+              .ancestor(
+                of: find.text('沉浸式听书设置'),
+                matching: find.byType(InkWell),
+              )
+              .first,
+        );
+        expect(cardA.top, closeTo(cardB.top, 0.5));
+        expect(cardA.bottom, closeTo(cardB.bottom, 0.5));
+        expect(tester.takeException(), isNull);
+
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pumpAndSettle();
+      },
+      variant: TargetPlatformVariant.only(TargetPlatform.android),
+    );
   });
 }

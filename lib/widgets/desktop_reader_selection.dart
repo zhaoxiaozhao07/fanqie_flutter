@@ -327,40 +327,32 @@ class _DesktopReaderSelectionState extends State<DesktopReaderSelection> {
                 dismiss,
               );
             }
-            return TextSelectionToolbar(
-              anchorAbove: anchors.primaryAnchor,
-              anchorBelow: anchors.secondaryAnchor ?? anchors.primaryAnchor,
+            return AdaptiveSelectionBubbleToolbar(
+              anchors: anchors,
               children: [
-                Container(
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF232326),
-                    borderRadius: BorderRadius.circular(20),
+                TextButton.icon(
+                  key: const ValueKey('desktop-copy-paragraphs'),
+                  style: TextButton.styleFrom(
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    minimumSize: const Size(0, 38),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                   ),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 4,
-                  ),
-                  child: Wrap(
-                    crossAxisAlignment: WrapCrossAlignment.center,
-                    spacing: 8,
-                    children: [
-                      TextButton.icon(
-                        key: const ValueKey('desktop-copy-paragraphs'),
-                        style: TextButton.styleFrom(
-                          foregroundColor: Colors.white,
-                        ),
-                        onPressed: () async {
-                          await widget.controller.copy();
-                          dismiss();
-                        },
-                        icon: const Icon(Icons.copy, size: 16),
-                        label: const Text('复制'),
-                      ),
-                      const Text(
-                        '跨段选区仅支持复制',
-                        style: TextStyle(color: Colors.white70, fontSize: 12),
-                      ),
-                    ],
+                  onPressed: () async {
+                    await widget.controller.copy();
+                    dismiss();
+                  },
+                  icon: const Icon(Icons.copy, size: 15),
+                  label: const Text('复制', style: TextStyle(fontSize: 13)),
+                ),
+                const Padding(
+                  padding: EdgeInsets.symmetric(horizontal: 6),
+                  child: Text(
+                    '跨段选区仅支持复制',
+                    style: TextStyle(color: Colors.white70, fontSize: 12),
                   ),
                 ),
               ],
@@ -371,6 +363,131 @@ class _DesktopReaderSelectionState extends State<DesktopReaderSelection> {
       ),
     ),
   );
+}
+
+/// 自适应屏幕尺寸的选区暗色浮动气泡工具栏。
+///
+/// 替代固定 44dp 高度的 Material [TextSelectionToolbar]，依据屏幕可用宽度与安全区
+/// 自动单行或折行排布选项并按真实尺寸贴合选区上下定位，避免窄屏或大字号下末尾选项被裁切。
+class AdaptiveSelectionBubbleToolbar extends StatelessWidget {
+  final TextSelectionToolbarAnchors anchors;
+  final List<Widget> children;
+  final double screenPadding;
+  final double contentDistanceAbove;
+  final double contentDistanceBelow;
+
+  const AdaptiveSelectionBubbleToolbar({
+    super.key,
+    required this.anchors,
+    required this.children,
+    this.screenPadding = 12.0,
+    this.contentDistanceAbove = 10.0,
+    this.contentDistanceBelow = 22.0,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final mediaPadding = MediaQuery.paddingOf(context);
+    final leftInset = mediaPadding.left + screenPadding;
+    final rightInset = mediaPadding.right + screenPadding;
+    final topInset = mediaPadding.top + screenPadding;
+    final bottomInset = mediaPadding.bottom + screenPadding;
+
+    final anchorAbove =
+        anchors.primaryAnchor - Offset(leftInset, topInset + contentDistanceAbove);
+    final rawBelow = anchors.secondaryAnchor ?? anchors.primaryAnchor;
+    final anchorBelow =
+        rawBelow - Offset(leftInset, topInset - contentDistanceBelow);
+
+    return Padding(
+      padding: EdgeInsets.fromLTRB(leftInset, topInset, rightInset, bottomInset),
+      child: CustomSingleChildLayout(
+        delegate: _AdaptiveSelectionToolbarLayoutDelegate(
+          anchorAbove: anchorAbove,
+          anchorBelow: anchorBelow,
+        ),
+        child: Material(
+          key: const ValueKey('adaptive-selection-bubble-toolbar'),
+          color: const Color(0xFF232326),
+          elevation: 6,
+          shadowColor: Colors.black.withValues(alpha: 0.45),
+          borderRadius: BorderRadius.circular(18),
+          clipBehavior: Clip.antiAlias,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 4),
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              runAlignment: WrapAlignment.center,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              spacing: 2,
+              runSpacing: 4,
+              children: children,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _AdaptiveSelectionToolbarLayoutDelegate extends SingleChildLayoutDelegate {
+  final Offset anchorAbove;
+  final Offset anchorBelow;
+
+  const _AdaptiveSelectionToolbarLayoutDelegate({
+    required this.anchorAbove,
+    required this.anchorBelow,
+  });
+
+  @override
+  BoxConstraints getConstraintsForChild(BoxConstraints constraints) {
+    // 解除固定 44dp 高度限制，允许工具栏根据手机宽度自动折行并完整包裹所有选项。
+    return BoxConstraints(
+      minWidth: 0,
+      maxWidth: math.max(120.0, constraints.maxWidth),
+      minHeight: 0,
+      maxHeight: math.max(44.0, constraints.maxHeight),
+    );
+  }
+
+  @override
+  Offset getPositionForChild(Size size, Size childSize) {
+    final maxX = math.max(0.0, size.width - childSize.width);
+    final maxY = math.max(0.0, size.height - childSize.height);
+
+    final fitsAbove = anchorAbove.dy - childSize.height >= 0;
+    final fitsBelow = anchorBelow.dy + childSize.height <= size.height;
+
+    final double y;
+    final double anchorX;
+    if (fitsAbove) {
+      y = (anchorAbove.dy - childSize.height).clamp(0.0, maxY).toDouble();
+      anchorX = anchorAbove.dx;
+    } else if (fitsBelow) {
+      y = anchorBelow.dy.clamp(0.0, maxY).toDouble();
+      anchorX = anchorBelow.dx;
+    } else {
+      // 上下均空间紧张时，靠向剩余空间更充足的一侧并严格收敛在安全区内。
+      final spaceAbove = anchorAbove.dy;
+      final spaceBelow = size.height - anchorBelow.dy;
+      if (spaceAbove >= spaceBelow) {
+        y = 0.0;
+        anchorX = anchorAbove.dx;
+      } else {
+        y = maxY;
+        anchorX = anchorBelow.dx;
+      }
+    }
+
+    final x = (anchorX - childSize.width / 2).clamp(0.0, maxX).toDouble();
+    return Offset(x, y);
+  }
+
+  @override
+  bool shouldRelayout(_AdaptiveSelectionToolbarLayoutDelegate oldDelegate) {
+    return anchorAbove != oldDelegate.anchorAbove ||
+        anchorBelow != oldDelegate.anchorBelow;
+  }
 }
 
 /// Exposes the active selection controller to interactive regions.
