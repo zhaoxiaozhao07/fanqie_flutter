@@ -1,0 +1,138 @@
+name: Android 独立正式发布
+run-name: Android Release · ${{ github.ref_name }}
+
+# 复用只读 Android 签名构建门禁；仅发布 Android 正式版 APK，不构建或发布 Windows / macOS。
+on:
+  push:
+    tags: ['android-v*']
+  workflow_dispatch:
+    inputs:
+      version:
+        description: '必须与 pubspec.yaml 一致；留空自动读取'
+        default: ''
+        type: string
+      publish:
+        description: '质量门禁与签名校验通过后公开 Android 独立 Release（仅 main）；关闭可在分支验证'
+        default: true
+        type: boolean
+      make_latest:
+        description: '是否将本次 Android 正式版设为仓库 Latest Release'
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+concurrency:
+  group: android-standalone-release-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.identity.outputs.version }}
+      build: ${{ steps.identity.outputs.build }}
+      full_version: ${{ steps.identity.outputs.full_version }}
+      release_tag: ${{ steps.identity.outputs.release_tag }}
+      publish: ${{ steps.identity.outputs.publish }}
+      android_artifact: ${{ steps.identity.outputs.android_artifact }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: 冻结源码提交、版本与 Android 独立发布范围
+        id: identity
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          REQUESTED_PUBLISH: ${{ inputs.publish || false }}
+        run: |
+          set -euo pipefail
+          python3 scripts/unified_release.py prepare-android \
+            --version "$REQUESTED_VERSION" --publish "$REQUESTED_PUBLISH"
+
+  quality:
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.47.9'
+          channel: stable
+          cache: true
+      - name: 共享离线回归与发布门禁校验
+        run: |
+          set -euo pipefail
+          mkdir -p build/android-standalone/ci-logs
+          flutter --version
+          flutter pub get --enforce-lockfile
+          git diff --exit-code -- pubspec.lock
+          flutter analyze --no-pub 2>&1 | tee build/android-standalone/ci-logs/analyze.log
+          flutter test --no-pub --reporter expanded 2>&1 | tee build/android-standalone/ci-logs/flutter-test.log
+          python3 scripts/test_unified_release.py 2>&1 | tee build/android-standalone/ci-logs/release-gates.log
+          python3 scripts/test_macos_package.py 2>&1 | tee build/android-standalone/ci-logs/package-gates.log
+          python3 -m pip install --disable-pip-version-check PyYAML==6.0.2
+          python3 scripts/test_unified_workflow.py 2>&1 | tee build/android-standalone/ci-logs/workflow-gates.log
+          for script in scripts/*.sh; do bash -n "$script"; done
+          git diff --check
+      - name: 保存质量门禁日志
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-standalone-quality-logs-${{ github.run_id }}-${{ github.run_attempt }}
+          path: build/android-standalone/ci-logs/
+          if-no-files-found: warn
+          retention-days: 14
+
+  android:
+    needs: [prepare, quality]
+    uses: ./.github/workflows/android-release.yml
+    with:
+      version: ${{ needs.prepare.outputs.version }}
+      artifact_name: ${{ needs.prepare.outputs.android_artifact }}
+    secrets: inherit
+
+  publish:
+    needs: [prepare, quality, android]
+    if: needs.prepare.outputs.publish == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.android.outputs.artifact_name }}
+          path: dist/android
+      - name: 复验签名 APK 并以 draft-上传-复验流程公开 Android Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MAKE_LATEST: ${{ github.event_name == 'push' && 'true' || inputs.make_latest }}
+        run: |
+          set -euo pipefail
+          python3 scripts/unified_release.py publish-android dist/android \
+            --notes docs/RELEASE_NOTES.md --make-latest "$MAKE_LATEST"

@@ -117,6 +117,27 @@ class WorkflowTests(unittest.TestCase):
         gradle = (ROOT / "android/app/build.gradle.kts").read_text()
         self.assertNotIn('implementation(project(":integration_test"))', gradle)
 
+    def test_android_standalone_workflow_publishes_only_android_safely(self):
+        document = workflow("android-publish.yml")
+        self.assertEqual(document["permissions"]["contents"], "read")
+        triggers = events(document)
+        self.assertEqual(triggers["push"]["tags"], ["android-v*"])
+        self.assertIn("workflow_dispatch", triggers)
+        jobs = document["jobs"]
+        self.assertEqual(set(jobs), {"prepare", "quality", "android", "publish"})
+        self.assertEqual(jobs["android"]["uses"], "./.github/workflows/android-release.yml")
+        self.assertEqual(set(jobs["android"]["needs"]), {"prepare", "quality"})
+        self.assertEqual(set(jobs["publish"]["needs"]), {"prepare", "quality", "android"})
+        self.assertEqual(jobs["publish"]["permissions"]["contents"], "write")
+        self.assertIn("outputs.publish == 'true'", jobs["publish"]["if"])
+        self.assertNotIn("always()", jobs["publish"]["if"])
+        for name in ["prepare", "quality", "android"]:
+            self.assertNotEqual(jobs[name].get("permissions", {}).get("contents"), "write")
+        self.assertNotEqual(
+            document["concurrency"]["group"],
+            workflow("release.yml")["concurrency"]["group"],
+        )
+
 
 class ScopeTests(unittest.TestCase):
     def setUp(self):
@@ -175,6 +196,31 @@ class ScopeTests(unittest.TestCase):
         self.environment["GITHUB_REF"] = "refs/tags/v0.0.0"
         with self.assertRaises(ValueError):
             self.prepare()
+
+    def prepare_android(self, publish="false", ancestor=True):
+        def run(arguments, **kwargs):
+            return subprocess.CompletedProcess(arguments, 0 if ancestor or "fetch" in arguments else 1)
+        with mock.patch.dict(os.environ, self.environment), \
+                mock.patch.object(release.subprocess, "check_output", return_value="a" * 40), \
+                mock.patch.object(release.subprocess, "run", side_effect=run):
+            release.prepare_android(self.identity.version, publish)
+        return dict(line.split("=", 1) for line in self.output.read_text().splitlines())
+
+    def test_android_standalone_tag_and_main_scope(self):
+        tag = release.android_release_tag()
+        self.environment["GITHUB_REF"] = f"refs/tags/{tag}"
+        self.environment["GITHUB_EVENT_NAME"] = "push"
+        values = self.prepare_android()
+        self.assertEqual(values["publish"], "true")
+        self.assertEqual(values["release_tag"], tag)
+        self.output.unlink()
+        self.environment["GITHUB_REF"] = "refs/tags/android-v0.0.0"
+        with self.assertRaises(ValueError):
+            self.prepare_android()
+        self.environment["GITHUB_REF"] = "refs/heads/feature/test"
+        self.environment["GITHUB_EVENT_NAME"] = "workflow_dispatch"
+        with self.assertRaises(ValueError):
+            self.prepare_android("true")
 
 
 if __name__ == "__main__":

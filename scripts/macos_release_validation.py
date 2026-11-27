@@ -256,7 +256,10 @@ def validate_trigger(trigger):
             and re.fullmatch("[0-9a-f]{40}", trigger["source_commit"]), "Invalid source SHA")
     require(isinstance(trigger.get("source_ref"), str) and (
         re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", trigger["source_ref"])
-        or trigger["source_ref"] == f"refs/tags/{IDENTITY.tag}"
+        or trigger["source_ref"] in {
+            f"refs/tags/{IDENTITY.tag}",
+            f"refs/tags/android-{IDENTITY.tag}",
+        }
     ), "Invalid source ref or tag/version mismatch")
     for key in ("run_id", "run_attempt"):
         require(isinstance(trigger.get(key), str) and re.fullmatch("[1-9][0-9]*", trigger[key]),

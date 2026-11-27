@@ -73,7 +73,7 @@ class FakeGitHub:
             return result
         if method == "PATCH" and path.endswith("/releases/7"):
             if body.get("draft") is False:
-                if len(self.current["assets"]) != 10:
+                if len(self.current["assets"]) not in {3, 10}:
                     raise AssertionError("Never publish a partial release")
                 self.published = True
             self.current.update(body)
@@ -189,7 +189,7 @@ class ReleaseTests(unittest.TestCase):
     def write_info(self, platform, name, info):
         directory = self.root / platform
         (directory / f"{name}.sha256").write_text(
-            f"{mac.digest(directory / name)}  {name}\n", encoding="utf-8",
+            f"{mac.digest(directory / name)}  {name}\n", encoding="utf-8", newline="\n",
         )
         info["assets"] = {n: mac.record(directory / n) for n in [name, f"{name}.sha256"]}
         (directory / f"{platform}-build-info.json").write_text(json.dumps(info))
@@ -361,6 +361,30 @@ class ReleaseTests(unittest.TestCase):
             archive.writestr("res/drawable/resource.xml", b"duplicate")
         with self.assertRaises(ValueError):
             release.android_payload(path)
+
+    def test_android_standalone_publish_verifies_and_uploads_only_android(self):
+        android_tag = release.android_release_tag()
+        self.trigger["source_ref"] = f"refs/tags/{android_tag}"
+        info_path = self.root / "android/android-build-info.json"
+        info = mac.read_json(info_path)
+        info["source_ref"] = self.trigger["source_ref"]
+        info_path.write_text(json.dumps(info))
+        self.api.refs = [{
+            "ref": self.trigger["source_ref"],
+            "object": {"type": "commit", "sha": self.trigger["source_commit"]},
+        }]
+        result = release.publish_android(
+            self.api, self.root / "android", self.trigger, "owner/repo", "android notes",
+        )
+        self.assertTrue(self.api.published)
+        self.assertEqual(result["tag_name"], android_tag)
+        self.assertEqual(len(self.api.current["assets"]), 3)
+        self.assertEqual(
+            {asset["name"] for asset in self.api.current["assets"]},
+            set(release.names("android")),
+        )
+        self.assertFalse(any(call[0] == "POST" and call[1].endswith("/git/refs")
+                             for call in self.api.calls))
 
 
 if __name__ == "__main__":

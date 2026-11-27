@@ -432,10 +432,119 @@ def prepare(requested, publish_input):
             output.write(f"{key}={value}\n")
 
 
+def android_release_tag():
+    return f"android-v{IDENTITY.version}"
+
+
+def publish_android(api, directory, trigger, repository, notes, *, make_latest=True):
+    tag = android_release_tag()
+    require(trigger.get("source_ref") in {"refs/heads/main", f"refs/tags/{tag}"},
+            "Only main or its exact Android release tag may publish")
+    require(re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository), "Invalid repository")
+    validate_android(directory, trigger)
+    expected_names = names("android")
+    files = {name: mac.record(Path(directory) / name) for name in expected_names}
+    base = f"/repos/{repository}"
+    refs = api.request("GET", f"{base}/git/matching-refs/tags/{tag}")
+    require(isinstance(refs, list), "Invalid tag collision response")
+    existing = [ref for ref in refs if ref.get("ref") == f"refs/tags/{tag}"]
+    tagged_input = trigger["source_ref"] == f"refs/tags/{tag}"
+    if tagged_input:
+        require(len(existing) == 1 and tag_commit(api, base, existing[0]) == trigger["source_commit"],
+                "Triggering Android tag is missing or points at another source")
+    else:
+        require(not existing, "Android tag already exists; no force/reuse")
+    api.request("GET", f"{base}/releases/tags/{tag}", expected=404)
+    for page in range(1, 21):
+        releases = api.request("GET", f"{base}/releases?per_page=100&page={page}")
+        require(isinstance(releases, list), "Invalid release collision response")
+        require(not any(item.get("tag_name") == tag for item in releases),
+                "Release/draft already exists; no overwrite/reuse")
+        if len(releases) < 100:
+            break
+    else:
+        raise mac.ValidationError("Release collision scan limit exceeded")
+    if not tagged_input:
+        created = api.request("POST", f"{base}/git/refs", body={
+            "ref": f"refs/tags/{tag}", "sha": trigger["source_commit"],
+        }, expected=201)
+        require(tag_commit(api, base, created) == trigger["source_commit"], "Created tag source mismatch")
+    draft = api.request("POST", f"{base}/releases", body={
+        "tag_name": tag, "target_commitish": trigger["source_commit"],
+        "name": f"番茄Reader Android v{IDENTITY.version}（构建 {IDENTITY.build}）",
+        "body": notes, "draft": True, "prerelease": False, "make_latest": "false",
+    }, expected=201)
+    release_id = draft.get("id")
+    require(type(release_id) is int and release_id > 0 and draft.get("draft") is True
+            and draft.get("tag_name") == tag
+            and draft.get("target_commitish") == trigger["source_commit"], "Unexpected new draft identity")
+    upload = draft.get("upload_url", "").split("{", 1)[0]
+    require(urlparse(upload).scheme == "https" and urlparse(upload).hostname == "uploads.github.com",
+            "Unexpected upload host")
+    for name in sorted(files):
+        api.request("POST", f"{upload}?name={quote(name, safe='')}",
+                    file=Path(directory) / name, expected=201)
+
+    def confirm(value, is_draft):
+        require(value.get("id") == release_id and value.get("tag_name") == tag
+                and value.get("target_commitish") == trigger["source_commit"]
+                and value.get("draft") is is_draft and value.get("prerelease") is False,
+                "Remote release identity/state differs")
+        assets = value.get("assets")
+        require(isinstance(assets, list) and len(assets) == len(files), "Incomplete remote release")
+        for name, expected in files.items():
+            matches = [asset for asset in assets if asset.get("name") == name]
+            require(len(matches) == 1 and matches[0].get("state") == "uploaded"
+                    and matches[0].get("size") == expected["size"]
+                    and matches[0].get("digest") == f"sha256:{expected['sha256']}",
+                    f"Remote asset digest/state/size mismatch: {name}")
+        ref = api.request("GET", f"{base}/git/ref/tags/{tag}")
+        require(tag_commit(api, base, ref) == trigger["source_commit"], "Remote tag source changed")
+
+    confirm(api.request("GET", f"{base}/releases/{release_id}"), True)
+    result = api.request("PATCH", f"{base}/releases/{release_id}", body={
+        "draft": False, "prerelease": False,
+        "make_latest": "true" if make_latest else "false",
+    })
+    confirm(result, False)
+    confirm(api.request("GET", f"{base}/releases/{release_id}"), False)
+    return result
+
+
+def prepare_android(requested, publish_input):
+    trigger = mac.environment_trigger()
+    require(not requested or requested == IDENTITY.version, "Requested version differs from pubspec")
+    head = subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip()
+    require(head == trigger["source_commit"], "Checkout differs from triggering SHA")
+    tag = android_release_tag()
+    tagged = trigger["source_ref"].startswith("refs/tags/")
+    require(not tagged or trigger["source_ref"] == f"refs/tags/{tag}", "Android tag differs from pubspec")
+    publish_requested = tagged or publish_input == "true"
+    if publish_requested:
+        require(trigger["source_ref"] in {"refs/heads/main", f"refs/tags/{tag}"},
+                "Only main and its exact Android release tag may publish")
+        subprocess.run(["git", "fetch", "--no-tags", "origin",
+                        "+refs/heads/main:refs/remotes/origin/main"], check=True)
+        result = subprocess.run(["git", "merge-base", "--is-ancestor", head, "origin/main"])
+        require(result.returncode == 0, "Release source must be reachable from main")
+    values = {
+        "version": IDENTITY.version, "build": IDENTITY.build,
+        "full_version": IDENTITY.full_version, "release_tag": tag,
+        "publish": str(publish_requested).lower(),
+        "android_artifact": f"android-{IDENTITY.version}-{IDENTITY.build}-{trigger['run_id']}-{trigger['run_attempt']}",
+    }
+    with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+        for key, value in values.items():
+            output.write(f"{key}={value}\n")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     p = commands.add_parser("prepare")
+    p.add_argument("--version", default="")
+    p.add_argument("--publish", choices=["true", "false"], default="false")
+    p = commands.add_parser("prepare-android")
     p.add_argument("--version", default="")
     p.add_argument("--publish", choices=["true", "false"], default="false")
     p = commands.add_parser("android")
@@ -445,14 +554,19 @@ def main():
     p = commands.add_parser("assemble")
     for name in ["android", "windows", "macos", "output"]:
         p.add_argument("--" + name, type=Path, required=True)
-    for name in ["verify", "publish"]:
+    for name in ["verify", "publish", "publish-android"]:
         p = commands.add_parser(name)
         p.add_argument("directory", type=Path)
-        if name == "publish":
+        if name in {"publish", "publish-android"}:
             p.add_argument("--notes", type=Path, required=True)
+        if name == "publish-android":
+            p.add_argument("--make-latest", choices=["true", "false"], default="true")
     args = parser.parse_args()
     if args.command == "prepare":
         prepare(args.version, args.publish)
+        return
+    if args.command == "prepare-android":
+        prepare_android(args.version, args.publish)
         return
     trigger = mac.environment_trigger()
     if args.command == "android":
@@ -461,6 +575,15 @@ def main():
         assemble(args.android, args.windows, args.macos, args.output, trigger)
     elif args.command == "verify":
         validate_stage(args.directory, trigger)
+    elif args.command == "publish-android":
+        result = publish_android(
+            GitHubApi(os.environ.get("GH_TOKEN")), args.directory, trigger,
+            os.environ["GITHUB_REPOSITORY"], args.notes.read_text(encoding="utf-8"),
+            make_latest=args.make_latest == "true",
+        )
+        print(result.get("html_url", f"Published {android_release_tag()}"))
+        print(f"Verified {args.command}: android client at {IDENTITY.full_version}")
+        return
     else:
         result = publish(GitHubApi(os.environ.get("GH_TOKEN")), args.directory, trigger,
                          os.environ["GITHUB_REPOSITORY"], args.notes.read_text(encoding="utf-8"))
