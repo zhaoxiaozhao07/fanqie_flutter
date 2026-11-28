@@ -487,6 +487,14 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
         await _pushDemandToScheduler();
         await _checkBufferAndAdvancePlayback();
       };
+      _scheduler!.onChunksUpdated = (bookId, revId) async {
+        if (_book?.bookId != bookId || _currentRevision?.revisionId != revId) {
+          return;
+        }
+        _chunks = await _store!.getAnalysisChunks(revId);
+        await _pushDemandToScheduler();
+        _notify();
+      };
       _scheduler!.onAudioAssetReady = (requestKey) async {
         // ready 事件只通知重新检查需求与连续缓冲，绝不无条件 enqueue（满足 A01）
         await _syncManifestReadyStates();
@@ -739,8 +747,40 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
       final mergedUnits = [...storedUnits, ...newUnits]
         ..sort((a, b) => a.globalOrder.compareTo(b.globalOrder));
       final existingChunks = await _store!.getAnalysisChunks(stableRevId);
+      final latestCp = await _store!.getLatestCheckpoint(
+        book.bookId,
+        stableRevId,
+      );
+      final confirmedOrder = latestCp?.confirmedChunkOrder ?? -1;
+      final maxSafeUnits = ChunkPlanner.maxSafeUnitsForOutput(
+        cfg.primaryTextModel,
+      );
+      final needsReplanUnconfirmed =
+          confirmedOrder < 0 &&
+          existingChunks.any(
+            (c) =>
+                c.plannerVersion != ChunkPlanner.plannerVersion ||
+                c.targetUnitIds.length > maxSafeUnits,
+          );
 
-      if (newUnits.isNotEmpty || existingChunks.isEmpty) {
+      if (newUnits.isNotEmpty ||
+          existingChunks.isEmpty ||
+          needsReplanUnconfirmed) {
+        if (needsReplanUnconfirmed) {
+          final nowMs = _now().millisecondsSinceEpoch;
+          await _store!.cancelQueuedJobsForBook(
+            book.bookId,
+            jobType: ImmersiveJobType.chunkAnalysis,
+            nowMs: nowMs,
+          );
+          // 递增 analysisRunRevision，自动隔离旧版大分块遗留的错位草稿与已成功任务键
+          bookCfg = bookCfg.copyWith(
+            analysisRunRevision: bookCfg.analysisRunRevision + 1,
+            updatedAtMs: nowMs,
+          );
+          _currentBookAudioConfig = bookCfg;
+          await _store!.saveBookAudioConfig(bookCfg);
+        }
         final replannedChunks = ChunkPlanner.planChunks(
           bookId: book.bookId,
           bookRevisionId: stableRevId,
@@ -751,11 +791,15 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
           useChapterScopedChunkOrder: true,
           fastStartChapterIndex: anchorChapterIndex,
         );
-        await _store!.appendChapterUnitsAndChunks(
-          bookRevisionId: stableRevId,
-          units: newUnits,
-          chunks: replannedChunks,
-        );
+        if (needsReplanUnconfirmed && newUnits.isEmpty) {
+          await _store!.replaceAnalysisChunks(stableRevId, replannedChunks);
+        } else {
+          await _store!.appendChapterUnitsAndChunks(
+            bookRevisionId: stableRevId,
+            units: newUnits,
+            chunks: replannedChunks,
+          );
+        }
         _chunks = replannedChunks;
       } else {
         _chunks = existingChunks;
@@ -1621,8 +1665,16 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
         : windowChunks
               .where((c) => c.chunkOrder < targetChunk.chunkOrder)
               .toList();
+    final validDraftChunkIds = {for (final d in validDrafts) d.chunkId};
     final prefixDone = prefixWindowChunks
         .where((c) => c.chunkOrder <= confirmedOrder)
+        .length;
+    final prefixDrafts = prefixWindowChunks
+        .where(
+          (c) =>
+              c.chunkOrder > confirmedOrder &&
+              validDraftChunkIds.contains(c.chunkId),
+        )
         .length;
     final isPrefix =
         prefixWindowChunks.isNotEmpty && prefixDone < prefixWindowChunks.length;
@@ -1651,6 +1703,36 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
       },
     )).where((j) => j.jobType == ImmersiveJobType.ttsSynthesize).length;
 
+    final totalSegs = _manifestSegments.length;
+    final curSegOneBased = totalSegs == 0
+        ? 0
+        : (_currentSegmentIndex + 1).clamp(1, totalSegs);
+    final double progressRatio;
+    final String progressSummaryText;
+    if (isPrefix) {
+      final totalPrefix = math.max(1, prefixWindowChunks.length);
+      progressRatio = ((prefixDone + prefixDrafts * 0.5) / totalPrefix).clamp(
+        0.0,
+        0.99,
+      );
+      final pct = (progressRatio * 100).round();
+      progressSummaryText = prefixDrafts > 0
+          ? '前文档案 $prefixDone/$totalPrefix ($pct% · 已解析 ${prefixDone + prefixDrafts}/$totalPrefix)'
+          : '前文档案 $prefixDone/$totalPrefix ($pct%)';
+    } else if (totalSegs == 0) {
+      final totalWin = math.max(1, windowChunks.length);
+      final analyzedInWin =
+          (confirmedInWindow + validDrafts.length).clamp(0, totalWin);
+      progressRatio = (analyzedInWin / totalWin).clamp(0.0, 0.95);
+      final pct = (progressRatio * 100).round();
+      progressSummaryText = '角色脚本 $confirmedInWindow/$totalWin 块 ($pct%)';
+    } else {
+      progressRatio = (curSegOneBased / totalSegs).clamp(0.0, 1.0);
+      final pct = (progressRatio * 100).round();
+      progressSummaryText =
+          '进度 $curSegOneBased/$totalSegs 段 ($pct%) · 已合成 $readyCount/$totalSegs';
+    }
+
     final String phaseLabel;
     if (_errorMessage != null || _scheduler?.blockingReason != null) {
       phaseLabel = '等待问题修复';
@@ -1672,12 +1754,17 @@ class ImmersivePlaybackCoordinator extends ChangeNotifier
       phaseLabel: phaseLabel,
       isPreparingPrefix: isPrefix,
       prefixCompletedChunks: isPrefix ? prefixDone : 0,
+      prefixDraftChunks: isPrefix ? prefixDrafts : 0,
       prefixTotalChunks: isPrefix ? prefixWindowChunks.length : 0,
       candidateAnalyzedChunks: confirmedInWindow + validDrafts.length,
       confirmedChunks: confirmedInWindow,
       totalPlannedChunks: windowChunks.length,
+      currentSegmentOneBased: curSegOneBased,
       readyAudioSegments: readyCount,
       totalManifestSegments: _manifestSegments.length,
+      progressRatio: progressRatio,
+      progressSummaryText: progressSummaryText,
+      retryStatusText: _scheduler?.activeRetryStatus,
       continuousReadySeconds: continuousSec,
       estimatedPendingSeconds: estPending,
       activeTextRequests: _scheduler?.activeTextRequests ?? 0,

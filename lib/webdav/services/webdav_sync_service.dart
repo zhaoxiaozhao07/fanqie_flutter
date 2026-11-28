@@ -821,9 +821,14 @@ class WebDavSyncService extends ChangeNotifier {
         jsonEncode(rawImmersive),
       );
       if (parsed.isValid && parsed.config != null) {
-        final saved = await _immersiveConfigService.saveConfig(parsed.config!);
+        final effectiveCfg = _notifyAppServices
+            ? ImmersiveConfigService.upgradeLegacyOrCloudTextModels(
+                parsed.config!,
+              )
+            : parsed.config!;
+        final saved = await _immersiveConfigService.saveConfig(effectiveCfg);
         if (saved.issues.isEmpty && _notifyAppServices) {
-          await ImmersivePlaybackCoordinator().loadAndValidateConfig();
+          await ImmersivePlaybackCoordinator().saveConfig(effectiveCfg);
         }
       }
     }

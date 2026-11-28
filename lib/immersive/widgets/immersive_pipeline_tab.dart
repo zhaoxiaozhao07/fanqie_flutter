@@ -190,6 +190,49 @@ class _ImmersivePipelineTabState extends State<ImmersivePipelineTab>
                       ),
                   ],
                 ),
+                if (st.retryStatusText != null &&
+                    st.retryStatusText!.isNotEmpty) ...[
+                  const SizedBox(height: 6),
+                  Text(
+                    '重试进度：${st.retryStatusText}',
+                    style: TextStyle(
+                      fontSize: 11.5,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.orange.shade800,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 8),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        st.progressSummaryText.isNotEmpty
+                            ? st.progressSummaryText
+                            : '综合管线进度',
+                        style: TextStyle(fontSize: 11, color: secondaryColor),
+                      ),
+                    ),
+                    Text(
+                      '${(st.progressRatio.clamp(0.0, 1.0) * 100).round()}%',
+                      style: const TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: AppTheme.primaryColor,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 4),
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(3),
+                  child: LinearProgressIndicator(
+                    value: st.progressRatio.clamp(0.0, 1.0),
+                    minHeight: 5,
+                    backgroundColor: AppTheme.dividerOf(context),
+                    color: AppTheme.primaryColor,
+                  ),
+                ),
                 const Divider(height: 16),
                 Row(
                   children: [

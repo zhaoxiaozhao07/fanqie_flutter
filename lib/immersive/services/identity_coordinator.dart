@@ -235,6 +235,190 @@ class IdentityCoordinator {
     }
   }
 
+  /// 修复大语言模型在长分块（数十至上百单元）JSON 输出中偶发的轻微偏差：
+  /// 1. 过滤误混入 assignments 的只读前后文单元 ID 与越界 evidence_unit_ids；
+  /// 2. 对同一目标单元被重复分配的情况保留首次有效分配并自动去重；
+  /// 3. 当长分块（>= 8 个单元）已覆盖 >= 85% 目标单元但偶发漏标个别单元或局部轻微乱序时，
+  ///    严格以 chunk.targetUnitIds 原文顺序为权威基准重排并安全补齐（非对白归入旁白，对白标为 unresolved）。
+  /// 对于严重缺失或捏造不存在单元的异常返回不做强行掩盖，交由后续 validateDraftAgainstChunk 抛错触发重试/切兜底。
+  static void repairMinorDraftDeviations({
+    required Map<String, dynamic> payload,
+    required AnalysisChunk chunk,
+    required Map<String, SourceUnit> unitById,
+    required Set<String> knownCharacterIds,
+  }) {
+    final rawAssignments = payload['assignments'];
+    if (rawAssignments is! List) return;
+
+    final targetIds = chunk.targetUnitIds;
+    if (targetIds.isEmpty) return;
+    final targetSet = targetIds.toSet();
+    final contextOnlySet = <String>{
+      ...chunk.contextBeforeUnitIds,
+      ...chunk.contextAfterUnitIds,
+    }..removeAll(targetSet);
+    final allowedEvidenceIds = <String>{
+      ...chunk.contextBeforeUnitIds,
+      ...chunk.targetUnitIds,
+      ...chunk.contextAfterUnitIds,
+    };
+
+    // 清洗新角色与同人关联中的越界证据 ID
+    final declaredLocalRefs = <String>{};
+    if (payload['new_character_proposals'] is List) {
+      for (final item in payload['new_character_proposals'] as List) {
+        if (item is Map) {
+          final lref = item['local_ref'];
+          if (lref is String && lref.startsWith('local:new_')) {
+            declaredLocalRefs.add(lref);
+          }
+          if (item['evidence_unit_ids'] is List) {
+            item['evidence_unit_ids'] = (item['evidence_unit_ids'] as List)
+                .whereType<String>()
+                .where(allowedEvidenceIds.contains)
+                .toList();
+          }
+        }
+      }
+    }
+    if (payload['identity_link_proposals'] is List) {
+      for (final item in payload['identity_link_proposals'] as List) {
+        if (item is Map && item['evidence_unit_ids'] is List) {
+          item['evidence_unit_ids'] = (item['evidence_unit_ids'] as List)
+              .whereType<String>()
+              .where(allowedEvidenceIds.contains)
+              .toList();
+        }
+      }
+    }
+    if (payload['unresolved_items'] is List) {
+      payload['unresolved_items'] = (payload['unresolved_items'] as List)
+          .where((item) {
+            if (item is! Map || item['source_unit_ids'] is! List) return false;
+            final filtered = (item['source_unit_ids'] as List)
+                .whereType<String>()
+                .where(targetSet.contains)
+                .toList();
+            item['source_unit_ids'] = filtered;
+            return filtered.isNotEmpty;
+          })
+          .toList();
+    }
+
+    // 记录每个合法 targetUnitId 的首次分配属性；若出现完全未知的伪造 ID 则放弃修补交由严格校验报错
+    final byUnitId = <String, Map<String, dynamic>>{};
+    for (final raw in rawAssignments) {
+      if (raw is! Map) return;
+      final uIds = raw['source_unit_ids'];
+      if (uIds is! List) return;
+      final validEv = (raw['evidence_unit_ids'] is List)
+          ? (raw['evidence_unit_ids'] as List)
+                .whereType<String>()
+                .where(allowedEvidenceIds.contains)
+                .toList()
+          : <String>[];
+      var kind = raw['kind']?.toString() ?? AllocationKind.narration;
+      var speakerRef = raw['speaker_ref'] as String?;
+      var evType =
+          raw['evidence_type']?.toString() ?? EvidenceType.explicitAttribution;
+      if (AllocationKind.isDirectDialogue(kind)) {
+        if (speakerRef != null &&
+            speakerRef != 'narrator' &&
+            !knownCharacterIds.contains(speakerRef) &&
+            !declaredLocalRefs.contains(speakerRef)) {
+          // 引用了未声明的局部角色 ID，降级为 unresolved 交由复核/旁白兜底
+          speakerRef = null;
+          evType = EvidenceType.unresolved;
+        }
+      } else {
+        speakerRef = 'narrator';
+      }
+
+      for (final uidObj in uIds) {
+        if (uidObj is! String) return;
+        if (contextOnlySet.contains(uidObj)) {
+          // 忽略误混入的只读前后文单元
+          continue;
+        }
+        if (!targetSet.contains(uidObj)) {
+          // 存在未知伪造单元，直接返回交由严格校验报错
+          return;
+        }
+        byUnitId.putIfAbsent(
+          uidObj,
+          () => {
+            'kind': kind,
+            'speaker_ref': speakerRef,
+            'evidence_unit_ids': validEv,
+            'evidence_type': evType,
+          },
+        );
+      }
+    }
+
+    // 检查覆盖率：全覆盖（仅去重/去上下文）始终允许修复；若有漏标，仅在长分块（>= 8 单元且覆盖率 >= 85%）时补齐
+    final coveredCount = byUnitId.length;
+    if (coveredCount < targetIds.length) {
+      final ratio = coveredCount / targetIds.length;
+      if (targetIds.length < 8 || ratio < 0.85) {
+        return;
+      }
+    }
+
+    // 按原文权威顺序重建紧凑连续的 assignments
+    final repaired = <Map<String, dynamic>>[];
+    for (final uid in targetIds) {
+      var meta = byUnitId[uid];
+      if (meta == null) {
+        final text = (unitById[uid]?.text ?? '').trim();
+        final looksLikeDialogue =
+            text.startsWith('“') ||
+            text.startsWith('"') ||
+            text.startsWith('「') ||
+            text.startsWith('『');
+        meta = looksLikeDialogue
+            ? {
+                'kind': AllocationKind.dialogue,
+                'speaker_ref': null,
+                'evidence_unit_ids': <String>[uid],
+                'evidence_type': EvidenceType.unresolved,
+              }
+            : {
+                'kind': AllocationKind.narration,
+                'speaker_ref': 'narrator',
+                'evidence_unit_ids': <String>[uid],
+                'evidence_type': EvidenceType.explicitAttribution,
+              };
+      }
+
+      if (repaired.isNotEmpty) {
+        final prev = repaired.last;
+        if (prev['kind'] == meta['kind'] &&
+            prev['speaker_ref'] == meta['speaker_ref'] &&
+            prev['evidence_type'] == meta['evidence_type']) {
+          (prev['source_unit_ids'] as List<String>).add(uid);
+          final prevEv = prev['evidence_unit_ids'] as List<String>;
+          for (final ev in (meta['evidence_unit_ids'] as List).cast<String>()) {
+            if (!prevEv.contains(ev)) prevEv.add(ev);
+          }
+          continue;
+        }
+      }
+
+      repaired.add({
+        'source_unit_ids': <String>[uid],
+        'kind': meta['kind'],
+        'speaker_ref': meta['speaker_ref'],
+        'evidence_unit_ids': List<String>.from(
+          (meta['evidence_unit_ids'] as List).cast<String>(),
+        ),
+        'evidence_type': meta['evidence_type'],
+      });
+    }
+
+    payload['assignments'] = repaired;
+  }
+
   /// 按序尝试消费连续身份前沿之后已就绪的草稿（单书串行，保证并发乱序草稿严格按顺序提交）
   /// 支持 minWindowChunkOrder：空降长书中间章节时最多回溯 5 章，不阻塞在更早未加载章节上
   Future<List<ChunkCommitOutcome>> drainOrderedCommits({
@@ -373,21 +557,28 @@ class IdentityCoordinator {
       jsonDecode(draft.payloadJson) as Map,
     );
 
-    // 二次校验原文覆盖与引用完整性
+    // 二次校验原文覆盖与引用完整性（先执行确定性微瑕清洗以兼容并发建档前后的局部越界证据）
     try {
+      final knownIds = activeCharsById.keys.toSet();
+      repairMinorDraftDeviations(
+        payload: payload,
+        chunk: chunk,
+        unitById: unitById,
+        knownCharacterIds: knownIds,
+      );
       validateDraftAgainstChunk(
         payload: payload,
         chunk: chunk,
         unitById: unitById,
-        knownCharacterIds: activeCharsById.keys.toSet(),
+        knownCharacterIds: knownIds,
       );
-    } on DraftSemanticValidationException catch (e) {
+    } on DraftSemanticValidationException {
+      // 将陈旧或错位草稿标记为 invalid，不锁死阻塞管线，交由下一轮调度自动复活重跑该分块
       await _store.updateDraftStatus(draft.draftId, 'invalid');
       return ChunkCommitOutcome(
         committed: false,
         chunkId: chunk.chunkId,
         confirmedChunkOrder: latestCp?.confirmedChunkOrder ?? -1,
-        blockingReason: '草稿校验失败：${e.message}',
       );
     }
 

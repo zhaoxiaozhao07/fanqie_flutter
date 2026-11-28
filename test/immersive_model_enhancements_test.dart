@@ -10,6 +10,7 @@ import 'package:http/testing.dart';
 import 'package:fanqie_flutter/immersive/models/immersive_config.dart';
 import 'package:fanqie_flutter/immersive/models/immersive_entities.dart';
 import 'package:fanqie_flutter/immersive/services/chunk_planner.dart';
+import 'package:fanqie_flutter/immersive/services/identity_coordinator.dart';
 import 'package:fanqie_flutter/immersive/services/immersive_config_service.dart';
 import 'package:fanqie_flutter/immersive/services/immersive_database.dart';
 import 'package:fanqie_flutter/immersive/services/immersive_playback_coordinator.dart';
@@ -213,13 +214,15 @@ class _ScriptedTextAdapter implements TextModelAdapter {
 
 void main() {
   group('模型配置、思考程度与上下文/最大输出参数', () {
-    test('默认上下文为 1M、默认最大输出为 12800，且支持 none/max 思考程度', () {
+    test('默认上下文为 1M、默认最大输出为 8192、默认协议为 json_object，且支持 none/max 思考程度', () {
       final preset = ImmersivePresetConfig.createConfiguredDefault(
         textApiKey: 'test-key',
         ttsApiKey: 'test-tts',
       );
       expect(preset.primaryTextModel.contextWindowTokens, 1000000);
-      expect(preset.primaryTextModel.maxOutputTokens, 12800);
+      expect(preset.primaryTextModel.maxOutputTokens, 8192);
+      expect(preset.primaryTextModel.structuredOutput.mode, 'json_object');
+      expect(preset.textFailoverThreshold, 3);
       expect(TextThinkingLevel.values.contains(TextThinkingLevel.none), isTrue);
       expect(TextThinkingLevel.values.contains(TextThinkingLevel.max), isTrue);
 
@@ -312,7 +315,8 @@ void main() {
         secretStore: MemoryImmersiveSecretStore(),
       );
       final cfgFile = await cfgService.defaultConfigFile();
-      await cfgService.saveConfig(cfg, configFile: cfgFile);
+      final saveRes = await cfgService.saveConfig(cfg, configFile: cfgFile);
+      expect(saveRes.issues, isEmpty);
       await cfgService.loadAndValidateConfig(configFile: cfgFile);
 
       Map<String, dynamic>? capturedBody;
@@ -770,15 +774,16 @@ void main() {
       await tester.tap(find.text('打开弹窗'));
       await tester.pumpAndSettle();
 
-      // 验证默认预填上下文 1000000、最大输出 12800
+      // 验证默认预填上下文 1M、最大输出 8192，且输入 http:// 地址不显示明文 HTTP 警告横幅
       final ctxField = tester.widget<TextField>(
         find.byKey(const ValueKey('text-model-context-field')),
       );
       final outField = tester.widget<TextField>(
         find.byKey(const ValueKey('text-model-max-output-field')),
       );
-      expect(ctxField.controller?.text, '1000000');
-      expect(outField.controller?.text, '12800');
+      expect(ctxField.controller?.text, '1M');
+      expect(outField.controller?.text, '8192');
+      expect(find.textContaining('当前接口使用明文 HTTP'), findsNothing);
 
       // 点击获取模型，验证下拉列表出现并自动填入首个模型 DeepSeek-V4.1-Flash
       await tester.tap(find.byKey(const ValueKey('fetch-text-models-btn')));
@@ -891,9 +896,13 @@ void main() {
       );
       await tester.pump(const Duration(milliseconds: 50));
 
-      // 常态显示当前使用的模型标签
+      // 常态显示当前使用的模型标签与实时线性进度条
       expect(
         find.byKey(const ValueKey('immersive-active-model-badge')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('immersive-progress-bar')),
         findsOneWidget,
       );
       expect(find.textContaining('DeepSeek-V4.1-Flash'), findsWidgets);
@@ -916,6 +925,373 @@ void main() {
       await tester.runAsync(() => coord.stop());
       await tester.pumpWidget(const SizedBox.shrink());
       await tester.pump();
+    });
+  });
+
+  group('DeepSeek json_object 模板测试、长分块修复与三次重试切兜底回归', () {
+    test('testProvider 使用标准 json_object 示例模板：成功解析与不支持 JSON 明确报错', () async {
+      Map<String, dynamic>? capturedReq;
+      final okClient = MockClient((req) async {
+        capturedReq = jsonDecode(req.body) as Map<String, dynamic>;
+        return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'finish_reason': 'stop',
+                'message': {
+                  'role': 'assistant',
+                  'content': jsonEncode({
+                    'question': 'Which is the longest river in the world?',
+                    'answer': 'The Nile River',
+                  }),
+                },
+              },
+            ],
+          }),
+          200,
+          headers: {'content-type': 'application/json; charset=utf-8'},
+        );
+      });
+      final okAdapter = OpenAiChatTextModelAdapter(okClient);
+      final okRes = await okAdapter.testProvider(
+        config: _sampleTextModel(structuredMode: 'json_object'),
+        apiKey: 'sk-test',
+      );
+      expect(okRes.success, isTrue);
+      expect(okRes.modeUsed, 'json_object');
+      expect(capturedReq?['response_format'], {'type': 'json_object'});
+      final msgs = (capturedReq?['messages'] as List).cast<Map>();
+      expect(msgs.first['content'], contains('Mount Everest'));
+      expect(msgs.last['content'], contains('The Nile River'));
+
+      // 测试模型不支持 JSON 格式化输出时明确提示“不支持 JSON 格式化输出”
+      final badClient = MockClient((req) async {
+        return http.Response(
+          jsonEncode({
+            'choices': [
+              {
+                'finish_reason': 'stop',
+                'message': {
+                  'role': 'assistant',
+                  'content': 'The longest river is the Nile River.',
+                },
+              },
+            ],
+          }),
+          200,
+        );
+      });
+      final badAdapter = OpenAiChatTextModelAdapter(badClient);
+      final badRes = await badAdapter.testProvider(
+        config: _sampleTextModel(
+          modelId: 'plain-chat-model',
+          structuredMode: 'json_object',
+        ),
+        apiKey: 'sk-test',
+      );
+      expect(badRes.success, isFalse);
+      expect(badRes.message, contains('不支持 JSON 格式化输出'));
+    });
+
+    test('长分块重复引用单元与省略 evidence_type 时自动修复且通过严格校验', () {
+      final units = <String, SourceUnit>{};
+      final targetIds = <String>[];
+      for (var i = 1; i <= 12; i++) {
+        final uid = 'u_$i';
+        targetIds.add(uid);
+        units[uid] = SourceUnit(
+          unitId: uid,
+          bookRevisionId: 'rev1',
+          bookId: 'b1',
+          chapterIndex: 0,
+          chapterId: 'ch0',
+          paragraphIndex: i,
+          globalOrder: i,
+          startOffset: 0,
+          endOffset: 6,
+          text: i.isEven ? '“这是第$i句。”' : '这是第$i段叙述。',
+        );
+      }
+      final chunk = AnalysisChunk(
+        chunkId: 'chk_0',
+        bookRevisionId: 'rev1',
+        bookId: 'b1',
+        chapterIndex: 0,
+        chapterId: 'ch0',
+        chunkOrder: 0,
+        targetUnitIds: targetIds,
+        contextBeforeUnitIds: const ['u_before_ctx'],
+        contextAfterUnitIds: const ['u_after_ctx'],
+        startGlobalOrder: 1,
+        endGlobalOrder: 12,
+        estimatedTokens: 300,
+      );
+
+      // 构造含重复 u_2、误带 u_before_ctx、省略 evidence_type 且漏标 u_12 的模拟模型输出
+      final rawPayload = <String, dynamic>{
+        'assignments': [
+          {
+            'source_unit_ids': ['u_before_ctx', 'u_1', 'u_2'],
+            'kind': 'narration',
+            'speaker_ref': 'narrator',
+          },
+          {
+            'source_unit_ids': ['u_2', 'u_3', 'u_4', 'u_5', 'u_6', 'u_7', 'u_8', 'u_9', 'u_10', 'u_11'],
+            'kind': 'narration',
+            'speaker_ref': 'narrator',
+            'evidence_unit_ids': ['u_1', 'u_invalid_999'],
+            'evidence_type': 'explicit',
+          },
+        ],
+      };
+
+      ImmersiveNativeSchemas.validateChunkAnalysisPayload(rawPayload);
+      IdentityCoordinator.repairMinorDraftDeviations(
+        payload: rawPayload,
+        chunk: chunk,
+        unitById: units,
+        knownCharacterIds: const {},
+      );
+      IdentityCoordinator.validateDraftAgainstChunk(
+        payload: rawPayload,
+        chunk: chunk,
+        unitById: units,
+        knownCharacterIds: const {},
+      );
+      final fixed = (rawPayload['assignments'] as List).cast<Map>();
+      final flattened = <String>[
+        for (final item in fixed)
+          ...(item['source_unit_ids'] as List).cast<String>(),
+      ];
+      expect(flattened, targetIds);
+    });
+
+    test('高并发下首块在主模型自动重试 3 次（共调用 4 次）仍失败时，不被其他成功块掩盖并自动切换兜底模型', () async {
+      final tmpDir = await Directory.systemTemp.createTemp('immersive_retry3_');
+      addTearDown(() => tmpDir.delete(recursive: true));
+      final cfgFile = File('${tmpDir.path}/config.json');
+
+      final primaryDs = _sampleTextModel(
+        id: 'tm_ds_primary',
+        displayName: 'DeepSeek',
+        modelId: 'deepseek-chat',
+        structuredMode: 'json_object',
+      ).copyWith(maxConcurrency: 4, reservedReconciliationSlots: 1);
+      final fallbackQwen = _sampleTextModel(
+        id: 'tm_qwen_fb',
+        displayName: 'Qwen-Fallback',
+        modelId: 'qwen-plus',
+        structuredMode: 'json_object',
+      );
+
+      final cfg = ImmersivePresetConfig.createConfiguredDefault(
+        textApiKey: 'test-key',
+        ttsApiKey: 'test-tts',
+        featureEnabled: true,
+      ).copyWith(
+        textAnalysisModels: [primaryDs, fallbackQwen],
+        primaryTextModelId: primaryDs.effectiveId,
+        fallbackTextModelId: fallbackQwen.effectiveId,
+        textFailoverThreshold: 3,
+        retry: const RetryConfig(
+          maxAttempts: 4,
+          initialBackoffMs: 50,
+          maxBackoffMs: 100,
+          jitterRatio: 0.0,
+        ),
+        prefetch: const PrefetchConfig(
+          startupBufferSeconds: 1.0,
+          startupWaitAfterFirstReadyMs: 100,
+          resumeBufferSeconds: 1.0,
+          lowWaterSeconds: 5.0,
+          targetBufferSeconds: 10.0,
+          highWaterSeconds: 20.0,
+          maxJobsBeyondFirstGap: 4,
+        ),
+        jobs: const JobsConfig(
+          leaseSeconds: 60,
+          heartbeatSeconds: 15,
+          pollIntervalMs: 50,
+          cancelUnneededRequestsOnSeek: true,
+        ),
+      );
+
+      final store = InMemoryImmersiveStateStore();
+      await store.initialize();
+      var primaryChunk0Calls = 0;
+
+      final scripted = _ScriptedTextAdapter((model, userMessage) async {
+        final section = RegExp(
+          r'\[TARGET_UNITS[^\]]*\]([\s\S]*?)\[/TARGET_UNITS\]',
+        ).firstMatch(userMessage)?.group(1) ?? '';
+        final unitIds = <String>[];
+        for (final line in section.split('\n')) {
+          final trimmed = line.trim();
+          final idx = trimmed.indexOf(':');
+          if (idx > 0) unitIds.add(trimmed.substring(0, idx).trim());
+        }
+        final isFirstChunk = section.contains('风吹雪落');
+        if (model.modelId == 'deepseek-chat' && isFirstChunk) {
+          primaryChunk0Calls++;
+          throw const TextModelException(
+            kind: TextModelErrorKind.transientNetwork,
+            message: '模拟首块在主模型失败',
+          );
+        }
+        return StructuredModelResponse(
+          data: _validAnalysisPayload(unitIds),
+          latencyMs: 5,
+          schemaVersion: ImmersiveNativeSchemas.chunkAnalysisVersion,
+        );
+      });
+
+      final cfgService = ImmersiveConfigService(
+        documents: () async => tmpDir,
+        secretStore: MemoryImmersiveSecretStore(),
+      );
+      final saveRes = await cfgService.saveConfig(cfg, configFile: cfgFile);
+      expect(saveRes.issues, isEmpty);
+
+      final coord = ImmersivePlaybackCoordinator.forTesting(
+        invoke: (_, _) async => true,
+        configService: cfgService,
+        stateStore: store,
+        textAdapter: scripted,
+        ttsAdapter: _FakeTtsAdapter(),
+        audioCacheDir: '${tmpDir.path}/audio',
+        tempDir: '${tmpDir.path}/tmp',
+        platformAudioProbe: (_, dur) async => (valid: true, durationMs: dur),
+      );
+      addTearDown(coord.dispose);
+
+      await coord.loadAndValidateConfig(configFile: cfgFile);
+      await coord.startImmersivePlayback(
+        book: Book(bookId: 'b_retry3', bookName: '重试切换测试', author: 'A'),
+        chapters: [
+          Chapter(itemId: 'ch0', title: '第一章', content: '风吹雪落，客栈灯火摇曳。'),
+          Chapter(itemId: 'ch1', title: '第二章', content: '渡口薄雾，小船缓缓驶出。'),
+        ],
+        chapterIndex: 1, // 从第 2 章起听，触发前文档案补齐
+      );
+
+      for (var i = 0; i < 80 && !coord.isUsingFallbackTextModel; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+      }
+      for (var i = 0; i < 80 && !coord.isPlaying; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+      }
+
+      // 首次调用 1 次 + 自动重试 3 次 = 恰好 4 次后切换至兜底模型并顺利出声播放
+      expect(primaryChunk0Calls, 4);
+      expect(coord.isUsingFallbackTextModel, isTrue);
+      expect(coord.isPlaying, isTrue);
+    });
+
+    test('8192 最大输出下自动限制单块单元数，且遭遇 outputTruncated 时自动对半拆块自愈', () async {
+      final tmpDir = await Directory.systemTemp.createTemp('immersive_split_');
+      addTearDown(() => tmpDir.delete(recursive: true));
+      final cfgFile = File('${tmpDir.path}/config.json');
+
+      final model8k = _sampleTextModel(
+        id: 'tm_ds_8k',
+        displayName: 'DeepSeek-8K',
+        modelId: 'deepseek-chat',
+        maxOutputTokens: 8192,
+        structuredMode: 'json_object',
+      );
+      expect(ChunkPlanner.maxSafeUnitsForOutput(model8k), lessThanOrEqualTo(50));
+
+      final cfg = ImmersivePresetConfig.createConfiguredDefault(
+        textApiKey: 'test-key',
+        ttsApiKey: 'test-tts',
+        featureEnabled: true,
+      ).copyWith(
+        textAnalysisModels: [model8k],
+        primaryTextModelId: model8k.effectiveId,
+        fallbackTextModelId: null,
+        prefetch: const PrefetchConfig(
+          startupBufferSeconds: 1.0,
+          startupWaitAfterFirstReadyMs: 80,
+          resumeBufferSeconds: 1.0,
+          lowWaterSeconds: 5.0,
+          targetBufferSeconds: 10.0,
+          highWaterSeconds: 20.0,
+          maxJobsBeyondFirstGap: 4,
+        ),
+        jobs: const JobsConfig(
+          leaseSeconds: 60,
+          heartbeatSeconds: 15,
+          pollIntervalMs: 50,
+          cancelUnneededRequestsOnSeek: true,
+        ),
+      );
+
+      var truncatedOnce = false;
+      final scripted = _ScriptedTextAdapter((_, userMessage) async {
+        final section = RegExp(
+          r'\[TARGET_UNITS[^\]]*\]([\s\S]*?)\[/TARGET_UNITS\]',
+        ).firstMatch(userMessage)?.group(1) ?? '';
+        final unitIds = <String>[];
+        for (final line in section.split('\n')) {
+          final trimmed = line.trim();
+          final idx = trimmed.indexOf(':');
+          if (idx > 0) unitIds.add(trimmed.substring(0, idx).trim());
+        }
+        // 模拟超过 20 个单元的分块触发一次 finish_reason=length 截断，验证自动对半拆块
+        if (!truncatedOnce && unitIds.length > 20) {
+          truncatedOnce = true;
+          throw const TextModelException(
+            kind: TextModelErrorKind.truncated,
+            message: '模拟输出长度上限截断',
+          );
+        }
+        return StructuredModelResponse(
+          data: _validAnalysisPayload(unitIds),
+          latencyMs: 5,
+          schemaVersion: ImmersiveNativeSchemas.chunkAnalysisVersion,
+        );
+      });
+
+      final cfgService = ImmersiveConfigService(
+        documents: () async => tmpDir,
+        secretStore: MemoryImmersiveSecretStore(),
+      );
+      await cfgService.saveConfig(cfg, configFile: cfgFile);
+      final store = InMemoryImmersiveStateStore();
+      await store.initialize();
+
+      final coord = ImmersivePlaybackCoordinator.forTesting(
+        invoke: (_, _) async => true,
+        configService: cfgService,
+        stateStore: store,
+        textAdapter: scripted,
+        ttsAdapter: _FakeTtsAdapter(),
+        audioCacheDir: '${tmpDir.path}/audio',
+        tempDir: '${tmpDir.path}/tmp',
+        platformAudioProbe: (_, dur) async => (valid: true, durationMs: dur),
+      );
+      addTearDown(coord.dispose);
+
+      // 构造 100 段密集短句章节
+      final denseChapter = List.generate(
+        100,
+        (i) => '第${i + 1}句旁白与短促对白交锋。',
+      ).join('\n');
+      await coord.loadAndValidateConfig(configFile: cfgFile);
+      await coord.startImmersivePlayback(
+        book: Book(bookId: 'b_split', bookName: '拆块自愈测试', author: 'A'),
+        chapters: [
+          Chapter(itemId: 'ch0', title: '第一章', content: denseChapter),
+          Chapter(itemId: 'ch1', title: '第二章', content: '终章水落石出。'),
+        ],
+        chapterIndex: 1,
+      );
+
+      for (var i = 0; i < 100 && !coord.isPlaying; i++) {
+        await Future<void>.delayed(const Duration(milliseconds: 30));
+      }
+      expect(truncatedOnce, isTrue);
+      expect(coord.isPlaying, isTrue);
     });
   });
 }

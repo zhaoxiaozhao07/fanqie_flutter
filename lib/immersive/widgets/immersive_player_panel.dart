@@ -223,7 +223,23 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                 ),
               ],
             ),
-            // 第二行：真实多阶段管线状态（区分角色确认、音频生成与连续可播秒数）
+            // 第二行：实时线性进度条（前文档案建档进度 / 章节段落播放进度）
+            Padding(
+              padding: const EdgeInsets.only(bottom: 5),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(3),
+                child: LinearProgressIndicator(
+                  key: const ValueKey('immersive-progress-bar'),
+                  value: (isBuffering && _status.progressRatio <= 0)
+                      ? null
+                      : _status.progressRatio.clamp(0.0, 1.0),
+                  minHeight: 4,
+                  backgroundColor: AppTheme.dividerOf(context),
+                  color: isBlocked ? Colors.redAccent : AppTheme.primaryColor,
+                ),
+              ),
+            ),
+            // 第三行：真实多阶段管线状态（区分角色确认、进度百分比、音频生成与连续可播秒数）
             Padding(
               padding: const EdgeInsets.only(bottom: 4),
               child: Wrap(
@@ -242,37 +258,61 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                     ),
                   ),
                   _buildActiveModelBadge(coord),
-                  if (_status.isPreparingPrefix)
+                  if (_status.retryStatusText != null &&
+                      _status.retryStatusText!.isNotEmpty)
+                    Container(
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 5,
+                        vertical: 1,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.orange.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Text(
+                        _status.retryStatusText!,
+                        style: TextStyle(
+                          fontSize: 10.5,
+                          color: Colors.orange.shade800,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ),
+                  if (_status.progressSummaryText.isNotEmpty)
+                    Text(
+                      _status.progressSummaryText,
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: effectiveSecondary,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    )
+                  else if (_status.isPreparingPrefix)
                     Text(
                       '前文档案 ${_status.prefixCompletedChunks}/${_status.prefixTotalChunks}',
                       style: TextStyle(
                         fontSize: 11,
                         color: effectiveSecondary,
                       ),
-                    )
-                  else ...[
+                    ),
+                  if (!_status.isPreparingPrefix &&
+                      _status.totalManifestSegments > 0)
                     Text(
-                      '已确认 ${_status.confirmedChunks}/${_status.totalPlannedChunks} 块',
+                      '缓冲 ${_status.continuousReadySeconds.toStringAsFixed(0)}s',
                       style: TextStyle(
                         fontSize: 11,
                         color: effectiveSecondary,
                       ),
                     ),
+                  if (_status.activeTextRequests > 0 ||
+                      _status.activeTtsRequests > 0)
                     Text(
-                      '已生成 ${_status.readyAudioSegments}/${_status.totalManifestSegments} 段',
+                      '并发 ${_status.activeTextRequests}/${_status.activeTtsRequests}',
                       style: TextStyle(
-                        fontSize: 11,
+                        fontSize: 10.5,
                         color: effectiveSecondary,
                       ),
                     ),
-                    Text(
-                      '可播 ${_status.continuousReadySeconds.toStringAsFixed(0)}s',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: effectiveSecondary,
-                      ),
-                    ),
-                  ],
                   if (coord.hasSleepSchedule)
                     Text(
                       coord.stopAfterCurrentChapter
@@ -503,11 +543,15 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
       if (coord.currentBookTitle.isNotEmpty) coord.currentBookTitle,
       if (coord.currentChapterTitle.isNotEmpty) coord.currentChapterTitle,
     ].join(' · ');
-    final statusMetrics = _status.isPreparingPrefix
-        ? '前文档案 ${_status.prefixCompletedChunks}/${_status.prefixTotalChunks}'
-        : '已确认 ${_status.confirmedChunks}/${_status.totalPlannedChunks} 块 · '
-              '已生成 ${_status.readyAudioSegments}/${_status.totalManifestSegments} 段 · '
-              '可播 ${_status.continuousReadySeconds.toStringAsFixed(0)}s';
+    final statusMetrics = _status.progressSummaryText.isNotEmpty
+        ? (_status.isPreparingPrefix
+              ? _status.progressSummaryText
+              : '${_status.progressSummaryText} · 缓冲 ${_status.continuousReadySeconds.toStringAsFixed(0)}s')
+        : (_status.isPreparingPrefix
+              ? '前文档案 ${_status.prefixCompletedChunks}/${_status.prefixTotalChunks}'
+              : '已确认 ${_status.confirmedChunks}/${_status.totalPlannedChunks} 块 · '
+                    '已生成 ${_status.readyAudioSegments}/${_status.totalManifestSegments} 段 · '
+                    '可播 ${_status.continuousReadySeconds.toStringAsFixed(0)}s');
 
     return Material(
       key: const ValueKey('immersive-player-panel'),
@@ -770,6 +814,15 @@ class _ImmersivePlayerPanelState extends State<ImmersivePlayerPanel> {
                     ),
                   ],
                 ),
+              ),
+              LinearProgressIndicator(
+                key: const ValueKey('immersive-progress-bar'),
+                value: (isBuffering && _status.progressRatio <= 0)
+                    ? null
+                    : _status.progressRatio.clamp(0.0, 1.0),
+                minHeight: 2.5,
+                backgroundColor: AppTheme.dividerOf(context),
+                color: isBlocked ? Colors.redAccent : AppTheme.primaryColor,
               ),
               const SizedBox(height: 2),
               // 第三行：异常提示/重试 或 当前台词摘要

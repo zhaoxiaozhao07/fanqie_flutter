@@ -137,21 +137,6 @@ InputDecoration _compactFormDecoration(
   );
 }
 
-/// 表单分组标题
-Widget _formSectionHeader(BuildContext context, String title) {
-  return Padding(
-    padding: const EdgeInsets.only(top: 4, bottom: 8),
-    child: Text(
-      title,
-      style: TextStyle(
-        fontSize: 12.5,
-        fontWeight: FontWeight.w700,
-        color: AppTheme.textSecondaryOf(context),
-      ),
-    ),
-  );
-}
-
 /// 移动端使用高占比底部抽屉（适配软键盘），桌面端保持居中对话框
 Future<T?> _showAdaptiveFormModal<T>({
   required BuildContext context,
@@ -389,8 +374,14 @@ class _TextModelEditorDialogState extends State<_TextModelEditorDialog> {
     _modelFilterCtrl = TextEditingController();
     _contextWindowCtrl = TextEditingController(
       text: editing == null
-          ? '${TextAnalysisConfig.defaultContextWindowTokens}'
-          : (editing.contextWindowTokens?.toString() ?? ''),
+          ? formatTokenCountShort(
+              TextAnalysisConfig.defaultContextWindowTokens,
+              emptyLabel: '',
+            )
+          : formatTokenCountShort(
+              editing.contextWindowTokens,
+              emptyLabel: '',
+            ),
     );
     _maxOutputCtrl = TextEditingController(
       text: editing == null
@@ -415,7 +406,7 @@ class _TextModelEditorDialogState extends State<_TextModelEditorDialog> {
       initThinking = TextThinkingLevel.auto;
     }
     _thinking = initThinking;
-    _structuredMode = editing?.structuredOutput.mode ?? 'vendor_native';
+    _structuredMode = editing?.structuredOutput.mode ?? 'json_object';
     _outputLimitParam =
         editing?.outputLimitParameter ?? 'max_completion_tokens';
     _enabled = editing?.enabled ?? true;
@@ -551,9 +542,41 @@ class _TextModelEditorDialogState extends State<_TextModelEditorDialog> {
     Navigator.pop(context, nextModel);
   }
 
+  Widget _buildFormSectionCard(
+    BuildContext context, {
+    required String title,
+    required List<Widget> children,
+  }) {
+    return Material(
+      color: Colors.transparent,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: BorderSide(color: AppTheme.dividerOf(context)),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              title,
+              style: TextStyle(
+                fontSize: 12.5,
+                fontWeight: FontWeight.w700,
+                color: AppTheme.textPrimaryOf(context),
+              ),
+            ),
+            const SizedBox(height: 10),
+            ...children,
+          ],
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final insecureHttp = isInsecureRemoteHttpUrl(_urlCtrl.text);
     final filterKey = _modelFilterCtrl.text.trim().toLowerCase();
     final filteredModels = filterKey.isEmpty
         ? _fetchedModels
@@ -572,317 +595,341 @@ class _TextModelEditorDialogState extends State<_TextModelEditorDialog> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          _formSectionHeader(context, '基础连接配置'),
-          _buildCredentialReuseBar(
+          _buildFormSectionCard(
             context,
-            credentials: _collectReusableCredentials(widget.cfg),
-            onPick: (cred) {
-              setState(() {
-                _urlCtrl.text = cred.baseUrl;
-                if (cred.apiKey.isNotEmpty) {
-                  _keyCtrl.text = cred.apiKey;
-                }
-                _formError = null;
-              });
-            },
-          ),
-          TextField(
-            controller: _nameCtrl,
-            decoration: _compactFormDecoration(
-              context,
-              labelText: '显示名称（留空默认取模型 ID）',
-            ),
-          ),
-          const SizedBox(height: 10),
-          TextField(
-            controller: _urlCtrl,
-            decoration: _compactFormDecoration(
-              context,
-              labelText: 'Base URL（推荐 https://.../v1）',
-            ),
-            onChanged: (_) => setState(() => _formError = null),
-          ),
-          if (insecureHttp) buildInsecureHttpWarningBanner(),
-          const SizedBox(height: 10),
-          TextField(
-            controller: _keyCtrl,
-            obscureText: true,
-            decoration: _compactFormDecoration(
-              context,
-              labelText: 'API Key（加密保存至系统密钥库）',
-            ),
-          ),
-          const SizedBox(height: 10),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.center,
+            title: '1. 接口连接与模型选择',
             children: [
-              Expanded(
-                child: TextField(
-                  key: const ValueKey('text-model-id-field'),
-                  controller: _modelIdCtrl,
+              _buildCredentialReuseBar(
+                context,
+                credentials: _collectReusableCredentials(widget.cfg),
+                onPick: (cred) {
+                  setState(() {
+                    _urlCtrl.text = cred.baseUrl;
+                    if (cred.apiKey.isNotEmpty) {
+                      _keyCtrl.text = cred.apiKey;
+                    }
+                    _formError = null;
+                  });
+                },
+              ),
+              TextField(
+                controller: _nameCtrl,
+                decoration: _compactFormDecoration(
+                  context,
+                  labelText: '显示名称（留空默认取模型 ID）',
+                ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _urlCtrl,
+                decoration: _compactFormDecoration(
+                  context,
+                  labelText: 'Base URL（如 https://api.deepseek.com 或 .../v1）',
+                ),
+                onChanged: (_) => setState(() => _formError = null),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _keyCtrl,
+                obscureText: true,
+                decoration: _compactFormDecoration(
+                  context,
+                  labelText: 'API Key（加密保存至系统密钥库）',
+                ),
+              ),
+              const SizedBox(height: 10),
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.center,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      key: const ValueKey('text-model-id-field'),
+                      controller: _modelIdCtrl,
+                      decoration: _compactFormDecoration(
+                        context,
+                        labelText: '模型 ID（如 deepseek-chat）',
+                      ),
+                      onChanged: (_) => setState(() => _formError = null),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    key: const ValueKey('fetch-text-models-btn'),
+                    onPressed: _fetchingModels ? null : _doFetchModels,
+                    style: OutlinedButton.styleFrom(
+                      visualDensity: VisualDensity.compact,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 12,
+                      ),
+                    ),
+                    icon: _fetchingModels
+                        ? const SizedBox(
+                            width: 14,
+                            height: 14,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.cloud_download_outlined, size: 16),
+                    label: Text(
+                      _fetchingModels ? '获取中' : '拉取',
+                      style: const TextStyle(fontSize: 12),
+                    ),
+                  ),
+                ],
+              ),
+              if (_fetchError != null)
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    _fetchError!,
+                    style: TextStyle(fontSize: 11, color: Colors.red.shade700),
+                  ),
+                ),
+              if (_fetchedModels.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                if (_fetchedModels.length > 10)
+                  Padding(
+                    padding: const EdgeInsets.only(bottom: 8),
+                    child: TextField(
+                      controller: _modelFilterCtrl,
+                      decoration: _compactFormDecoration(
+                        context,
+                        labelText: '筛选远端模型（共 ${_fetchedModels.length} 个）',
+                        prefixIcon: const Icon(Icons.search, size: 16),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                DropdownButtonFormField<String>(
+                  key: ValueKey(
+                    'text-models-dropdown-${filteredModels.length}-$selectedDropdownModel',
+                  ),
+                  initialValue: selectedDropdownModel,
+                  isExpanded: true,
                   decoration: _compactFormDecoration(
                     context,
-                    labelText: '模型 ID（可手输或右侧拉取）',
+                    labelText: '从远端列表选择（${filteredModels.length} 个可用）',
                   ),
-                  onChanged: (_) => setState(() => _formError = null),
+                  hint: const Text('请选择远端模型'),
+                  items: [
+                    for (final id in filteredModels)
+                      DropdownMenuItem(
+                        value: id,
+                        child: Text(id, overflow: TextOverflow.ellipsis),
+                      ),
+                  ],
+                  onChanged: (v) {
+                    if (v == null) return;
+                    setState(() {
+                      final prevId = _modelIdCtrl.text.trim();
+                      _modelIdCtrl.text = v;
+                      if (_nameCtrl.text.trim().isEmpty ||
+                          _nameCtrl.text.trim() == prevId) {
+                        _nameCtrl.text = v;
+                      }
+                      _formError = null;
+                    });
+                  },
                 ),
-              ),
-              const SizedBox(width: 8),
-              OutlinedButton.icon(
-                key: const ValueKey('fetch-text-models-btn'),
-                onPressed: _fetchingModels ? null : _doFetchModels,
-                style: OutlinedButton.styleFrom(
-                  visualDensity: VisualDensity.compact,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 10,
-                    vertical: 12,
-                  ),
-                ),
-                icon: _fetchingModels
-                    ? const SizedBox(
-                        width: 14,
-                        height: 14,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.cloud_download_outlined, size: 16),
-                label: Text(
-                  _fetchingModels ? '获取中' : '拉取',
-                  style: const TextStyle(fontSize: 12),
-                ),
-              ),
+              ],
             ],
           ),
-          if (_fetchError != null)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(
-                _fetchError!,
-                style: TextStyle(fontSize: 11, color: Colors.red.shade700),
-              ),
-            ),
-          if (_fetchedModels.isNotEmpty) ...[
-            const SizedBox(height: 10),
-            if (_fetchedModels.length > 10)
-              Padding(
-                padding: const EdgeInsets.only(bottom: 8),
-                child: TextField(
-                  controller: _modelFilterCtrl,
-                  decoration: _compactFormDecoration(
-                    context,
-                    labelText: '筛选远端模型（共 ${_fetchedModels.length} 个）',
-                    prefixIcon: const Icon(Icons.search, size: 16),
+          const SizedBox(height: 10),
+          _buildFormSectionCard(
+            context,
+            title: '2. 容量与 JSON 输出协议',
+            children: [
+              Row(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Expanded(
+                    child: TextField(
+                      key: const ValueKey('text-model-context-field'),
+                      controller: _contextWindowCtrl,
+                      decoration: _compactFormDecoration(
+                        context,
+                        labelText: '上下文窗口',
+                        hintText: '1M',
+                        helperText: '默认 1M，可填 128K',
+                        helperMaxLines: 1,
+                      ),
+                      onChanged: (_) => setState(() => _formError = null),
+                    ),
                   ),
-                  onChanged: (_) => setState(() {}),
+                  const SizedBox(width: 10),
+                  Expanded(
+                    child: TextField(
+                      key: const ValueKey('text-model-max-output-field'),
+                      controller: _maxOutputCtrl,
+                      decoration: _compactFormDecoration(
+                        context,
+                        labelText: '最大输出',
+                        hintText: '8192',
+                        helperText: '默认 8192，留空不传',
+                        helperMaxLines: 1,
+                      ),
+                      onChanged: (_) => setState(() => _formError = null),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                initialValue: _structuredMode,
+                isExpanded: true,
+                decoration: _compactFormDecoration(
+                  context,
+                  labelText: 'JSON 格式化输出模式',
                 ),
-              ),
-            DropdownButtonFormField<String>(
-              key: ValueKey(
-                'text-models-dropdown-${filteredModels.length}-$selectedDropdownModel',
-              ),
-              initialValue: selectedDropdownModel,
-              isExpanded: true,
-              decoration: _compactFormDecoration(
-                context,
-                labelText: '从 /v1/models 下拉选择（${filteredModels.length} 个可用）',
-              ),
-              hint: const Text('请选择远端模型'),
-              items: [
-                for (final id in filteredModels)
+                items: const [
                   DropdownMenuItem(
-                    value: id,
-                    child: Text(id, overflow: TextOverflow.ellipsis),
+                    value: 'json_object',
+                    child: Text(
+                      'json_object 标准模板（OpenAI / DeepSeek 推荐）',
+                      overflow: TextOverflow.ellipsis,
+                    ),
                   ),
-              ],
-              onChanged: (v) {
-                if (v == null) return;
-                setState(() {
-                  final prevId = _modelIdCtrl.text.trim();
-                  _modelIdCtrl.text = v;
-                  if (_nameCtrl.text.trim().isEmpty ||
-                      _nameCtrl.text.trim() == prevId) {
-                    _nameCtrl.text = v;
-                  }
-                  _formError = null;
-                });
-              },
-            ),
-          ],
-          const Divider(height: 24),
-          _formSectionHeader(context, '推理与并发参数'),
-          DropdownButtonFormField<String>(
-            key: const ValueKey('text-model-thinking-dropdown'),
-            initialValue: _thinking,
-            isExpanded: true,
-            decoration: _compactFormDecoration(
-              context,
-              labelText: '思考程度（支持 none 与 max）',
-            ),
-            items: const [
-              DropdownMenuItem(
-                value: TextThinkingLevel.auto,
-                child: Text(
-                  '自动 (auto，标准接口)',
-                  overflow: TextOverflow.ellipsis,
+                  DropdownMenuItem(
+                    value: 'vendor_native',
+                    child: Text(
+                      'ToolCall 函数调用 Schema',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  DropdownMenuItem(
+                    value: 'json_schema',
+                    child: Text(
+                      'response_format JSON Schema',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+                onChanged: (v) {
+                  if (v != null) setState(() => _structuredMode = v);
+                },
+              ),
+              const SizedBox(height: 10),
+              DropdownButtonFormField<String>(
+                key: const ValueKey('text-model-thinking-dropdown'),
+                initialValue: _thinking,
+                isExpanded: true,
+                decoration: _compactFormDecoration(
+                  context,
+                  labelText: '思考程度（支持 none 与 max）',
                 ),
-              ),
-              DropdownMenuItem(
-                value: TextThinkingLevel.none,
-                child: Text(
-                  '关闭思考 (none)',
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              DropdownMenuItem(
-                value: TextThinkingLevel.minimal,
-                child: Text(
-                  '最低 (minimal)',
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ),
-              DropdownMenuItem(
-                value: TextThinkingLevel.low,
-                child: Text('低 (low)', overflow: TextOverflow.ellipsis),
-              ),
-              DropdownMenuItem(
-                value: TextThinkingLevel.medium,
-                child: Text('中 (medium)', overflow: TextOverflow.ellipsis),
-              ),
-              DropdownMenuItem(
-                value: TextThinkingLevel.high,
-                child: Text('高 (high)', overflow: TextOverflow.ellipsis),
-              ),
-              DropdownMenuItem(
-                value: TextThinkingLevel.max,
-                child: Text('最高 (max)', overflow: TextOverflow.ellipsis),
+                items: const [
+                  DropdownMenuItem(
+                    value: TextThinkingLevel.auto,
+                    child: Text(
+                      '自动 (auto，标准接口)',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  DropdownMenuItem(
+                    value: TextThinkingLevel.none,
+                    child: Text(
+                      '关闭思考 (none)',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  DropdownMenuItem(
+                    value: TextThinkingLevel.minimal,
+                    child: Text(
+                      '最低 (minimal)',
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                  DropdownMenuItem(
+                    value: TextThinkingLevel.low,
+                    child: Text('低 (low)', overflow: TextOverflow.ellipsis),
+                  ),
+                  DropdownMenuItem(
+                    value: TextThinkingLevel.medium,
+                    child: Text('中 (medium)', overflow: TextOverflow.ellipsis),
+                  ),
+                  DropdownMenuItem(
+                    value: TextThinkingLevel.high,
+                    child: Text('高 (high)', overflow: TextOverflow.ellipsis),
+                  ),
+                  DropdownMenuItem(
+                    value: TextThinkingLevel.max,
+                    child: Text('最高 (max)', overflow: TextOverflow.ellipsis),
+                  ),
+                ],
+                onChanged: (v) {
+                  if (v != null) setState(() => _thinking = v);
+                },
               ),
             ],
-            onChanged: (v) {
-              if (v != null) setState(() => _thinking = v);
-            },
           ),
           const SizedBox(height: 10),
-          Row(
-            crossAxisAlignment: CrossAxisAlignment.start,
+          _buildFormSectionCard(
+            context,
+            title: '3. 并发与高级参数',
             children: [
-              Expanded(
-                child: TextField(
-                  key: const ValueKey('text-model-context-field'),
-                  controller: _contextWindowCtrl,
+              if (hasMaxOutput) ...[
+                DropdownButtonFormField<String>(
+                  initialValue: _outputLimitParam,
+                  isExpanded: true,
                   decoration: _compactFormDecoration(
                     context,
-                    labelText: '上下文 Token',
-                    helperText: '默认 1M，可填 128K',
-                    helperMaxLines: 2,
+                    labelText: '最大输出请求字段名',
                   ),
-                  onChanged: (_) => setState(() => _formError = null),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'max_completion_tokens',
+                      child: Text(
+                        'max_completion_tokens（自动兼容回退 max_tokens）',
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    DropdownMenuItem(
+                      value: 'max_tokens',
+                      child: Text(
+                        'max_tokens（传统兼容）',
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) setState(() => _outputLimitParam = v);
+                  },
                 ),
-              ),
-              const SizedBox(width: 10),
-              Expanded(
-                child: TextField(
-                  key: const ValueKey('text-model-max-output-field'),
-                  controller: _maxOutputCtrl,
-                  decoration: _compactFormDecoration(
-                    context,
-                    labelText: '最大输出 Token',
-                    helperText: '默认 12800，留空不传',
-                    helperMaxLines: 2,
-                  ),
-                  onChanged: (_) => setState(() => _formError = null),
-                ),
-              ),
-            ],
-          ),
-          if (hasMaxOutput) ...[
-            const SizedBox(height: 10),
-            DropdownButtonFormField<String>(
-              initialValue: _outputLimitParam,
-              isExpanded: true,
-              decoration: _compactFormDecoration(
-                context,
-                labelText: '最大输出请求字段名',
-              ),
-              items: const [
-                DropdownMenuItem(
-                  value: 'max_completion_tokens',
-                  child: Text(
-                    'max_completion_tokens（OpenAI 新标准）',
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
-                DropdownMenuItem(
-                  value: 'max_tokens',
-                  child: Text(
-                    'max_tokens（传统兼容）',
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ),
+                const SizedBox(height: 10),
               ],
-              onChanged: (v) {
-                if (v != null) setState(() => _outputLimitParam = v);
-              },
-            ),
-          ],
-          const SizedBox(height: 10),
-          DropdownButtonFormField<String>(
-            initialValue: _structuredMode,
-            isExpanded: true,
-            decoration: _compactFormDecoration(
-              context,
-              labelText: '结构化输出模式',
-            ),
-            items: const [
-              DropdownMenuItem(
-                value: 'vendor_native',
-                child: Text(
-                  'ToolCall 严格 Schema（推荐）',
-                  overflow: TextOverflow.ellipsis,
-                ),
+              Row(
+                children: [
+                  Text('独立并发数：$_conc', style: const TextStyle(fontSize: 13)),
+                  const Spacer(),
+                  Text(
+                    '复核保留席：${_conc <= 1 ? 0 : 1}',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: AppTheme.textSecondaryOf(context),
+                    ),
+                  ),
+                ],
               ),
-              DropdownMenuItem(
-                value: 'json_schema',
-                child: Text(
-                  'response_format JSON Schema',
-                  overflow: TextOverflow.ellipsis,
-                ),
+              Slider(
+                value: _conc.toDouble(),
+                min: 1,
+                max: 8,
+                divisions: 7,
+                label: '$_conc',
+                onChanged: (v) => setState(() => _conc = v.round()),
               ),
-            ],
-            onChanged: (v) {
-              if (v != null) setState(() => _structuredMode = v);
-            },
-          ),
-          const SizedBox(height: 10),
-          Row(
-            children: [
-              Text('独立并发数：$_conc', style: const TextStyle(fontSize: 13)),
-              const Spacer(),
-              Text(
-                '复核保留席：${_conc <= 1 ? 0 : 1}',
-                style: TextStyle(
-                  fontSize: 11,
-                  color: AppTheme.textSecondaryOf(context),
-                ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: const Text('启用该模型'),
+                value: _enabled,
+                onChanged: (v) => setState(() => _enabled = v),
               ),
             ],
-          ),
-          Slider(
-            value: _conc.toDouble(),
-            min: 1,
-            max: 8,
-            divisions: 7,
-            label: '$_conc',
-            onChanged: (v) => setState(() => _conc = v.round()),
-          ),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            dense: true,
-            title: const Text('启用该模型'),
-            value: _enabled,
-            onChanged: (v) => setState(() => _enabled = v),
           ),
           if (_formError != null)
             Padding(
-              padding: const EdgeInsets.only(top: 6),
+              padding: const EdgeInsets.only(top: 8),
               child: Text(
                 _formError!,
                 style: TextStyle(
@@ -931,7 +978,6 @@ Future<TtsProviderConfig?> showTtsProviderEditorDialog(
       context: context,
       builder: (ctx) => StatefulBuilder(
         builder: (ctx, setD) {
-          final insecureHttp = isInsecureRemoteHttpUrl(urlCtrl.text);
           return _buildAdaptiveFormFrame(
             context: ctx,
             title: editing == null ? '新增 TTS 供应商' : '编辑 TTS 供应商',
@@ -963,11 +1009,10 @@ Future<TtsProviderConfig?> showTtsProviderEditorDialog(
                   controller: urlCtrl,
                   decoration: _compactFormDecoration(
                     ctx,
-                    labelText: 'Base URL（推荐 https://...）',
+                    labelText: 'Base URL（如 https://.../v1 或 http://.../v1）',
                   ),
                   onChanged: (_) => setD(() {}),
                 ),
-                if (insecureHttp) buildInsecureHttpWarningBanner(),
                 const SizedBox(height: 10),
                 TextField(
                   controller: endpointCtrl,

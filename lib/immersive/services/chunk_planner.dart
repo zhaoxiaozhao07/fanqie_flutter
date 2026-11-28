@@ -5,7 +5,15 @@ import '../models/immersive_entities.dart';
 
 /// 语义分块规划器：按章节/段落/完整句切分不重叠 target_units，并附加只读前后文
 class ChunkPlanner {
-  static const plannerVersion = 'v1';
+  static const plannerVersion = 'v2';
+
+  /// 根据模型最大输出 Token 反算单分块安全容纳的最大原文单元数，防止多单元 JSON 结构开销触发 finish_reason=length 截断
+  static int maxSafeUnitsForOutput(TextAnalysisConfig textConfig) {
+    final outLimit =
+        textConfig.maxOutputTokens ?? TextAnalysisConfig.defaultMaxOutputTokens;
+    // 保守按每条独立单元最坏展开约 155 输出 Token、外层新角色与提议预留 850 Token 估算（8192 -> 47 单元）
+    return ((outLimit - 850) ~/ 155).clamp(8, 72);
+  }
 
   /// 保守 token 估算（无精确 tokenizer 时使用保守估算，偏高估计以防超窗）
   static int estimateTokens(String text) {
@@ -88,6 +96,7 @@ class ChunkPlanner {
       maxTargetTokensOverride ?? pipelineConfig.maxChunkTokens,
       math.max(targetBudget, (targetBudget * 1.25).floor()),
     );
+    final maxSafeUnits = maxSafeUnitsForOutput(textConfig);
 
     final chunks = <AnalysisChunk>[];
     var cursor = 0;
@@ -118,11 +127,14 @@ class ChunkPlanner {
           activeUnits[endIdx].chapterIndex == chapterIndex) {
         final u = activeUnits[endIdx];
         final uTok = estimateTokens(u.text);
-        // 尽量不在同一段落中间切开，除非接近 hardMaxBudget
+        // 尽量不在同一段落中间切开，除非接近 hardMaxBudget 或达到最大输出安全单元数上限
         final sameParaAsPrev =
             endIdx > startIdx &&
             activeUnits[endIdx - 1].paragraphIndex == u.paragraphIndex;
         if (endIdx > startIdx) {
+          if (endIdx - startIdx >= maxSafeUnits) {
+            break;
+          }
           if (!sameParaAsPrev && tokSum + uTok > chunkTargetBudget) {
             break;
           }

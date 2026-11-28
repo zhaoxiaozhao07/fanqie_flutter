@@ -6,6 +6,7 @@ import '../../services/text_replace_rule_service.dart';
 import '../models/immersive_config.dart';
 import '../models/immersive_entities.dart';
 import 'audio_cache_manager.dart';
+import 'chunk_planner.dart';
 import 'context_builder.dart';
 import 'identity_coordinator.dart';
 import 'immersive_database.dart';
@@ -250,9 +251,10 @@ class ImmersiveJobScheduler {
   String? _lastError;
   String? _blockingReason;
 
-  // 多文本模型主备运行态
+  // 多文本模型主备运行态与按任务独立重试计数（防止并发分块互相清零）
   String? _activeTextModelId;
-  int _consecutivePrimaryFailures = 0;
+  final Map<String, int> _retriesUsedByModelAndJob = {};
+  String? _activeRetryStatus;
   String? _failoverNotice;
 
   final Set<String> _inFlightJobKeys = {};
@@ -264,6 +266,7 @@ class ImmersiveJobScheduler {
 
   void Function()? onProgressChanged;
   Future<void> Function(String bookId, String bookRevisionId)? onAllocationsCommitted;
+  Future<void> Function(String bookId, String bookRevisionId)? onChunksUpdated;
   Future<void> Function(String requestKey)? onAudioAssetReady;
   void Function(String notice)? onFailoverNotice;
   Future<void> Function(String failedVoiceProfileId, String reason)?
@@ -292,6 +295,7 @@ class ImmersiveJobScheduler {
   String? get lastError => _lastError;
   String? get blockingReason => _blockingReason;
   String? get failoverNotice => _failoverNotice;
+  String? get activeRetryStatus => _activeRetryStatus;
   int get activeTextRequests => quotaPool.activeTextRequests;
   int get activeTtsRequests => quotaPool.activeTtsRequests;
   bool get isRunning => _running;
@@ -311,7 +315,8 @@ class ImmersiveJobScheduler {
   /// 手动复位主备状态，重新切回主文本模型
   void resetTextModelFailover() {
     _activeTextModelId = _config.primaryTextModel.effectiveId;
-    _consecutivePrimaryFailures = 0;
+    _retriesUsedByModelAndJob.clear();
+    _activeRetryStatus = null;
     _failoverNotice = null;
   }
 
@@ -320,6 +325,8 @@ class ImmersiveJobScheduler {
     _blockingReason = null;
     _lastError = null;
     _failoverNotice = null;
+    _activeRetryStatus = null;
+    _retriesUsedByModelAndJob.clear();
     quotaPool.clearTextCooldowns();
     if (resetFailover) {
       resetTextModelFailover();
@@ -419,6 +426,8 @@ class ImmersiveJobScheduler {
     _blockingReason = null;
     _lastError = null;
     _failoverNotice = null;
+    _activeRetryStatus = null;
+    _retriesUsedByModelAndJob.clear();
     onProgressChanged?.call();
   }
 
@@ -507,6 +516,7 @@ class ImmersiveJobScheduler {
     SchedulerDemandSnapshot demand,
     int nowMs,
   ) async {
+    if (_blockingReason != null) return;
     final bookCfg = await _store.getBookAudioConfig(demand.bookId);
     if (bookCfg == null) return;
     final chunks = await _store.getAnalysisChunks(demand.bookRevisionId);
@@ -540,7 +550,10 @@ class ImmersiveJobScheduler {
       demand.bookId,
       demand.bookRevisionId,
     );
-    final validDraftChunkIds = {for (final d in validDrafts) d.chunkId};
+    final validDraftChunkIds = {
+      for (final d in validDrafts)
+        if (d.analysisRunRevision == bookCfg.analysisRunRevision) d.chunkId,
+    };
 
     final existingJobs = await _store.listJobs(
       bookId: demand.bookId,
@@ -610,6 +623,7 @@ class ImmersiveJobScheduler {
           createdAtMs: nowMs,
           updatedAtMs: nowMs,
         ),
+        reviveTerminal: true,
       );
       activeChunkIds.add(chunk.chunkId);
       uncommittedCount++;
@@ -677,6 +691,9 @@ class ImmersiveJobScheduler {
     TextAnalysisConfig textModel,
   ) async {
     _startHeartbeat(job);
+    AnalysisChunk? currentChunk;
+    Map<String, SourceUnit>? currentUnitById;
+    var confirmedChunkOrder = -1;
     try {
       final payloadMap = jsonDecode(job.payloadJson) as Map;
       final chunkId = payloadMap['chunk_id'] as String;
@@ -705,8 +722,10 @@ class ImmersiveJobScheduler {
         return;
       }
       final chunk = chunks[chunkIdx];
+      currentChunk = chunk;
       final units = await _store.getSourceUnits(job.bookRevisionId);
       final unitById = {for (final u in units) u.unitId: u};
+      currentUnitById = unitById;
       final chars = await _store.getCharacters(job.bookId);
       final aliases = await _store.getAliasEvidences(job.bookId);
       final bindings = await _store.getVoiceBindings(job.bookId);
@@ -715,6 +734,7 @@ class ImmersiveJobScheduler {
         job.bookId,
         job.bookRevisionId,
       );
+      confirmedChunkOrder = latestCp?.confirmedChunkOrder ?? -1;
 
       final prompt = ContextBuilder.buildChunkAnalysisPrompt(
         config: _config,
@@ -741,16 +761,24 @@ class ImmersiveJobScheduler {
         userMessage: prompt.userMessage,
       );
 
-      // 保存草稿前做结构与原文覆盖校验
+      // 保存草稿前先做确定性微瑕修复（去重单元、过滤只读上下文），再执行严格原文逐字覆盖校验
+      final knownCharSet = {for (final c in chars) c.characterId};
+      IdentityCoordinator.repairMinorDraftDeviations(
+        payload: resp.data,
+        chunk: chunk,
+        unitById: unitById,
+        knownCharacterIds: knownCharSet,
+      );
       IdentityCoordinator.validateDraftAgainstChunk(
         payload: resp.data,
         chunk: chunk,
         unitById: unitById,
-        knownCharacterIds: {for (final c in chars) c.characterId},
+        knownCharacterIds: knownCharSet,
       );
 
-      if (textModel.effectiveId == _config.primaryTextModel.effectiveId) {
-        _consecutivePrimaryFailures = 0;
+      _retriesUsedByModelAndJob.remove('${textModel.effectiveId}|${job.jobKey}');
+      if (_retriesUsedByModelAndJob.isEmpty) {
+        _activeRetryStatus = null;
       }
 
       final nowMs = _now().millisecondsSinceEpoch;
@@ -781,64 +809,38 @@ class ImmersiveJobScheduler {
         _blockingReason = null;
       }
     } on TextModelException catch (e) {
+      if (e.kind == TextModelErrorKind.truncated &&
+          currentChunk != null &&
+          currentUnitById != null &&
+          currentChunk.targetUnitIds.length >= 4 &&
+          currentChunk.chunkOrder > confirmedChunkOrder) {
+        final splitDone = await _trySplitOversizedChunkAndRequeue(
+          job: job,
+          chunk: currentChunk,
+          unitById: currentUnitById,
+          confirmedChunkOrder: confirmedChunkOrder,
+        );
+        if (splitDone) return;
+      }
       await _handleTextJobError(job, textModel, e);
     } on DraftSemanticValidationException catch (e) {
-      final taggedMsg = _tagModelMessage(
+      await _handleTextJobError(
+        job,
         textModel,
-        '模型返回未覆盖全部目标原文（${e.message}）',
+        TextModelException(
+          kind: TextModelErrorKind.schemaViolation,
+          message: '模型返回未覆盖全部目标原文（${e.message}）',
+        ),
       );
-      if (textModel.effectiveId != activeTextModel.effectiveId) {
-        final nowMs = _now().millisecondsSinceEpoch;
-        await _store.completeJob(
-          jobKey: job.jobKey,
-          workerId: workerId,
-          fence: job.fence,
-          newStatus: ImmersiveJobStatus.retryWait,
-          nextNotBeforeMs: nowMs,
-          nowMs: nowMs,
-        );
-      } else {
-        final switched = await _maybeFailoverTextModel(
-          job,
-          textModel,
-          taggedMsg,
-          immediate: false,
-        );
-        if (!switched) {
-          await _handleRetryableJobFailure(
-            job,
-            taggedMsg,
-            isBlocking: false,
-          );
-        }
-      }
     } catch (e) {
-      final taggedMsg = _tagModelMessage(textModel, '文本分析执行异常：$e');
-      if (textModel.effectiveId != activeTextModel.effectiveId) {
-        final nowMs = _now().millisecondsSinceEpoch;
-        await _store.completeJob(
-          jobKey: job.jobKey,
-          workerId: workerId,
-          fence: job.fence,
-          newStatus: ImmersiveJobStatus.retryWait,
-          nextNotBeforeMs: nowMs,
-          nowMs: nowMs,
-        );
-      } else {
-        final switched = await _maybeFailoverTextModel(
-          job,
-          textModel,
-          taggedMsg,
-          immediate: false,
-        );
-        if (!switched) {
-          await _handleRetryableJobFailure(
-            job,
-            taggedMsg,
-            isBlocking: false,
-          );
-        }
-      }
+      await _handleTextJobError(
+        job,
+        textModel,
+        TextModelException(
+          kind: TextModelErrorKind.transientNetwork,
+          message: '文本分析执行异常：$e',
+        ),
+      );
     } finally {
       _stopHeartbeat(job.jobKey);
       _inFlightJobKeys.remove(job.jobKey);
@@ -850,13 +852,110 @@ class ImmersiveJobScheduler {
     }
   }
 
-  /// 判断是否满足主模型故障转移条件：主模型连续失败达到阈值或遇阻断错误时，自动切至兜底模型并立刻重试
-  Future<bool> _maybeFailoverTextModel(
-    ImmersiveJob job,
-    TextAnalysisConfig failedModel,
-    String errorMessage, {
-    required bool immediate,
+  /// 当单个分块因单元密集触发模型输出长度截断（finish_reason=length）时，自动将该未确认块对半拆分为两个子分块并重新排队
+  Future<bool> _trySplitOversizedChunkAndRequeue({
+    required ImmersiveJob job,
+    required AnalysisChunk chunk,
+    required Map<String, SourceUnit> unitById,
+    required int confirmedChunkOrder,
   }) async {
+    final allChunks = await _store.getAnalysisChunks(job.bookRevisionId);
+    final idx = allChunks.indexWhere((c) => c.chunkId == chunk.chunkId);
+    if (idx == -1) return false;
+    final target = allChunks[idx];
+    if (target.targetUnitIds.length < 4 ||
+        target.chunkOrder <= confirmedChunkOrder) {
+      return false;
+    }
+    if (target.targetUnitIds.any((id) => !unitById.containsKey(id))) {
+      return false;
+    }
+
+    final pair = ChunkPlanner.splitOversizedChunk(target, unitById);
+    final updated = <AnalysisChunk>[
+      ...allChunks.sublist(0, idx),
+      pair[0],
+      pair[1],
+    ];
+    final orderRemap = <String, int>{};
+    var minNextOrder = pair[1].chunkOrder + 1;
+    for (var i = idx + 1; i < allChunks.length; i++) {
+      final c = allChunks[i];
+      if (c.chunkOrder < minNextOrder) {
+        updated.add(
+          AnalysisChunk(
+            chunkId: c.chunkId,
+            bookRevisionId: c.bookRevisionId,
+            bookId: c.bookId,
+            chapterIndex: c.chapterIndex,
+            chapterId: c.chapterId,
+            chunkOrder: minNextOrder,
+            targetUnitIds: c.targetUnitIds,
+            contextBeforeUnitIds: c.contextBeforeUnitIds,
+            contextAfterUnitIds: c.contextAfterUnitIds,
+            startGlobalOrder: c.startGlobalOrder,
+            endGlobalOrder: c.endGlobalOrder,
+            plannerVersion: c.plannerVersion,
+            estimatedTokens: c.estimatedTokens,
+          ),
+        );
+        orderRemap[c.chunkId] = minNextOrder;
+        minNextOrder++;
+      } else {
+        updated.add(c);
+        minNextOrder = c.chunkOrder + 1;
+      }
+    }
+
+    await _store.replaceAnalysisChunks(job.bookRevisionId, updated);
+    if (orderRemap.isNotEmpty) {
+      final drafts = await _store.getValidDrafts(job.bookId, job.bookRevisionId);
+      for (final d in drafts) {
+        final newOrder = orderRemap[d.chunkId];
+        if (newOrder != null && newOrder != d.chunkOrder) {
+          await _store.saveDraft(
+            AnalysisDraft(
+              draftId: d.draftId,
+              bookId: d.bookId,
+              bookRevisionId: d.bookRevisionId,
+              chunkId: d.chunkId,
+              chunkOrder: newOrder,
+              analysisRunRevision: d.analysisRunRevision,
+              snapshotRegistryRevision: d.snapshotRegistryRevision,
+              castRevision: d.castRevision,
+              payloadJson: d.payloadJson,
+              validationStatus: d.validationStatus,
+              createdAtMs: d.createdAtMs,
+            ),
+          );
+        }
+      }
+    }
+
+    _retriesUsedByModelAndJob.removeWhere((k, _) => k.endsWith('|${job.jobKey}'));
+    if (_retriesUsedByModelAndJob.isEmpty) {
+      _activeRetryStatus = null;
+    }
+    final nowMs = _now().millisecondsSinceEpoch;
+    await _store.completeJob(
+      jobKey: job.jobKey,
+      workerId: workerId,
+      fence: job.fence,
+      newStatus: ImmersiveJobStatus.cancelled,
+      nowMs: nowMs,
+    );
+    await onChunksUpdated?.call(job.bookId, job.bookRevisionId);
+    onProgressChanged?.call();
+    return true;
+  }
+
+  /// 执行主模型到兜底模型的自动切换，并立即复活本书受阻或等待中的分析任务交由兜底模型执行
+  Future<bool> _switchPrimaryToFallback(
+    ImmersiveJob currentJob,
+    TextAnalysisConfig failedModel,
+    String errorMessage,
+    int retriesAttempted,
+  ) async {
     final primary = _config.primaryTextModel;
     final fallback = _config.fallbackTextModel;
     if (fallback == null ||
@@ -865,29 +964,47 @@ class ImmersiveJobScheduler {
       return false;
     }
 
-    _consecutivePrimaryFailures++;
-    final shouldSwitch =
-        immediate ||
-        _consecutivePrimaryFailures >= _config.textFailoverThreshold;
-    if (!shouldSwitch) return false;
-
     _activeTextModelId = fallback.effectiveId;
     _blockingReason = null;
+    _activeRetryStatus = null;
+    _retriesUsedByModelAndJob.removeWhere(
+      (k, _) => k.startsWith('${primary.effectiveId}|'),
+    );
+    final retryDesc = retriesAttempted > 0 ? '重试 $retriesAttempted 次后仍失败' : '调用失败';
     _failoverNotice =
-        '主模型 ${primary.displayName} 连续失败（$errorMessage），已自动切换至兜底模型 ${fallback.displayName}';
+        '主模型 ${primary.displayName} $retryDesc（$errorMessage），已自动切换至兜底模型 ${fallback.displayName}';
     _lastError = _failoverNotice;
     onFailoverNotice?.call(_failoverNotice!);
 
     final nowMs = _now().millisecondsSinceEpoch;
     await _store.completeJob(
-      jobKey: job.jobKey,
+      jobKey: currentJob.jobKey,
       workerId: workerId,
-      fence: job.fence,
+      fence: currentJob.fence,
       newStatus: ImmersiveJobStatus.retryWait,
       nextNotBeforeMs: nowMs,
       errorMessage: _failoverNotice,
       nowMs: nowMs,
     );
+
+    // 同步复活同书此前因主模型失败而卡在 failed/blocked/retryWait 的其他分析任务
+    final stuck = await _store.listJobs(
+      bookId: currentJob.bookId,
+      statuses: const {
+        ImmersiveJobStatus.failed,
+        ImmersiveJobStatus.blocked,
+        ImmersiveJobStatus.retryWait,
+      },
+    );
+    for (final j in stuck) {
+      if (j.jobType == ImmersiveJobType.chunkAnalysis &&
+          j.jobKey != currentJob.jobKey) {
+        await _store.enqueueOrReviveJob(
+          j.copyWith(updatedAtMs: nowMs),
+          reviveTerminal: true,
+        );
+      }
+    }
     return true;
   }
 
@@ -899,6 +1016,10 @@ class ImmersiveJobScheduler {
     return '[$tag] $message';
   }
 
+  /// 统一文本模型任务错误处理：
+  /// 1. 失败自动重试 N 次（默认 textFailoverThreshold = 3 次，按任务独立计数不被并发块清零）；
+  /// 2. 主模型重试满 N 次仍失败（或鉴权/占位符硬错误）时，若存在兜底模型则立即自动切换至兜底模型；
+  /// 3. 无兜底模型或兜底模型重试满 3 次后仍失败时，写入 _blockingReason 显式上报播放器，杜绝静默死锁。
   Future<void> _handleTextJobError(
     ImmersiveJob job,
     TextAnalysisConfig failedModel,
@@ -920,7 +1041,7 @@ class ImmersiveJobScheduler {
       return;
     }
 
-    // 若用户已切换至其他文本模型，忽略旧模型迟到的失败结果并立即交给当前模型重试
+    // 若已切换至其他文本模型，忽略旧模型迟到的失败结果并立即交给当前模型重试
     if (failedModel.effectiveId != activeTextModel.effectiveId) {
       await _store.completeJob(
         jobKey: job.jobKey,
@@ -940,18 +1061,32 @@ class ImmersiveJobScheduler {
         modelEntryId: failedModel.effectiveId,
       );
     }
-    final switched = await _maybeFailoverTextModel(
-      job,
-      failedModel,
-      taggedMsg,
-      immediate:
-          e.isBlockingConfigOrProtocol || e.kind == TextModelErrorKind.refusal,
-    );
-    if (switched) return;
 
-    if (e.isBlockingConfigOrProtocol || e.kind == TextModelErrorKind.refusal) {
+    final hasFallback =
+        _config.fallbackTextModel != null &&
+        failedModel.effectiveId == _config.primaryTextModel.effectiveId;
+    final isImmediateHardError =
+        e.kind == TextModelErrorKind.authFailed ||
+        e.kind == TextModelErrorKind.badRequest ||
+        e.kind == TextModelErrorKind.refusal ||
+        (!hasFallback && e.kind == TextModelErrorKind.unsupportedStructuredOutput);
+
+    if (isImmediateHardError) {
+      if (hasFallback) {
+        final switched = await _switchPrimaryToFallback(
+          job,
+          failedModel,
+          taggedMsg,
+          0,
+        );
+        if (switched) {
+          onProgressChanged?.call();
+          return;
+        }
+      }
       _blockingReason = taggedMsg;
       _lastError = taggedMsg;
+      _activeRetryStatus = null;
       await _store.completeJob(
         jobKey: job.jobKey,
         workerId: workerId,
@@ -963,11 +1098,74 @@ class ImmersiveJobScheduler {
       onProgressChanged?.call();
       return;
     }
-    await _handleRetryableJobFailure(
+
+    // 计算当前模型在本分块任务上允许的最大自动重试次数（主模型遵循 textFailoverThreshold 默认 3 次，兜底模型固定 3 次）
+    final maxRetries =
+        failedModel.effectiveId == _config.primaryTextModel.effectiveId
+        ? _config.textFailoverThreshold.clamp(1, 10)
+        : 3;
+    final retryCounterKey = '${failedModel.effectiveId}|${job.jobKey}';
+    final retriesUsed = _retriesUsedByModelAndJob[retryCounterKey] ?? 0;
+
+    if (retriesUsed < maxRetries) {
+      final nextRetrySeq = retriesUsed + 1;
+      _retriesUsedByModelAndJob[retryCounterKey] = nextRetrySeq;
+      final modelLabel = failedModel.displayName.trim().isNotEmpty
+          ? failedModel.displayName.trim()
+          : failedModel.modelId;
+      _activeRetryStatus = '$modelLabel 自动重试 $nextRetrySeq/$maxRetries';
+      _lastError = taggedMsg;
+
+      final expMs =
+          _config.retry.initialBackoffMs *
+          math.pow(2, math.max(0, nextRetrySeq - 1));
+      final cappedMs = math.min(expMs.toInt(), _config.retry.maxBackoffMs);
+      final jitterFactor =
+          1.0 + (_rand.nextDouble() * 2 - 1) * _config.retry.jitterRatio;
+      var delayMs = (cappedMs * jitterFactor)
+          .round()
+          .clamp(50, _config.retry.maxBackoffMs);
+      if (_config.retry.respectRetryAfter && e.retryAfter != null) {
+        delayMs = math.max(delayMs, e.retryAfter!.inMilliseconds);
+      }
+
+      await _store.completeJob(
+        jobKey: job.jobKey,
+        workerId: workerId,
+        fence: job.fence,
+        newStatus: ImmersiveJobStatus.retryWait,
+        nextNotBeforeMs: nowMs + delayMs,
+        errorMessage: taggedMsg,
+        nowMs: nowMs,
+      );
+      onProgressChanged?.call();
+      return;
+    }
+
+    // 已在当前模型自动重试满 maxRetries 次（默认 3 次）仍然失败：尝试自动切换至兜底模型
+    _retriesUsedByModelAndJob.remove(retryCounterKey);
+    final switched = await _switchPrimaryToFallback(
       job,
+      failedModel,
       taggedMsg,
-      retryAfter: e.retryAfter,
-      isBlocking: false,
+      maxRetries,
+    );
+    if (switched) {
+      onProgressChanged?.call();
+      return;
+    }
+
+    // 无可用兜底模型或兜底模型重试 3 次后依然失败：进入阻塞终态并显式提示用户
+    _activeRetryStatus = null;
+    _blockingReason = '$taggedMsg（已自动重试 $maxRetries 次仍失败）';
+    _lastError = _blockingReason;
+    await _store.completeJob(
+      jobKey: job.jobKey,
+      workerId: workerId,
+      fence: job.fence,
+      newStatus: ImmersiveJobStatus.blocked,
+      errorMessage: _blockingReason,
+      nowMs: nowMs,
     );
     onProgressChanged?.call();
   }

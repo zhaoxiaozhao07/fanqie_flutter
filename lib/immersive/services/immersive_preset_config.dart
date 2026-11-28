@@ -307,10 +307,10 @@ class ImmersivePresetConfig {
       outputLimitParameter: 'max_completion_tokens',
       temperature: null,
       structuredOutput: const StructuredOutputConfig(
-        mode: 'vendor_native',
+        mode: 'json_object',
         schemaNamePrefix: 'immersive_reader_v1',
         strict: true,
-        vendorAdapterId: 'openai_tool_call_schema',
+        vendorAdapterId: null,
         allowPromptOnlyFallback: false,
       ),
     );
@@ -339,10 +339,10 @@ class ImmersivePresetConfig {
       outputLimitParameter: 'max_completion_tokens',
       temperature: null,
       structuredOutput: const StructuredOutputConfig(
-        mode: 'vendor_native',
+        mode: 'json_object',
         schemaNamePrefix: 'immersive_reader_v1',
         strict: true,
-        vendorAdapterId: 'openai_tool_call_schema',
+        vendorAdapterId: null,
         allowPromptOnlyFallback: false,
       ),
     );
@@ -371,10 +371,10 @@ class ImmersivePresetConfig {
       outputLimitParameter: 'max_completion_tokens',
       temperature: null,
       structuredOutput: const StructuredOutputConfig(
-        mode: 'vendor_native',
+        mode: 'json_object',
         schemaNamePrefix: 'immersive_reader_v1',
         strict: true,
-        vendorAdapterId: 'openai_tool_call_schema',
+        vendorAdapterId: null,
         allowPromptOnlyFallback: false,
       ),
     );
@@ -392,7 +392,7 @@ class ImmersivePresetConfig {
       textAnalysisModels: [primaryMiniMax, fallbackGlm, extraQwen],
       primaryTextModelId: primaryMiniMax.effectiveId,
       fallbackTextModelId: fallbackGlm.effectiveId,
-      textFailoverThreshold: 2,
+      textFailoverThreshold: 3,
       tts: TtsConfig(
         globalMaxConcurrency: 6,
         maxPendingJobs: 64,

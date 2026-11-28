@@ -308,50 +308,198 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
   Widget _buildProvidersTab(ImmersiveConfig cfg) {
     final primaryId = cfg.primaryTextModel.effectiveId;
     final fallbackId = cfg.fallbackTextModel?.effectiveId;
+    final enabledTextModels = cfg.enabledTextModels;
+    final selectedPrimaryValue = enabledTextModels.any(
+      (m) => m.effectiveId == primaryId,
+    )
+        ? primaryId
+        : (enabledTextModels.isNotEmpty
+              ? enabledTextModels.first.effectiveId
+              : null);
+    final fallbackCandidates = enabledTextModels
+        .where((m) => m.effectiveId != selectedPrimaryValue)
+        .toList();
+    final selectedFallbackValue = fallbackCandidates.any(
+      (m) => m.effectiveId == fallbackId,
+    )
+        ? fallbackId
+        : '';
 
     return ListView(
       padding: const EdgeInsets.all(16),
       children: [
-        SwitchListTile(
-          contentPadding: EdgeInsets.zero,
-          title: const Text('启用沉浸式多角色听书'),
-          subtitle: const Text('所有模型与音色均在应用内管理并加密保存，关闭时原有普通听书照常运行'),
-          value: cfg.featureEnabled,
-          onChanged: (v) {
-            unawaited(
-              _applyAndSaveConfig(
-                cfg.copyWith(featureEnabled: v),
-                successMessage: v ? '已启用沉浸式多角色听书' : '已关闭沉浸式多角色听书',
+        Material(
+          color: AppTheme.inputFillOf(context),
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+            side: BorderSide(color: AppTheme.dividerOf(context)),
+          ),
+          clipBehavior: Clip.antiAlias,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              dense: true,
+              title: const Text(
+                '启用沉浸式多角色听书',
+                style: TextStyle(fontWeight: FontWeight.w700, fontSize: 14),
               ),
-            );
-          },
+              subtitle: const Text(
+                '密钥加密保存于系统安全存储，关闭时自动使用原有普通听书',
+                style: TextStyle(fontSize: 11.5),
+              ),
+              value: cfg.featureEnabled,
+              onChanged: (v) {
+                unawaited(
+                  _applyAndSaveConfig(
+                    cfg.copyWith(featureEnabled: v),
+                    successMessage: v ? '已启用沉浸式多角色听书' : '已关闭沉浸式多角色听书',
+                  ),
+                );
+              },
+            ),
+          ),
         ),
-        const Divider(),
+        const SizedBox(height: 14),
         // ==================== 1. 多文本提取模型管理 ====================
         Row(
           children: [
             const Expanded(
               child: Text(
-                '1. 文本提取模型（主备自动切换 · 独立并发）',
+                '1. 文本提取模型（失败重试与主备切换）',
                 style: TextStyle(fontWeight: FontWeight.bold, fontSize: 14),
               ),
             ),
-            TextButton.icon(
+            FilledButton.tonalIcon(
+              style: FilledButton.styleFrom(
+                visualDensity: VisualDensity.compact,
+                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              ),
               icon: const Icon(Icons.add, size: 16),
-              label: const Text('新增模型'),
+              label: const Text('新增模型', style: TextStyle(fontSize: 12)),
               onPressed: () => _showTextModelEditorDialog(cfg),
             ),
           ],
         ),
-        Text(
-          '支持同时配置多个 OpenAI 兼容模型并选择性启用；设 1 个主模型与 1 个兜底模型，'
-          '主模型连续失败 ${cfg.textFailoverThreshold} 次自动切换至兜底模型。',
-          style: TextStyle(
-            fontSize: 11,
-            color: AppTheme.textSecondaryOf(context),
-          ),
-        ),
         const SizedBox(height: 8),
+        if (enabledTextModels.isNotEmpty)
+          Container(
+            margin: const EdgeInsets.only(bottom: 10),
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: AppTheme.surfaceOf(context),
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: AppTheme.dividerOf(context)),
+            ),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey(
+                          'primary-model-select-$selectedPrimaryValue-${enabledTextModels.length}',
+                        ),
+                        initialValue: selectedPrimaryValue,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: '主模型',
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 8,
+                          ),
+                          border: OutlineInputBorder(),
+                        ),
+                        items: [
+                          for (final m in enabledTextModels)
+                            DropdownMenuItem(
+                              value: m.effectiveId,
+                              child: Text(
+                                m.displayName,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 12.5),
+                              ),
+                            ),
+                        ],
+                        onChanged: (val) async {
+                          if (val == null || val == primaryId) return;
+                          final nextFallback =
+                              cfg.fallbackTextModelId == val
+                              ? cfg.primaryTextModelId
+                              : cfg.fallbackTextModelId;
+                          await _applyAndSaveConfig(
+                            cfg.copyWith(
+                              primaryTextModelId: val,
+                              fallbackTextModelId: nextFallback,
+                            ),
+                            successMessage: '已切换主模型（已重置旧报错并重新调度）',
+                          );
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Expanded(
+                      child: DropdownButtonFormField<String>(
+                        key: ValueKey(
+                          'fallback-model-select-$selectedFallbackValue-${fallbackCandidates.length}',
+                        ),
+                        initialValue: selectedFallbackValue,
+                        isExpanded: true,
+                        decoration: const InputDecoration(
+                          labelText: '兜底模型',
+                          isDense: true,
+                          contentPadding: EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 8,
+                          ),
+                          border: OutlineInputBorder(),
+                        ),
+                        items: [
+                          const DropdownMenuItem(
+                            value: '',
+                            child: Text(
+                              '不启用兜底',
+                              overflow: TextOverflow.ellipsis,
+                              style: TextStyle(fontSize: 12.5),
+                            ),
+                          ),
+                          for (final m in fallbackCandidates)
+                            DropdownMenuItem(
+                              value: m.effectiveId,
+                              child: Text(
+                                m.displayName,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 12.5),
+                              ),
+                            ),
+                        ],
+                        onChanged: (val) async {
+                          if (val == null) return;
+                          final nextFb = val.isEmpty ? null : val;
+                          await _applyAndSaveConfig(
+                            cfg.copyWith(fallbackTextModelId: nextFb),
+                            successMessage: nextFb == null
+                                ? '已取消兜底模型设置'
+                                : '已更新兜底模型配置',
+                          );
+                        },
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  '主模型请求失败时自动重试 ${cfg.textFailoverThreshold} 次，仍失败自动切换至兜底模型；默认上下文 1M、最大输出 8192。',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: AppTheme.textSecondaryOf(context),
+                  ),
+                ),
+              ],
+            ),
+          ),
         for (final tm in cfg.textAnalysisModels)
           _buildTextModelCard(
             cfg,
@@ -463,6 +611,24 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
     );
   }
 
+  Widget _paramChip(BuildContext context, String label) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 2.5),
+      decoration: BoxDecoration(
+        color: AppTheme.inputFillOf(context),
+        borderRadius: BorderRadius.circular(5),
+      ),
+      child: Text(
+        label,
+        style: TextStyle(
+          fontSize: 10.5,
+          color: AppTheme.textSecondaryOf(context),
+          fontWeight: FontWeight.w500,
+        ),
+      ),
+    );
+  }
+
   Widget _buildTextModelCard(
     ImmersiveConfig cfg,
     TextAnalysisConfig tm, {
@@ -475,6 +641,8 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
     final missingKey =
         (tm.apiKey ?? '').trim().isEmpty &&
         (tm.apiKeyEnv ?? '').trim().isEmpty;
+    final ctxShort = formatTokenCountShort(tm.effectiveContextWindowTokens);
+    final outShort = formatTokenCountShort(tm.maxOutputTokens);
 
     return Card(
       margin: const EdgeInsets.only(bottom: 10),
@@ -520,8 +688,6 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                           _badge('兜底模型', Colors.orange.shade800)
                         else
                           _badge(tm.enabled ? '备选' : '已停用', Colors.grey),
-                        if (isInsecureRemoteHttpUrl(tm.baseUrl))
-                          _badge('明文 HTTP', Colors.deepOrange),
                         if (missingKey)
                           _badge('未填密钥', Colors.red.shade700),
                       ],
@@ -562,18 +728,33 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                   ),
                 ],
               ),
-              Text(
-                '${tm.modelId} · 并发 ${tm.maxConcurrency} · 思考 ${_thinkingLabel(tm.thinkingLevel)}',
-                style: TextStyle(
-                  fontSize: 11.5,
-                  color: AppTheme.textSecondaryOf(context),
-                ),
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 6,
+                runSpacing: 4,
+                children: [
+                  _paramChip(context, tm.modelId),
+                  _paramChip(context, '上下文 $ctxShort'),
+                  _paramChip(context, '输出 $outShort'),
+                  _paramChip(context, '并发 ${tm.maxConcurrency}'),
+                  _paramChip(context, '思考 ${_thinkingLabel(tm.thinkingLevel)}'),
+                  _paramChip(context, tm.structuredOutput.mode),
+                ],
               ),
               if (testRes != null)
-                Padding(
-                  padding: const EdgeInsets.only(top: 4),
+                Container(
+                  width: double.infinity,
+                  margin: const EdgeInsets.only(top: 6),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 8,
+                    vertical: 5,
+                  ),
+                  decoration: BoxDecoration(
+                    color: (testRes.ok ? Colors.green : Colors.red).withValues(
+                      alpha: 0.08,
+                    ),
+                    borderRadius: BorderRadius.circular(6),
+                  ),
                   child: Text(
                     testRes.message,
                     style: TextStyle(
@@ -582,7 +763,7 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                           ? Colors.green.shade700
                           : Colors.red.shade700,
                     ),
-                    maxLines: 2,
+                    maxLines: 3,
                     overflow: TextOverflow.ellipsis,
                   ),
                 ),
@@ -765,8 +946,6 @@ class _ImmersiveSettingsSheetState extends State<ImmersiveSettingsSheet>
                   if (provider.adapter == 'native_tts')
                     _badge('本地离线', Colors.green.shade700)
                   else ...[
-                    if (isInsecureRemoteHttpUrl(provider.baseUrl))
-                      _badge('明文 HTTP', Colors.deepOrange),
                     if ((provider.apiKey ?? '').trim().isEmpty &&
                         (provider.apiKeyEnv ?? '').trim().isEmpty)
                       _badge('未填密钥', Colors.red.shade700),

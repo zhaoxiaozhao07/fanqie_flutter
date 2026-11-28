@@ -1247,12 +1247,17 @@ class PipelineStatus {
   final String phaseLabel; // 给普通用户看的可理解描述
   final bool isPreparingPrefix;
   final int prefixCompletedChunks;
+  final int prefixDraftChunks;
   final int prefixTotalChunks;
   final int candidateAnalyzedChunks;
   final int confirmedChunks;
   final int totalPlannedChunks;
+  final int currentSegmentOneBased;
   final int readyAudioSegments;
   final int totalManifestSegments;
+  final double progressRatio;
+  final String progressSummaryText;
+  final String? retryStatusText;
   final double continuousReadySeconds;
   final double estimatedPendingSeconds;
   final int activeTextRequests;
@@ -1272,12 +1277,17 @@ class PipelineStatus {
     this.phaseLabel = '待启动',
     this.isPreparingPrefix = false,
     this.prefixCompletedChunks = 0,
+    this.prefixDraftChunks = 0,
     this.prefixTotalChunks = 0,
     this.candidateAnalyzedChunks = 0,
     this.confirmedChunks = 0,
     this.totalPlannedChunks = 0,
+    this.currentSegmentOneBased = 0,
     this.readyAudioSegments = 0,
     this.totalManifestSegments = 0,
+    this.progressRatio = 0,
+    this.progressSummaryText = '',
+    this.retryStatusText,
     this.continuousReadySeconds = 0,
     this.estimatedPendingSeconds = 0,
     this.activeTextRequests = 0,

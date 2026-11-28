@@ -300,7 +300,7 @@ class StructuredOutputConfig {
   final bool allowPromptOnlyFallback;
 
   const StructuredOutputConfig({
-    this.mode = 'json_schema',
+    this.mode = 'json_object',
     this.schemaNamePrefix = 'immersive_reader_v1',
     this.strict = true,
     this.vendorAdapterId,
@@ -361,8 +361,8 @@ class TextAnalysisConfig {
   /// 默认模型上下文窗口（1M Token）
   static const int defaultContextWindowTokens = 1000000;
 
-  /// 默认模型最大输出 Token（留空为 null 时请求不传该字段）
-  static const int defaultMaxOutputTokens = 12800;
+  /// 默认模型最大输出 Token（8192，留空为 null 时请求不传该字段）
+  static const int defaultMaxOutputTokens = 8192;
 
   final String id;
   final String providerId;
@@ -1188,7 +1188,7 @@ class RetryConfig {
   final bool respectRetryAfter;
 
   const RetryConfig({
-    this.maxAttempts = 3,
+    this.maxAttempts = 4,
     this.initialBackoffMs = 1000,
     this.maxBackoffMs = 30000,
     this.jitterRatio = 0.2,
@@ -1344,7 +1344,7 @@ class ImmersiveConfig {
     List<TextAnalysisConfig>? textAnalysisModels,
     String? primaryTextModelId,
     String? fallbackTextModelId,
-    int textFailoverThreshold = 2,
+    int textFailoverThreshold = 3,
     required TtsConfig tts,
     required BookDefaultsConfig bookDefaults,
     AnalysisPipelineConfig analysisPipeline = const AnalysisPipelineConfig(),
@@ -1829,7 +1829,7 @@ class ImmersiveConfigValidator {
           issues,
           min: 1,
         ) ??
-        2;
+        3;
     final tts = _parseTts(root['tts'], issues);
     final bookDefaults = _parseBookDefaults(root['book_defaults'], issues);
     final pipeline = _parsePipeline(root['analysis_pipeline'], issues);
@@ -2514,7 +2514,7 @@ class ImmersiveConfigValidator {
         soMap,
         'mode',
         '$pathPrefix.structured_output.mode',
-        const {'json_schema', 'vendor_native'},
+        const {'json_object', 'json_schema', 'vendor_native'},
         issues,
       );
       final prefix = _reqNonEmptyString(

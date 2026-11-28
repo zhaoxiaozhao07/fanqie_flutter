@@ -253,6 +253,15 @@ class ImmersiveConfigService {
       migrated = true;
     }
 
+    // 应用内默认配置平滑升级：统一采用 OpenAI 兼容 json_object 模式、8192 输出上限及 3 次重试切兜底
+    if (configFile == null) {
+      final upgraded = upgradeLegacyOrCloudTextModels(config);
+      if (!identical(upgraded, config)) {
+        config = upgraded;
+        migrated = true;
+      }
+    }
+
     if (migrated) {
       await saveConfig(config, configFile: file);
     }
@@ -319,6 +328,56 @@ class ImmersiveConfigService {
       databasePath: resolve(storage.databasePath),
       audioCacheDir: resolve(storage.audioCacheDir),
       tempDir: resolve(storage.tempDir),
+    );
+  }
+
+  /// 将旧版或云端拉取的文本模型配置平滑升级为标准 json_object 模式、8192 输出上限及 3 次重试阈值
+  static ImmersiveConfig upgradeLegacyOrCloudTextModels(ImmersiveConfig config) {
+    var changed = false;
+    TextAnalysisConfig upgradeSingle(TextAnalysisConfig m) {
+      var next = m;
+      if (next.structuredOutput.mode == 'vendor_native') {
+        next = next.copyWith(
+          structuredOutput: next.structuredOutput.copyWith(
+            mode: 'json_object',
+            vendorAdapterId: null,
+          ),
+        );
+        changed = true;
+      }
+      if (next.maxOutputTokens == 12800) {
+        next = next.copyWith(
+          maxOutputTokens: TextAnalysisConfig.defaultMaxOutputTokens,
+        );
+        changed = true;
+      }
+      return next;
+    }
+
+    final nextModels = config.textAnalysisModels.map(upgradeSingle).toList();
+    final nextPrimary = upgradeSingle(config.textAnalysis);
+    final nextThreshold =
+        config.textFailoverThreshold < 3 ? 3 : config.textFailoverThreshold;
+    if (nextThreshold != config.textFailoverThreshold) {
+      changed = true;
+    }
+    var nextRetry = config.retry;
+    if (nextRetry.maxAttempts < 4) {
+      nextRetry = RetryConfig(
+        maxAttempts: 4,
+        initialBackoffMs: nextRetry.initialBackoffMs,
+        maxBackoffMs: nextRetry.maxBackoffMs,
+        jitterRatio: nextRetry.jitterRatio,
+        respectRetryAfter: nextRetry.respectRetryAfter,
+      );
+      changed = true;
+    }
+    if (!changed) return config;
+    return config.copyWith(
+      textAnalysis: nextPrimary,
+      textAnalysisModels: nextModels,
+      textFailoverThreshold: nextThreshold,
+      retry: nextRetry,
     );
   }
 

@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 
 import '../../app_theme.dart';
-import '../../immersive/models/immersive_config.dart';
 import '../../services/reader_platform.dart';
 import '../../widgets/reader_modal.dart';
 import '../models/webdav_config.dart';
@@ -637,16 +636,6 @@ class _WebDavSyncSheetState extends State<WebDavSyncSheet>
               isDense: true,
             ),
           ),
-          if (isInsecureRemoteHttpUrl(
-            WebDavConfig.normalizeServerUrl(_urlCtrl.text),
-          ))
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Text(
-                '安全提示：当前地址使用明文 HTTP 协议，公共网络下存在凭据被窃听风险，建议改用 HTTPS。',
-                style: TextStyle(fontSize: 11, color: Colors.orange.shade800),
-              ),
-            ),
           const SizedBox(height: 10),
           TextField(
             key: const ValueKey('webdav-user-field'),

@@ -321,7 +321,7 @@ class ImmersiveNativeSchemas {
         m['evidence_unit_ids'] = <String>[];
       }
       if (!m.containsKey('evidence_type') || m['evidence_type'] == null) {
-        m['evidence_type'] = 'explicit';
+        m['evidence_type'] = EvidenceType.explicitAttribution;
       }
       const allowedAssignmentKeys = {
         'source_unit_ids',
@@ -333,7 +333,17 @@ class ImmersiveNativeSchemas {
       _sanitizeToAllowedKeys(m, allowedAssignmentKeys);
       _assertRequiredKeys(m, allowedAssignmentKeys, 'assignments[$i]');
       _assertStringList(m['source_unit_ids'], 'assignments[$i].source_unit_ids');
-      final kind = m['kind'];
+      var kind = m['kind'];
+      if (kind is String) {
+        final lowerKind = kind.trim().toLowerCase();
+        if (lowerKind == 'monologue' || lowerKind == 'thought') {
+          kind = AllocationKind.innerMonologue;
+          m['kind'] = kind;
+        } else if (lowerKind == 'quote' || lowerKind == 'quoted') {
+          kind = AllocationKind.quotedText;
+          m['kind'] = kind;
+        }
+      }
       if (kind is! String || !AllocationKind.values.contains(kind)) {
         throw TextModelException(
           kind: TextModelErrorKind.schemaViolation,
@@ -354,7 +364,20 @@ class ImmersiveNativeSchemas {
         m['evidence_unit_ids'],
         'assignments[$i].evidence_unit_ids',
       );
-      final et = m['evidence_type'];
+      var et = m['evidence_type'];
+      if (et is String) {
+        final lowerEt = et.trim().toLowerCase();
+        if (lowerEt == 'explicit' || lowerEt == 'direct') {
+          et = EvidenceType.explicitAttribution;
+          m['evidence_type'] = et;
+        } else if (lowerEt == 'continuation' || lowerEt == 'continued') {
+          et = EvidenceType.confirmedContinuation;
+          m['evidence_type'] = et;
+        } else if (lowerEt == 'inference' || lowerEt == 'context') {
+          et = EvidenceType.contextInference;
+          m['evidence_type'] = et;
+        }
+      }
       if (et is! String || !EvidenceType.values.contains(et)) {
         throw TextModelException(
           kind: TextModelErrorKind.schemaViolation,
@@ -877,6 +900,8 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
     String? overrideReasoningEffort,
     bool omitReasoningEffort = false,
     String? overrideStructuredMode,
+    int? overrideMaxOutputTokens,
+    String? overrideOutputLimitParam,
   }) {
     if (config.structuredOutput.allowPromptOnlyFallback) {
       throw const TextModelException(
@@ -895,12 +920,22 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
 
     final schemaName =
         '${config.structuredOutput.schemaNamePrefix}_$taskSchemaSuffix';
+    final mode = overrideStructuredMode ?? config.structuredOutput.mode;
+
+    // OpenAI / DeepSeek json_object 模式要求提示词中显式包含 json 字样
+    var effectiveSystemMsg = systemMessage;
+    if (mode == 'json_object' &&
+        !systemMessage.toLowerCase().contains('json') &&
+        !userMessage.toLowerCase().contains('json')) {
+      effectiveSystemMsg =
+          '$systemMessage\nPlease output strictly in valid JSON format.';
+    }
 
     final body = <String, dynamic>{
       ...config.extraBody,
       'model': config.modelId,
       'messages': [
-        {'role': 'system', 'content': systemMessage},
+        {'role': 'system', 'content': effectiveSystemMsg},
         {'role': 'user', 'content': userMessage},
       ],
       'stream': false,
@@ -934,8 +969,11 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
     }
 
     // 最大输出非空时按配置发送输出上限字段；留空（null）时严格不传入该字段
-    if (config.maxOutputTokens != null) {
-      body[config.outputLimitParameter] = config.maxOutputTokens;
+    final effectiveMaxOut = overrideMaxOutputTokens ?? config.maxOutputTokens;
+    final effectiveLimitParam =
+        overrideOutputLimitParam ?? config.outputLimitParameter;
+    if (effectiveMaxOut != null) {
+      body[effectiveLimitParam] = effectiveMaxOut;
     }
 
     // temperature 为 null 时严格省略，不发送 null 字符串
@@ -943,13 +981,14 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       body['temperature'] = config.temperature;
     }
 
-    final mode = overrideStructuredMode ?? config.structuredOutput.mode;
     final useVendorToolCall =
         mode == 'vendor_native' &&
         (overrideStructuredMode == 'vendor_native' ||
             config.structuredOutput.vendorAdapterId ==
                 'openai_tool_call_schema');
-    if (mode == 'json_schema') {
+    if (mode == 'json_object') {
+      body['response_format'] = {'type': 'json_object'};
+    } else if (mode == 'json_schema') {
       body['response_format'] = {
         'type': 'json_schema',
         'json_schema': {
@@ -1052,35 +1091,52 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
     return resp;
   }
 
+  /// 标准 OpenAI 兼容模型 JSON 格式化输出测试系统提示词模板
+  static const jsonOutputTestSystemPrompt = '''
+The user will provide some exam text. Please parse the "question" and "answer" and output them in JSON format.
+
+EXAMPLE INPUT:
+Which is the highest mountain in the world? Mount Everest.
+
+EXAMPLE JSON OUTPUT:
+{
+    "question": "Which is the highest mountain in the world?",
+    "answer": "Mount Everest"
+}
+''';
+
+  /// 标准 OpenAI 兼容模型 JSON 格式化输出测试用户输入模板
+  static const jsonOutputTestUserPrompt =
+      'Which is the longest river in the world? The Nile River.';
+
   @override
   Future<AnalysisProviderTestResult> testProvider({
     required TextAnalysisConfig config,
     required String apiKey,
   }) async {
-    final modeDesc = config.structuredOutput.mode == 'vendor_native'
-        ? 'vendor_native(${config.structuredOutput.vendorAdapterId})'
-        : 'json_schema';
+    const modeDesc = 'json_object';
     final sw = Stopwatch()..start();
     try {
       StructuredModelResponse resp;
       try {
-        resp = await _runProbeChunk(config, apiKey);
+        resp = await _runJsonObjectTemplateProbe(config, apiKey);
       } on TextModelException catch (e) {
         if (e.kind == TextModelErrorKind.rateLimited) {
           await Future<void>.delayed(
             e.retryAfter ?? const Duration(seconds: 2),
           );
-          resp = await _runProbeChunk(config, apiKey);
+          resp = await _runJsonObjectTemplateProbe(config, apiKey);
         } else {
           rethrow;
         }
       }
       sw.stop();
-      final assignments = resp.data['assignments'] as List;
-      if (assignments.isEmpty) {
+      final question = resp.data['question']?.toString().trim() ?? '';
+      final answer = resp.data['answer']?.toString().trim() ?? '';
+      if (question.isEmpty || answer.isEmpty) {
         return AnalysisProviderTestResult(
           success: false,
-          message: '接口返回了空的 assignments 列表，结构化输出未产生有效内容',
+          message: '${config.modelId} 不支持 JSON 格式化输出（返回 JSON 缺少 question 或 answer 字段）',
           latencyMs: sw.elapsedMilliseconds,
           modeUsed: modeDesc,
           reasoningTokens: resp.reasoningTokens,
@@ -1089,16 +1145,24 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       return AnalysisProviderTestResult(
         success: true,
         message:
-            '${config.modelId} JSON 结构化测试通过（${assignments.length} 条分配，耗时 ${sw.elapsedMilliseconds}ms，思考档位=${config.thinkingLevel}，思考 token=${resp.reasoningTokens}）',
+            '${config.modelId} JSON 格式化输出测试通过（question/answer 解析正确，耗时 ${sw.elapsedMilliseconds}ms）',
         latencyMs: sw.elapsedMilliseconds,
         modeUsed: modeDesc,
         reasoningTokens: resp.reasoningTokens,
       );
     } on TextModelException catch (e) {
       sw.stop();
+      if (e.kind == TextModelErrorKind.authFailed) {
+        return AnalysisProviderTestResult(
+          success: false,
+          message: e.message,
+          latencyMs: sw.elapsedMilliseconds,
+          modeUsed: modeDesc,
+        );
+      }
       return AnalysisProviderTestResult(
         success: false,
-        message: '${config.modelId} 测试失败：${e.message}',
+        message: '${config.modelId} 不支持 JSON 格式化输出（${e.message}）',
         latencyMs: sw.elapsedMilliseconds,
         modeUsed: modeDesc,
       );
@@ -1106,31 +1170,44 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       sw.stop();
       return AnalysisProviderTestResult(
         success: false,
-        message: '${config.modelId} 连接测试异常：$e',
+        message: '${config.modelId} 不支持 JSON 格式化输出（连接或解析异常：$e）',
         latencyMs: sw.elapsedMilliseconds,
         modeUsed: modeDesc,
       );
     }
   }
 
-  Future<StructuredModelResponse> _runProbeChunk(
+  /// 使用标准 json_object 示例模板探测模型是否支持 JSON 格式化输出（禁止切换到其他模式兜底）
+  Future<StructuredModelResponse> _runJsonObjectTemplateProbe(
     TextAnalysisConfig config,
     String apiKey,
   ) {
-    return analyzeChunk(
-      config: config,
+    final probeCfg = config.copyWith(
+      structuredOutput: const StructuredOutputConfig(
+        mode: 'json_object',
+        schemaNamePrefix: 'immersive_reader_v1',
+        strict: true,
+        vendorAdapterId: null,
+        allowPromptOnlyFallback: false,
+      ),
+    );
+    return _invokeStructured(
+      config: probeCfg,
       apiKey: apiKey,
-      systemMessage:
-          '你是沉浸式听书角色分配分析器。请分析 target_units 的每一条原文单元，'
-          '非直接对白（narration/inner_monologue/quoted_text）speaker_ref 为 "narrator"；'
-          '已有角色用其 ID；新角色用 "local:new_1" 并在 new_character_proposals 中声明。'
-          '候选人物音色：vp_test_male(male), vp_test_female(female)；固定旁白：narrator。',
-      userMessage:
-          'target_units:\n'
-          'u1: 林岚问：\n'
-          'u2: “你来了？”\n'
-          'u3: 陈舟答道：\n'
-          'u4: “刚到。”',
+      taskSchemaSuffix: 'json_probe_v1',
+      toolDescription: 'Parse exam question and answer into JSON format',
+      schema: const {
+        'type': 'object',
+        'required': ['question', 'answer'],
+        'properties': {
+          'question': {'type': 'string'},
+          'answer': {'type': 'string'},
+        },
+      },
+      systemMessage: jsonOutputTestSystemPrompt,
+      userMessage: jsonOutputTestUserPrompt,
+      overrideStructuredMode: 'json_object',
+      allowProtocolNegotiation: false,
     );
   }
 
@@ -1148,6 +1225,8 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
     bool allowAdaptiveRetry = true,
     String? overrideStructuredMode,
     bool allowProtocolNegotiation = true,
+    int? overrideMaxOutputTokens,
+    String? overrideOutputLimitParam,
   }) async {
     final modelTag = config.displayName.trim().isNotEmpty
         ? config.displayName.trim()
@@ -1155,6 +1234,8 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
     final activeMode = overrideStructuredMode ?? config.structuredOutput.mode;
     final alternateMode = activeMode == 'vendor_native'
         ? 'json_schema'
+        : activeMode == 'json_schema'
+        ? 'json_object'
         : 'vendor_native';
 
     if (isCancelled?.call() == true) {
@@ -1183,6 +1264,8 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       overrideReasoningEffort: overrideReasoningEffort,
       omitReasoningEffort: omitReasoningEffort,
       overrideStructuredMode: overrideStructuredMode,
+      overrideMaxOutputTokens: overrideMaxOutputTokens,
+      overrideOutputLimitParam: overrideOutputLimitParam,
     );
 
     final headers = <String, String>{
@@ -1295,7 +1378,62 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
       if (status != 200) {
         final errSummary = _extractProviderErrorMessage(bodyStr);
         final lower = errSummary.toLowerCase();
-        // 自适应兼容：若服务端拒绝思考控制参数，自动去掉该参数按纯标准 OpenAI 请求重试一次
+        // 自适应兼容 1：服务端不支持 max_completion_tokens 字段时，自动降级为传统 max_tokens
+        if (overrideOutputLimitParam == null &&
+            payload.containsKey('max_completion_tokens') &&
+            lower.contains('max_completion_tokens') &&
+            (lower.contains('unknown') ||
+                lower.contains('unsupported') ||
+                lower.contains('unrecognized') ||
+                lower.contains('invalid') ||
+                lower.contains('extra'))) {
+          timer.cancel();
+          return await _invokeStructured(
+            config: config,
+            apiKey: apiKey,
+            taskSchemaSuffix: taskSchemaSuffix,
+            toolDescription: toolDescription,
+            schema: schema,
+            systemMessage: systemMessage,
+            userMessage: userMessage,
+            isCancelled: isCancelled,
+            overrideReasoningEffort: overrideReasoningEffort,
+            omitReasoningEffort: omitReasoningEffort,
+            allowAdaptiveRetry: allowAdaptiveRetry,
+            overrideStructuredMode: overrideStructuredMode,
+            allowProtocolNegotiation: allowProtocolNegotiation,
+            overrideMaxOutputTokens: overrideMaxOutputTokens,
+            overrideOutputLimitParam: 'max_tokens',
+          );
+        }
+        // 自适应兼容 2：配置的最大输出超过模型服务端上限（如 DeepSeek 上限 8192）时，自动钳制为 8192 重试
+        final currentLimit = overrideMaxOutputTokens ?? config.maxOutputTokens;
+        if (overrideMaxOutputTokens == null &&
+            currentLimit != null &&
+            currentLimit > 8192 &&
+            (lower.contains('max_tokens') ||
+                lower.contains('max_completion_tokens') ||
+                lower.contains('8192'))) {
+          timer.cancel();
+          return await _invokeStructured(
+            config: config,
+            apiKey: apiKey,
+            taskSchemaSuffix: taskSchemaSuffix,
+            toolDescription: toolDescription,
+            schema: schema,
+            systemMessage: systemMessage,
+            userMessage: userMessage,
+            isCancelled: isCancelled,
+            overrideReasoningEffort: overrideReasoningEffort,
+            omitReasoningEffort: omitReasoningEffort,
+            allowAdaptiveRetry: allowAdaptiveRetry,
+            overrideStructuredMode: overrideStructuredMode,
+            allowProtocolNegotiation: allowProtocolNegotiation,
+            overrideMaxOutputTokens: 8192,
+            overrideOutputLimitParam: overrideOutputLimitParam,
+          );
+        }
+        // 自适应兼容 3：若服务端拒绝思考控制参数，自动去掉该参数按纯标准 OpenAI 请求重试一次
         if (allowAdaptiveRetry &&
             !omitReasoningEffort &&
             payload.containsKey('reasoning_effort') &&
@@ -1320,10 +1458,13 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
             allowAdaptiveRetry: false,
             overrideStructuredMode: overrideStructuredMode,
             allowProtocolNegotiation: allowProtocolNegotiation,
+            overrideMaxOutputTokens: overrideMaxOutputTokens,
+            overrideOutputLimitParam: overrideOutputLimitParam,
           );
         }
         if (lower.contains('response_format') ||
             lower.contains('json_schema') ||
+            lower.contains('json_object') ||
             lower.contains('tool_choice') ||
             lower.contains('tools') ||
             lower.contains('structured')) {
@@ -1343,6 +1484,8 @@ class OpenAiChatTextModelAdapter implements TextModelAdapter {
               allowAdaptiveRetry: allowAdaptiveRetry,
               overrideStructuredMode: alternateMode,
               allowProtocolNegotiation: false,
+              overrideMaxOutputTokens: overrideMaxOutputTokens,
+              overrideOutputLimitParam: overrideOutputLimitParam,
             );
           }
           throw TextModelException(
